@@ -1,7 +1,0 @@
-numpy
-grpcio
-protobuf
-nvidia-ml-py3
-pickle-mixin
-configparser
-watchdog
