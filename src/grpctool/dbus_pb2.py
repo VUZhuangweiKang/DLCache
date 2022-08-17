@@ -17,7 +17,7 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\ndbus.proto\x12\x04\x64\x62us\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1bgoogle/protobuf/empty.proto\"0\n\nCredential\x12\x10\n\x08username\x18\x01 \x02(\t\x12\x10\n\x08password\x18\x02 \x02(\t\"W\n\x06S3Auth\x12\x19\n\x11\x61ws_access_key_id\x18\x01 \x02(\t\x12\x1d\n\x15\x61ws_secret_access_key\x18\x02 \x02(\t\x12\x13\n\x0bregion_name\x18\x03 \x02(\t\"h\n\x0e\x43onnectRequest\x12\x1e\n\x04\x63red\x18\x01 \x02(\x0b\x32\x10.dbus.Credential\x12\x1c\n\x06s3auth\x18\x02 \x02(\x0b\x32\x0c.dbus.S3Auth\x12\x18\n\ncreateUser\x18\x03 \x01(\x08:\x04true\"5\n\x0f\x43onnectResponse\x12\x14\n\x02rc\x18\x01 \x02(\x0e\x32\x08.dbus.RC\x12\x0c\n\x04resp\x18\x02 \x02(\t\"<\n\x0cResourceInfo\x12\x15\n\rCPUMemoryFree\x18\x01 \x01(\x03\x12\x15\n\rGPUMemoryFree\x18\x02 \x01(\x03\"8\n\nDataSource\x12\x0c\n\x04name\x18\x01 \x02(\t\x12\x0e\n\x06\x62ucket\x18\x02 \x02(\t\x12\x0c\n\x04keys\x18\x03 \x03(\t\"8\n\x03QoS\x12\x16\n\x08UseCache\x18\x01 \x01(\x08:\x04true\x12\x19\n\x0bLazyLoading\x18\x02 \x01(\x08:\x04true\"\xbb\x01\n\x0fRegisterRequest\x12\x1e\n\x04\x63red\x18\x01 \x02(\x0b\x32\x10.dbus.Credential\x12\x0e\n\x06nodeIP\x18\x02 \x02(\t\x12$\n\ndatasource\x18\x03 \x02(\x0b\x32\x10.dbus.DataSource\x12\x14\n\x0cnodeWeights\x18\x04 \x03(\t\x12\x16\n\x03qos\x18\x05 \x01(\x0b\x32\t.dbus.QoS\x12$\n\x08resource\x18\x06 \x01(\x0b\x32\x12.dbus.ResourceInfo\"\x85\x01\n\x10RegisterResponse\x12\x14\n\x02rc\x18\x01 \x02(\x0e\x32\x08.dbus.RC\x12(\n\x07regsucc\x18\x02 \x01(\x0b\x32\x15.dbus.RegisterSuccessH\x00\x12%\n\x06regerr\x18\x03 \x01(\x0b\x32\x13.dbus.RegisterErrorH\x00\x42\n\n\x08response\"\x1a\n\x06Policy\x12\x10\n\x08snapshot\x18\x01 \x03(\t\"H\n\x07JobInfo\x12\r\n\x05jobId\x18\x01 \x02(\t\x12.\n\ncreateTime\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"M\n\x0fRegisterSuccess\x12\x1c\n\x05jinfo\x18\x01 \x02(\x0b\x32\r.dbus.JobInfo\x12\x1c\n\x06policy\x18\x02 \x02(\x0b\x32\x0c.dbus.Policy\"\x1e\n\rRegisterError\x12\r\n\x05\x65rror\x18\x01 \x01(\t\"h\n\x11\x44\x65registerRequest\x12\x1e\n\x04\x63red\x18\x01 \x02(\x0b\x32\x10.dbus.Credential\x12\x1c\n\x05jinfo\x18\x02 \x02(\x0b\x32\r.dbus.JobInfo\x12\x15\n\rdeleteDataset\x18\x03 \x01(\x08\"&\n\x12\x44\x65registerResponse\x12\x10\n\x08response\x18\x01 \x01(\t\"N\n\x0f\x44\x61taMissRequest\x12\x1e\n\x04\x63red\x18\x01 \x02(\x0b\x32\x10.dbus.Credential\x12\x0e\n\x06\x62ucket\x18\x02 \x02(\t\x12\x0b\n\x03key\x18\x03 \x02(\t\"$\n\x10\x44\x61taMissResponse\x12\x10\n\x08response\x18\x01 \x01(\x08\"\x81\x01\n\x07LogItem\x12(\n\x04time\x18\x01 \x02(\x0b\x32\x1a.google.protobuf.Timestamp\x12\r\n\x05jobId\x18\x02 \x02(\t\x12\x1d\n\x05level\x18\x03 \x02(\x0e\x32\x0e.dbus.LogLevel\x12\r\n\x05\x65poch\x18\x04 \x02(\x05\x12\x0f\n\x07\x64\x65tails\x18\x05 \x01(\t*b\n\x02RC\x12\r\n\tCONNECTED\x10\x00\x12\x0b\n\x07NO_USER\x10\x01\x12\x12\n\x0eWRONG_PASSWORD\x10\x02\x12\x10\n\x0c\x44ISCONNECTED\x10\x03\x12\n\n\x06\x46\x41ILED\x10\x04\x12\x0e\n\nREGISTERED\x10\x05**\n\x08LogLevel\x12\x08\n\x04INFO\x10\x00\x12\t\n\x05\x44\x45\x42UG\x10\x01\x12\t\n\x05\x45RROR\x10\x02\x32\x46\n\nConnection\x12\x38\n\x07\x63onnect\x12\x14.dbus.ConnectRequest\x1a\x15.dbus.ConnectResponse\"\x00\x32\x8e\x01\n\x0cRegistration\x12;\n\x08register\x12\x15.dbus.RegisterRequest\x1a\x16.dbus.RegisterResponse\"\x00\x12\x41\n\nderegister\x12\x17.dbus.DeregisterRequest\x1a\x18.dbus.DeregisterResponse\"\x00\x32\x43\n\x08\x44\x61taMiss\x12\x37\n\x04\x63\x61ll\x12\x15.dbus.DataMissRequest\x1a\x16.dbus.DataMissResponse\"\x00\x32;\n\x06Logger\x12\x31\n\x04\x63\x61ll\x12\r.dbus.LogItem\x1a\x16.google.protobuf.Empty\"\x00(\x01')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\ndbus.proto\x12\x04\x64\x62us\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1bgoogle/protobuf/empty.proto\"0\n\nCredential\x12\x10\n\x08username\x18\x01 \x02(\t\x12\x10\n\x08password\x18\x02 \x02(\t\"W\n\x06S3Auth\x12\x19\n\x11\x61ws_access_key_id\x18\x01 \x02(\t\x12\x1d\n\x15\x61ws_secret_access_key\x18\x02 \x02(\t\x12\x13\n\x0bregion_name\x18\x03 \x02(\t\"h\n\x0e\x43onnectRequest\x12\x1e\n\x04\x63red\x18\x01 \x02(\x0b\x32\x10.dbus.Credential\x12\x1c\n\x06s3auth\x18\x02 \x02(\x0b\x32\x0c.dbus.S3Auth\x12\x18\n\ncreateUser\x18\x03 \x01(\x08:\x04true\"5\n\x0f\x43onnectResponse\x12\x14\n\x02rc\x18\x01 \x02(\x0e\x32\x08.dbus.RC\x12\x0c\n\x04resp\x18\x02 \x02(\t\"<\n\x0cResourceInfo\x12\x15\n\rCPUMemoryFree\x18\x01 \x01(\x03\x12\x15\n\rGPUMemoryFree\x18\x02 \x01(\x03\"8\n\nDataSource\x12\x0c\n\x04name\x18\x01 \x02(\t\x12\x0e\n\x06\x62ucket\x18\x02 \x02(\t\x12\x0c\n\x04keys\x18\x03 \x03(\t\"8\n\x03QoS\x12\x16\n\x08UseCache\x18\x01 \x01(\x08:\x04true\x12\x19\n\x0bLazyLoading\x18\x02 \x01(\x08:\x04true\"\xab\x01\n\x0fRegisterRequest\x12\x1e\n\x04\x63red\x18\x01 \x02(\x0b\x32\x10.dbus.Credential\x12$\n\ndatasource\x18\x02 \x02(\x0b\x32\x10.dbus.DataSource\x12\x14\n\x0cnodeSequence\x18\x03 \x03(\t\x12\x16\n\x03qos\x18\x04 \x01(\x0b\x32\t.dbus.QoS\x12$\n\x08resource\x18\x05 \x01(\x0b\x32\x12.dbus.ResourceInfo\"\x85\x01\n\x10RegisterResponse\x12\x14\n\x02rc\x18\x01 \x02(\x0e\x32\x08.dbus.RC\x12(\n\x07regsucc\x18\x02 \x01(\x0b\x32\x15.dbus.RegisterSuccessH\x00\x12%\n\x06regerr\x18\x03 \x01(\x0b\x32\x13.dbus.RegisterErrorH\x00\x42\n\n\x08response\"2\n\x0fRegisterSuccess\x12\r\n\x05jobId\x18\x01 \x02(\t\x12\x10\n\x08mongoUri\x18\x02 \x02(\t\"\x1e\n\rRegisterError\x12\r\n\x05\x65rror\x18\x01 \x01(\t\"Y\n\x11\x44\x65registerRequest\x12\x1e\n\x04\x63red\x18\x01 \x02(\x0b\x32\x10.dbus.Credential\x12\r\n\x05jobId\x18\x02 \x02(\t\x12\x15\n\rdeleteDataset\x18\x03 \x01(\x08\"&\n\x12\x44\x65registerResponse\x12\x10\n\x08response\x18\x01 \x01(\t\"?\n\x0f\x44\x61taMissRequest\x12\x1e\n\x04\x63red\x18\x01 \x02(\x0b\x32\x10.dbus.Credential\x12\x0c\n\x04\x65tag\x18\x02 \x02(\t\"$\n\x10\x44\x61taMissResponse\x12\x10\n\x08response\x18\x01 \x01(\x08\"\x81\x01\n\x07LogItem\x12(\n\x04time\x18\x01 \x02(\x0b\x32\x1a.google.protobuf.Timestamp\x12\r\n\x05jobId\x18\x02 \x02(\t\x12\x1d\n\x05level\x18\x03 \x02(\x0e\x32\x0e.dbus.LogLevel\x12\r\n\x05\x65poch\x18\x04 \x02(\x05\x12\x0f\n\x07\x64\x65tails\x18\x05 \x01(\t*b\n\x02RC\x12\r\n\tCONNECTED\x10\x00\x12\x0b\n\x07NO_USER\x10\x01\x12\x12\n\x0eWRONG_PASSWORD\x10\x02\x12\x10\n\x0c\x44ISCONNECTED\x10\x03\x12\n\n\x06\x46\x41ILED\x10\x04\x12\x0e\n\nREGISTERED\x10\x05**\n\x08LogLevel\x12\x08\n\x04INFO\x10\x00\x12\t\n\x05\x44\x45\x42UG\x10\x01\x12\t\n\x05\x45RROR\x10\x02\x32\x46\n\nConnection\x12\x38\n\x07\x63onnect\x12\x14.dbus.ConnectRequest\x1a\x15.dbus.ConnectResponse\"\x00\x32\x8e\x01\n\x0cRegistration\x12;\n\x08register\x12\x15.dbus.RegisterRequest\x1a\x16.dbus.RegisterResponse\"\x00\x12\x41\n\nderegister\x12\x17.dbus.DeregisterRequest\x1a\x18.dbus.DeregisterResponse\"\x00\x32\x43\n\x08\x44\x61taMiss\x12\x37\n\x04\x63\x61ll\x12\x15.dbus.DataMissRequest\x1a\x16.dbus.DataMissResponse\"\x00\x32;\n\x06Logger\x12\x31\n\x04\x63\x61ll\x12\r.dbus.LogItem\x1a\x16.google.protobuf.Empty\"\x00(\x01')
 
 _RC = DESCRIPTOR.enum_types_by_name['RC']
 RC = enum_type_wrapper.EnumTypeWrapper(_RC)
@@ -43,8 +43,6 @@ _DATASOURCE = DESCRIPTOR.message_types_by_name['DataSource']
 _QOS = DESCRIPTOR.message_types_by_name['QoS']
 _REGISTERREQUEST = DESCRIPTOR.message_types_by_name['RegisterRequest']
 _REGISTERRESPONSE = DESCRIPTOR.message_types_by_name['RegisterResponse']
-_POLICY = DESCRIPTOR.message_types_by_name['Policy']
-_JOBINFO = DESCRIPTOR.message_types_by_name['JobInfo']
 _REGISTERSUCCESS = DESCRIPTOR.message_types_by_name['RegisterSuccess']
 _REGISTERERROR = DESCRIPTOR.message_types_by_name['RegisterError']
 _DEREGISTERREQUEST = DESCRIPTOR.message_types_by_name['DeregisterRequest']
@@ -115,20 +113,6 @@ RegisterResponse = _reflection.GeneratedProtocolMessageType('RegisterResponse', 
   })
 _sym_db.RegisterMessage(RegisterResponse)
 
-Policy = _reflection.GeneratedProtocolMessageType('Policy', (_message.Message,), {
-  'DESCRIPTOR' : _POLICY,
-  '__module__' : 'dbus_pb2'
-  # @@protoc_insertion_point(class_scope:dbus.Policy)
-  })
-_sym_db.RegisterMessage(Policy)
-
-JobInfo = _reflection.GeneratedProtocolMessageType('JobInfo', (_message.Message,), {
-  'DESCRIPTOR' : _JOBINFO,
-  '__module__' : 'dbus_pb2'
-  # @@protoc_insertion_point(class_scope:dbus.JobInfo)
-  })
-_sym_db.RegisterMessage(JobInfo)
-
 RegisterSuccess = _reflection.GeneratedProtocolMessageType('RegisterSuccess', (_message.Message,), {
   'DESCRIPTOR' : _REGISTERSUCCESS,
   '__module__' : 'dbus_pb2'
@@ -185,10 +169,10 @@ _LOGGER = DESCRIPTOR.services_by_name['Logger']
 if _descriptor._USE_C_DESCRIPTORS == False:
 
   DESCRIPTOR._options = None
-  _RC._serialized_start=1495
-  _RC._serialized_end=1593
-  _LOGLEVEL._serialized_start=1595
-  _LOGLEVEL._serialized_end=1637
+  _RC._serialized_start=1320
+  _RC._serialized_end=1418
+  _LOGLEVEL._serialized_start=1420
+  _LOGLEVEL._serialized_end=1462
   _CREDENTIAL._serialized_start=82
   _CREDENTIAL._serialized_end=130
   _S3AUTH._serialized_start=132
@@ -204,33 +188,29 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _QOS._serialized_start=502
   _QOS._serialized_end=558
   _REGISTERREQUEST._serialized_start=561
-  _REGISTERREQUEST._serialized_end=748
-  _REGISTERRESPONSE._serialized_start=751
-  _REGISTERRESPONSE._serialized_end=884
-  _POLICY._serialized_start=886
-  _POLICY._serialized_end=912
-  _JOBINFO._serialized_start=914
-  _JOBINFO._serialized_end=986
-  _REGISTERSUCCESS._serialized_start=988
-  _REGISTERSUCCESS._serialized_end=1065
-  _REGISTERERROR._serialized_start=1067
-  _REGISTERERROR._serialized_end=1097
-  _DEREGISTERREQUEST._serialized_start=1099
-  _DEREGISTERREQUEST._serialized_end=1203
-  _DEREGISTERRESPONSE._serialized_start=1205
-  _DEREGISTERRESPONSE._serialized_end=1243
-  _DATAMISSREQUEST._serialized_start=1245
-  _DATAMISSREQUEST._serialized_end=1323
-  _DATAMISSRESPONSE._serialized_start=1325
-  _DATAMISSRESPONSE._serialized_end=1361
-  _LOGITEM._serialized_start=1364
-  _LOGITEM._serialized_end=1493
-  _CONNECTION._serialized_start=1639
-  _CONNECTION._serialized_end=1709
-  _REGISTRATION._serialized_start=1712
-  _REGISTRATION._serialized_end=1854
-  _DATAMISS._serialized_start=1856
-  _DATAMISS._serialized_end=1923
-  _LOGGER._serialized_start=1925
-  _LOGGER._serialized_end=1984
+  _REGISTERREQUEST._serialized_end=732
+  _REGISTERRESPONSE._serialized_start=735
+  _REGISTERRESPONSE._serialized_end=868
+  _REGISTERSUCCESS._serialized_start=870
+  _REGISTERSUCCESS._serialized_end=920
+  _REGISTERERROR._serialized_start=922
+  _REGISTERERROR._serialized_end=952
+  _DEREGISTERREQUEST._serialized_start=954
+  _DEREGISTERREQUEST._serialized_end=1043
+  _DEREGISTERRESPONSE._serialized_start=1045
+  _DEREGISTERRESPONSE._serialized_end=1083
+  _DATAMISSREQUEST._serialized_start=1085
+  _DATAMISSREQUEST._serialized_end=1148
+  _DATAMISSRESPONSE._serialized_start=1150
+  _DATAMISSRESPONSE._serialized_end=1186
+  _LOGITEM._serialized_start=1189
+  _LOGITEM._serialized_end=1318
+  _CONNECTION._serialized_start=1464
+  _CONNECTION._serialized_end=1534
+  _REGISTRATION._serialized_start=1537
+  _REGISTRATION._serialized_end=1679
+  _DATAMISS._serialized_start=1681
+  _DATAMISS._serialized_end=1748
+  _LOGGER._serialized_start=1750
+  _LOGGER._serialized_end=1809
 # @@protoc_insertion_point(module_scope)

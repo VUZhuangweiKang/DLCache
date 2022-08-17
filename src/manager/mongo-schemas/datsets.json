@@ -1,0 +1,23 @@
+{
+    "title" : "Datasets",    
+    "bsonType": "object",
+    "required": ["ETag", "ChunkETag", "Key", "Location", "Size", "ChunkSize", "LastModified", "TotalAccessTime", "LastAccessTime"],
+    "properties": {
+        "ETag": {"bsonType": "string"},
+        "ChunkETag": {"bsonType": "string"},
+        "Part": {"bsonType": "int"},
+        "Key": {"bsonType": "string"},
+        "Location": {"bsonType": "string"},
+        "Size": {"bsonType": ["long", "int"]},
+        "ChunkSize": {"bsonType": ["long", "int"]},
+        "LastModified": {"bsonType": "timestamp"},
+        "TotalAccessTime": {"bsonType": "int"},
+        "LastAccessTime": {"bsonType": "timestamp"},
+        "Jobs": {
+            "bsonType": "array",
+            "items": {
+                "bsonType": "string"
+            }
+        }
+    }
+}

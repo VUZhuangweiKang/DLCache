@@ -56,11 +56,10 @@ message QoS {
 }
 message RegisterRequest {
     required Credential cred = 1;
-    required string nodeIP = 2;
-    required DataSource datasource = 3;
-    repeated string nodeWeights = 4;
-    optional QoS qos = 5;
-    optional ResourceInfo resource = 6;
+    required DataSource datasource = 2;
+    repeated string nodeSequence = 3;
+    optional QoS qos = 4;
+    optional ResourceInfo resource = 5;
 }
 
 message RegisterResponse {
@@ -71,16 +70,9 @@ message RegisterResponse {
     }
 }
 
-message Policy {
-    repeated string snapshot = 1;
-}
-message JobInfo {
-    required string jobId = 1;
-    optional google.protobuf.Timestamp createTime = 2;
-}
 message RegisterSuccess {
-    required JobInfo jinfo = 1;
-    required Policy policy = 2;
+    required string jobId = 1;
+    required string mongoUri = 2;
 }
 message RegisterError {
     optional string error = 1;
@@ -88,7 +80,7 @@ message RegisterError {
 // actively evict memory when DLT job deregister
 message DeregisterRequest {
     required Credential cred = 1;
-    required JobInfo jinfo = 2;
+    required string jobId = 2;
     optional bool deleteDataset = 3;
 }
 message DeregisterResponse {
@@ -101,8 +93,7 @@ service DataMiss {
 }
 message DataMissRequest {
     required Credential cred = 1;
-    required string bucket = 2;
-    required string key = 3;
+    required string etag = 2;
 }
 message DataMissResponse {
     optional bool response = 1;

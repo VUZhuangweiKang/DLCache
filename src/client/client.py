@@ -1,5 +1,4 @@
 from __future__ import print_function
-from os import environ
 import grpc
 import signal
 import json
@@ -7,8 +6,6 @@ import time
 import glob
 from pathlib import Path
 import configparser
-
-from more_itertools import bucket
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
@@ -27,13 +24,13 @@ class Client(pyinotify.ProcessEvent):
     def __init__(self):
         secret = configparser.ConfigParser()
         secret.read("/secret/client.conf")
-        aws_s3_sec = dict(secret["aws_s3"].items())
+        aws_s3_sec = dict(secret["AWS"].items())
         
         self.jobsmeta = []
         for f in glob.glob('/jobsmeta/*.json'):
             with open(f, 'rb') as f:
                 job = json.load(f)
-            if job['qos']['UseCache']:
+            if job['qos']['usecache']:
                 self.jobsmeta.append(job)
         
         if len(self.jobsmeta) > 0:
@@ -85,9 +82,8 @@ class Client(pyinotify.ProcessEvent):
             if 'keys' not in ds: ds['keys'] = []
             request = pb.RegisterRequest(
                 cred=self.cred,
-                nodeIP=environ.get('NODE_IP'),
                 datasource=pb.DataSource(name=ds['name'], bucket=ds['bucket'], keys=ds['keys']),
-                nodeWeights=job['nodeWeights'],
+                nodeSequence=job['nodeSequence'],
                 qos=ParseDict(qos, pb.QoS(), ignore_unknown_fields=True),
                 resource=pb.ResourceInfo(CPUMemoryFree=get_cpu_free_mem(), GPUMemoryFree=get_gpu_free_mem())
             )
@@ -104,7 +100,7 @@ class Client(pyinotify.ProcessEvent):
             while not self.pf_paths: pass
             for _ in range(self.waterline): 
                 self.prefetch()
-            with open('/share/{}.json'.format(job['name']), 'w') as f:
+            with open('/share/{}.json'.format(job['name']), 'w') as f:  # marshelled registration response
                 json.dump(MessageToDict(resp), f)
 
     def handle_datamiss(self):
@@ -119,7 +115,7 @@ class Client(pyinotify.ProcessEvent):
                 logger.warning('failed to request missing key {}'.format(key))
 
     def prefetch(self):
-        if self.runtime_conf['LazyLoading']:
+        if self.runtime_conf['lazyloading']:
             for _ in range(self.runtime_conf['num_workers']):
                 for path in self.pf_paths[self.pidx]:
                     if self.pidx not in self.runtime_buffer:

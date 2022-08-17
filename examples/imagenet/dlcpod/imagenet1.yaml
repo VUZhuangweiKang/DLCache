@@ -1,3 +1,17 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dlcpod-client-secret
+  namespace: default
+type: Opaque
+stringData:
+  client.conf: |
+    [AWS]
+    AWS_ACCESS_KEY_ID=<your key id>
+    AWS_SECRET_ACCESS_KEY=<your key>
+    REGION_NAME=<your region name>
+---
 apiVersion: docgroup.com/v1alpha1
 kind: DLCPod
 metadata:
@@ -21,7 +35,7 @@ spec:
       - Imagenet-Mini-Obj/val
     configurations:
       usecache: true
-      maxcachesize: 0
+      maxmemory: 0
       durabilityindisk: 1440
       lazyloading: true
     tty: true

@@ -1,9 +1,9 @@
-from asyncio import as_completed
 import os
 import json
 import concurrent.futures
 import multiprocessing
 from math import inf
+from urllib import request
 import numpy as np
 import time
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
@@ -42,30 +42,40 @@ class DLCJobDataset(Dataset):
         self.shuffle = shuffle
         self.jobname = os.environ.get('JOBNAME')
         self.__keys = keys
-        self.qos = self.load_metainfo()['qos']
-        
-        # TODO: how to decide the MaxCacheSize according to resource information?
-        self.qos['MaxCacheSize'] = 0
-        self.jobinfo = self.load_jobinfo()
-        self.chunks = []  # [[{s3key: chunk}]]
-        self.file_paths_nfs = []
-        self.__targets = None
-        self.bucket_name = self.jobinfo['datasource']['bucket']
-        if self.qos['UseCache']: # use datasource from DLCache
+        with open('/jobsmeta/{}.json'.format(self.jobname), 'r') as f:
+            self.job = json.load(f)
+        self.qos = self.job['qos']
+        self.bucket = self.job['datasource']['bucket']
+
+        if self.qos['usecache']:
+            from pymongo.mongo_client import MongoClient
+            while True:
+                try:
+                    with open("/share/{}.json".format(self.jobname), 'rb') as f:
+                        resp = json.load(f)
+                        break
+                except (FileNotFoundError, json.decoder.JSONDecodeError):
+                    pass
             self.load_cache_keys()
+            mongo_client = MongoClient(resp.mongoUri)
+            self.job_col = mongo_client.Cacher.Jobs
+            self.dataset_col = mongo_client.Cacher.Datasets
         else:
             import configparser, boto3
-            
             parser = configparser.ConfigParser()
             parser.read('/secret/client.conf')
-            s3auth = parser['aws_s3']
+            s3auth = parser['AWS']
             s3_session = boto3.Session(
-                aws_access_key_id=s3auth['aws_access_key_id'],
-                aws_secret_access_key=s3auth['aws_secret_access_key'],
-                region_name=s3auth['region_name']
+                aws_access_key_id=s3auth['AWS_ACCESS_KEY_ID'],
+                aws_secret_access_key=s3auth['AWS_SECRET_ACCESS_KEY'],
+                region_name=s3auth['REGION_NAME']
             )
             self.client = s3_session.client('s3')
             self.load_s3_keys()
+
+        self.chunks = []
+        self.file_paths_nfs = []
+        self.__targets = None
         self.load_data(0)
 
     @property
@@ -79,54 +89,36 @@ class DLCJobDataset(Dataset):
         return self.__targets
                     
     def get_data(self, index):
-        if self.qos['LazyLoading']:
+        if self.qos['lazyloading']:
             return self.load(self.data[index])
         else:
             return self.data[index]
     
     def get_target(self, index):
         return self.targets[index]
-        
-    def load_metainfo(self):
-        with open('/jobsmeta/{}.json'.format(self.jobname), 'r') as f:
-            jobinfo = json.load(f)
-        return jobinfo
-    
-    def load_jobinfo(self):
-        if self.qos['UseCache']:
-            while True:
-                try:
-                    with open("/share/{}.json".format(self.jobname), 'rb') as f:
-                        jobinfo = json.load(f)
-                        break
-                except (FileNotFoundError, json.decoder.JSONDecodeError):
-                    pass
-        else:
-            jobinfo = self.load_metainfo()
-        return dotdict(jobinfo)
 
     def load_cache_keys(self):
-        maxmem = self.qos['MaxCacheSize']*1024*1024
-        with open('/nfs-master/{}/key_lookup.json'.format(self.jobname), 'r') as f:
-            key_lookup = json.load(f)
+        maxmem = self.qos['maxmemorymill']*1e6  
+        etags = self.job_col.find_one({"Meta.JobId": self.jobname})['ETags']
+        chunks = self.dataset_col.find({"ChunkETag": etags})
+
         if self.shuffle:
-            np.random.shuffle(key_lookup)
+            np.random.shuffle(etags)
                     
-        if maxmem == 0 or self.qos['LazyLoading']:
-            self.chunks.append(list(key_lookup.values()))
+        if maxmem == 0 or self.qos['lazyloading']:
+            self.chunks.append(chunks)
         else:
             total_size = 0
             self.chunks.append([])
-            for key in key_lookup:
-                chunk = key_lookup[key]
+            for chunk in chunks:
                 s = int(chunk['Size'])
                 total_size += s
-                # any single chunk should be smaller than the MaxCacheSize
+                # any single chunk should be smaller than the MaxMemory
                 if total_size >= maxmem:
                     self.chunks.append([])
                     total_size = 0
                 elif s > maxmem:
-                    raise Exception('Object {} size is greater than assigned MaxCacheSize.'.format(key))
+                    raise Exception('Object {} size is greater than assigned MaxMemory.'.format(chunk['Key']))
                 else:
                     self.chunks[-1].append(chunk)
         
@@ -135,11 +127,11 @@ class DLCJobDataset(Dataset):
         if self.__keys is not None:
             pages = []
             for k in self.__keys:
-                pages.extend(paginator.paginate(Bucket=self.bucket_name, Prefix=k))
+                pages.extend(paginator.paginate(Bucket=self.bucket, Prefix=k))
         else:
-            pages = paginator.paginate(Bucket=self.bucket_name)
+            pages = paginator.paginate(Bucket=self.bucket)
         
-        maxmem = self.qos['MaxCacheSize']*1024*1024
+        maxmem = self.qos['maxmemorymill']*1e6
         maxmem = inf if maxmem==0 else maxmem
         total_size = 0
         self.chunks.append([])
@@ -153,40 +145,43 @@ class DLCJobDataset(Dataset):
                     self.chunks.append([])
                     total_size = 0
                 elif s > maxmem:
-                    raise Exception('File {} size is greater than assigned MaxCacheSize.'.format(item['Key']))
+                    raise Exception('File {} size is greater than assigned MaxMemory.'.format(item['Key']))
                 else:
                     self.chunks[-1].append(item)
     
     def read(self, chunk):
         key = chunk['Key']
-        if self.qos['UseCache']:
-            hashkey = chunk['HashKey']
+        if self.qos['usecache']:
+            etag = chunk['ChunkETag']
             loc = chunk['Location']
-            tmpfs_path = '/runtime/{}/{}'.format(loc, hashkey)
+            nfs_path = '/{}/{}'.format(loc, etag)
+            tmpfs_path = '/runtime/{}'.format(nfs_path)
             try:
-                path = tmpfs_path if os.path.exists(tmpfs_path) else hashkey
+                path = tmpfs_path if os.path.exists(tmpfs_path) else nfs_path
                 with open(path, 'rb') as f:
                     val = f.read()
             except FileNotFoundError:
                 with open('/share/datamiss', 'w') as f:
-                    f.writelines("{}:{}".format(self.bucket_name, key))
-                while not os.path.exists(hashkey): pass
-                with open("/{}/{}".format(loc, hashkey), 'rb') as f:
+                    f.writelines("{}:{}".format(self.bucket, key))
+                while not os.path.exists(etag): pass
+                with open(nfs_path, 'rb') as f:
                     val = f.read()
         else:
-            val = self.client.get_object(Bucket=self.bucket_name, Key=key)['Body'].read()
+            val = self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
         return val
 
     def load_data(self, index):
         self.__data = {}
         self.__keys = []        
-        if self.qos['LazyLoading']:
+        if self.qos['lazyloading']:
             # LazyLoading mode fits dataset which data items 
             # are individual files, such as image dataset
             for chunk in self.chunks[index]:
-                self.__keys.append(chunk['Key'])
-                self.file_paths_nfs.append('/{}/{}'.format(chunk['Location'], chunk['HashKey']))
-                self.__data[chunk['Key']] = chunk
+                loc = chunk['Location']
+                etag = chunk['ChunkETag']
+                self.__keys.append(etag)
+                self.file_paths_nfs.append('/{}/{}'.format(loc, etag))
+                self.__data[etag] = chunk
         else:
             # Normal mode fits tabular or block datasets, 
             # so we load a subset of the original dataset here
@@ -196,10 +191,11 @@ class DLCJobDataset(Dataset):
                     futures.append(executor.submit(self.read, chunk))
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
                     chunk = self.chunks[index][i]
-                    key = chunk['Key']
-                    self.__keys.append(key)
-                    self.file_paths_nfs.append('/{}/{}'.format(chunk['Location'], chunk['HashKey']))
-                    self.__data[key] = future.result()
+                    loc = chunk['Location']
+                    etag = chunk['ChunkETag']
+                    self.__keys.append(etag)
+                    self.file_paths_nfs.append('/{}/{}'.format(loc, etag))
+                    self.__data[etag] = future.result()
                 
         self.__data, self.__targets = self.__convert__()
     
@@ -332,13 +328,13 @@ class DLCJobDataLoader(object):
         
         self.init_loader()
         self.index = 1
-        self.lazy = self.dataset.qos['LazyLoading']
+        self.lazy = self.dataset.qos['lazyloading']
         
         # prefetch size depends on the chunk size when LazyLoading is disabled
         if not self.lazy:
             with open('/share/prefetch_policy.json', 'w') as f:
                 json.dump(f, {
-                    "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
+                    "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'lazyloading': self.lazy}, 
                     "policy": self.dataset.file_paths})
         
     def init_loader(self):
@@ -352,7 +348,7 @@ class DLCJobDataLoader(object):
             pf_paths = [file_paths[indices].tolist() for indices in loader._index_sampler]
             with open('/share/prefetch_policy.json', 'w') as f:
                 json.dump(f, {
-                    "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
+                    "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'lazyloading': self.lazy}, 
                     "policy": pf_paths})
         else:
             with open('/share/next', 'w') as f:

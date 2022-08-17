@@ -2,41 +2,41 @@
     "title" : "Job",
     "bsonType": "object",
     "required": [
-        "meta",
+        "Meta",
         "QoS",
-        "policy"
+        "Data"
     ],
     "properties": {
-        "meta": {
+        "Meta": {
             "bsonType": "object",
             "required": [
-                "username",
-                "jobId",
-                "nodeIP",
-                "datasource",
-                "resourceInfo",
-                "createTime"
+                "Username",
+                "JobId",
+                "NodeIP",
+                "Datasource",
+                "ResourceInfo",
+                "CreateTime"
             ],
             "properties": {
-                "username": {"bsonType": "string"},
-                "jobId": {"bsonType": "string"},
-                "nodeIP": {"bsonType": "string"},
-                "datasource": {
+                "Username": {"bsonType": "string"},
+                "JobId": {"bsonType": "string"},
+                "NodeIP": {"bsonType": "string"},
+                "Datasource": {
                     "bsonType": "object",
                     "required": [
-                        "name",
-                        "bucket"
+                        "Name",
+                        "Bucket"
                     ],
                     "properties": {
-                        "name": {"bsonType": "string"},
-                        "bucket": {"bsonType": "string"},
-                        "keys": {
+                        "Name": {"bsonType": "string"},
+                        "Bucket": {"bsonType": "string"},
+                        "Keys": {
                             "bsonType": "array",
                             "items": {"bsonType": "string"}
                         }
                     }
                 },
-                "resourceInfo": {
+                "ResourceInfo": {
                     "bsonType": "object",
                     "title": "resourceInfo",
                     "properties": {
@@ -45,7 +45,7 @@
                     },
                     "description": "GPU and CPU memory resource information"
                 },
-                "createTime": {"bsonType": "timestamp"}
+                "CreateTime": {"bsonType": "timestamp"}
             }
         },
         "QoS": {
@@ -61,40 +61,11 @@
             },
             "description": "QoS configuration"
         },
-        "policy": {
-            "bsonType": "object",
-            "title": "cachePolicy",
-            "required": [
-                "createTime",
-                "chunks"
-            ],
-            "properties": {
-                "createTime": {"bsonType": "timestamp"},
-                "chunks": {
-                    "bsonType": "array",
-                    "items": {
-                        "bsonType": "object",
-                        "title": "chunk",
-                        "required": [
-                            "name",
-                            "size",
-                            "lastModified",
-                            "totalAccessTime",
-                            "lastAccessTime",
-                            "location"
-                        ],
-                        "properties": {
-                            "name": {"bsonType": "string"},
-                            "size": {"bsonType": ["long", "int"]},
-                            "lastModified": {"bsonType": "int"},
-                            "totalAccessTime": {"bsonType": "int"},
-                            "lastAccessTime": {"bsonType": "timestamp"},
-                            "location": {"bsonType": "string"}
-                        }
-                    }
-                }
-            },
-            "description": "caching policy of the job"
+        "ETags": {
+            "bsonType": "array",
+            "items": {
+                "bsonType": "string"
+            }
         }
     }
 }

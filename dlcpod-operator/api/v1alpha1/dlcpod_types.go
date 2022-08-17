@@ -45,19 +45,24 @@ type ConfigMapRef struct {
 }
 
 type QoSConfigurations struct {
-	// Whether client should use Cache or s3
+	// Whether to use Cache or s3
 	// +optional
 	UseCache bool `json:"usecache"`
 
 	// Load data in a lazy way
 	// +optional
 	LazyLoading bool `json:"lazyloading"`
+
+	// Max size of the tmpfs folder
+	// +optional
+	MaxMemoryMill int64 `json:"maxmemorymill"`
 }
 
 type DataSourceStruct struct {
 	Name   string   `json:"name"`
 	Bucket string   `json:"bucket"`
 	Keys   []string `json:"keys,omitempty"`
+	ETag   string   `json:"etag,omitempty"`
 }
 
 // Container defines Kubernetes container attributes.
@@ -79,7 +84,7 @@ type Job struct {
 
 	// QoS configuration of the job from ConfigMap
 	// +optional
-	Configurations QoSConfigurations `json:"configurations,omitempty"`
+	QoS QoSConfigurations `json:"qos,omitempty"`
 
 	// Entrypoint array. Not executed within a shell.
 	// The docker image's ENTRYPOINT is used if this is not provided.
@@ -186,9 +191,9 @@ type DLCPodSpec struct {
 	// +optional
 	HostNetwork bool `json:"hostnetwork,omitempty"`
 
-	// Node sequence of downloading dataset
+	// Node weights of downloading dataset
 	// +optional
-	NodeWeights []string `json:"nodeWeights,omitempty"`
+	NodeSequence []string `json:"nodeSequence,omitempty"`
 }
 
 // DLCPodStatus defines the observed state of DLCPod

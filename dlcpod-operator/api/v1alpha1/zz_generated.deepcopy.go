@@ -132,8 +132,8 @@ func (in *DLCPodSpec) DeepCopyInto(out *DLCPodSpec) {
 			(*out)[key] = val
 		}
 	}
-	if in.NodeWeights != nil {
-		in, out := &in.NodeWeights, &out.NodeWeights
+	if in.NodeSequence != nil {
+		in, out := &in.NodeSequence, &out.NodeSequence
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
@@ -194,7 +194,7 @@ func (in *Job) DeepCopyInto(out *Job) {
 	*out = *in
 	in.DataSource.DeepCopyInto(&out.DataSource)
 	out.ConfigurationsFromConfigMap = in.ConfigurationsFromConfigMap
-	out.Configurations = in.Configurations
+	out.QoS = in.QoS
 	if in.Command != nil {
 		in, out := &in.Command, &out.Command
 		*out = make([]string, len(*in))
