@@ -13,6 +13,9 @@ import pyinotify
 import shutil
 from collections import OrderedDict
 import numpy as np
+from pymongo import MongoClient
+import datetime
+import bson
 from utils import *
 
 
@@ -66,6 +69,8 @@ class Client(pyinotify.ProcessEvent):
             
             signal.signal(signal.SIGINT, self.exit_gracefully)
             signal.signal(signal.SIGTERM, self.exit_gracefully)
+
+        self.dataset_col = None
             
     def exit_gracefully(self):
         self.channel.close()
@@ -102,6 +107,9 @@ class Client(pyinotify.ProcessEvent):
                 self.prefetch()
             with open('/share/{}.json'.format(job['name']), 'w') as f:  # marshelled registration response
                 json.dump(MessageToDict(resp), f)
+            
+            mongo_client = MongoClient(resp.mongoUri)
+            self.dataset_col = mongo_client.Cacher.Datasets
 
     def handle_datamiss(self):
         with open('/share/datamiss', 'r') as f:
@@ -145,13 +153,14 @@ class Client(pyinotify.ProcessEvent):
         self.process_IN_CREATE(event)
             
     def process_IN_CLOSE_NOWRITE(self, event):
-        if '/runtime' in event.pathname:
+        path = event.pathname
+        if '/runtime' in path:
             # pop head
             batch_index = self.runtime_buffer.keys[0]
             self.runtime_buffer[batch_index].pop(0)
             if len(self.runtime_buffer[batch_index]) == 0:
                 self.runtime_buffer.popitem(last=False)
-            shutil.rmtree(event.pathname, ignore_errors=True)
+            shutil.rmtree(path, ignore_errors=True)
             
             # tune buffer size
             if len(self.req_time) > 1:
@@ -177,6 +186,16 @@ class Client(pyinotify.ProcessEvent):
                         self.pidx -= 1
                     while len(self.runtime_buffer) < s:
                         self.prefetch()
+        elif path.split('/')[0] in nfs_servers:
+            assert self.dataset_col is not None
+            etag = path.split('/')[1]
+            now = datetime.utcnow().timestamp()
+            self.dataset_col.update_one(
+                {"ETag": etag}, 
+                {
+                    "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
+                    "$inc": {"TotalAccessTime": 1}
+                })
 
 
 if __name__ == '__main__':
@@ -187,6 +206,12 @@ if __name__ == '__main__':
     mask = pyinotify.IN_CREATE | pyinotify.IN_MODIFY | pyinotify.IN_CLOSE_NOWRITE
     wm.add_watch("/share", mask)
     wm.add_watch('/runtime', mask)
+
+    # watch data access events
+    nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
+    for svr in nfs_servers:
+        wm.add_watch(svr, mask)
+    
     notifier = pyinotify.Notifier(wm, client)
     try:
         notifier.loop()

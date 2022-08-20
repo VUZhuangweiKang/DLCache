@@ -1,4 +1,5 @@
 import concurrent.futures
+import os
 import sys
 import shutil
 import grpc
@@ -9,6 +10,7 @@ import configparser
 import multiprocessing
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
+import pyinotify
 from datetime import datetime
 from pymongo.mongo_client import MongoClient
 from utils import *
@@ -17,7 +19,7 @@ from utils import *
 logger = get_logger(name=__name__, level='debug')
 
 
-class Manager(object):
+class Manager(pyinotify.ProcessEvent):
     def __init__(self):
         parser = configparser.ConfigParser()
         parser.read('/configs/manager/manager.conf')
@@ -125,7 +127,7 @@ class Manager(object):
 
     def clone_s3obj(self, s3obj: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None):
         key = s3obj['Key']
-        s3obj['LastModified'] = int(s3obj['LastModified'].timestamp())
+        s3obj['LastModified'] = bson.timestamp.Timestamp(int(s3obj['LastModified'].timestamp()), inc=1)
         s3obj['TotalAccessTime'] = 0
         now = datetime.utcnow().timestamp()
         s3obj['LastAccessTime'] = bson.timestamp.Timestamp(int(now), inc=1)
