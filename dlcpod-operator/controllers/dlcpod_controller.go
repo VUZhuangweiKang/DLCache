@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 	"sort"
 	"sync"
@@ -29,7 +28,6 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/bigkevmcd/go-configparser"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -40,9 +38,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/VUZhuangweiKang/DLCache/tree/main/dlcpod-operator/api/v1alpha1"
-	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -52,13 +50,12 @@ const (
 	PodKind       = "Pod"
 	SecretKind    = "Secret"
 	ConfigMapKind = "ConfigMap"
-	ClientImage   = "zhuangeweikang/dlcpod:client"
+	ClientImage   = "zhuangeweikang/dlcpod-dev:client"
 )
 
 // DLCPodReconciler reconciles a DLCPod object
 type DLCPodReconciler struct {
 	client.Client
-	Log    logr.Logger
 	Scheme *runtime.Scheme
 }
 
@@ -75,8 +72,9 @@ func checkErr(err error) {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := r.Log.WithValues("dlcpod", req.NamespacedName)
+	log := log.FromContext(ctx)
 	log.Info("start reconciling")
+
 	var dlcpod v1alpha1.DLCPod
 	err := r.Get(ctx, req.NamespacedName, &dlcpod)
 	if err != nil {
@@ -206,42 +204,45 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 	secret := corev1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{Namespace: dlcpod.Namespace, Name: spec.Secret.Name}, &secret)
 	checkErr(err)
+
+	// connect to S3
 	awsctx, cancel := context.WithTimeout(context.TODO(), 20*time.Second)
 	defer cancel()
-	err = os.WriteFile(fmt.Sprintf("/tmp/%s", spec.Secret.Name), secret.Data["client.conf"], 0644)
-	checkErr(err)
-	parser, _ := configparser.NewConfigParserFromFile(fmt.Sprintf("/tmp/%s", spec.Secret.Name))
-	key, err := parser.Get("AWS", "AWS_ACCESS_KEY_ID")
-	checkErr(err)
-	secretId, err := parser.Get("AWS", "AWS_SECRET_ACCESS_KEY")
-	checkErr(err)
-
-	sessionToken, err := parser.Get("AWS", "AWS_SESSION_TOKEN")
+	key := string(secret.Data["AWS_ACCESS_KEY_ID"])
+	secretId := string(secret.Data["AWS_SECRET_ACCESS_KEY"])
+	region := string(secret.Data["REGION_NAME"])
+	sessionToken := string(secret.Data["AWS_SESSION_TOKEN"])
 	if err != nil {
-		sessionToken = "" // session token is set to None, may cause problem
+		sessionToken = ""
 	}
-	cfg, err := awsconfig.LoadDefaultConfig(awsctx, awsconfig.WithCredentialsProvider(
-		credentials.NewStaticCredentialsProvider(key, secretId, sessionToken),
-	))
+
+	cfg, err := awsconfig.LoadDefaultConfig(
+		awsctx,
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(key, secretId, sessionToken)),
+		awsconfig.WithRegion(region),
+	)
+
 	checkErr(err)
 	s3client := s3.NewFromConfig(cfg)
 
 	etags := []string{}
 	for _, job := range spec.Jobs {
 		for _, prefix := range job.DataSource.Keys {
-			var wg sync.WaitGroup
 			worker := func(wg *sync.WaitGroup, page *s3.ListObjectsV2Output) {
-				defer wg.Done()
 				for _, obj := range page.Contents {
 					etags = append(etags, *obj.ETag)
 				}
+				wg.Done()
 			}
 			paginator := s3.NewListObjectsV2Paginator(s3client, &s3.ListObjectsV2Input{
 				Bucket: &job.DataSource.Bucket,
 				Prefix: &prefix,
 			})
+			var wg sync.WaitGroup
+
+			// 连接成功，bucket,prefix也load成功，但是NextPage调用有bug
 			for paginator.HasMorePages() {
-				page, err := paginator.NextPage(context.TODO())
+				page, err := paginator.NextPage(awsctx)
 				checkErr(err)
 				wg.Add(1)
 				go worker(&wg, page)

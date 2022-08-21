@@ -1,5 +1,5 @@
 FROM ubuntu:20.04
-RUN apt update && apt install -y python3-pip
+RUN apt update && apt install -y python3-pip nano
 RUN mkdir app
 WORKDIR /app
 COPY client ./

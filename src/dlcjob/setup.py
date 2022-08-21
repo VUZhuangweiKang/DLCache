@@ -5,8 +5,8 @@ setup(
     name='dlcjob',
     version='0.3',
     license='Apache-2.0 license',
-    author="Centaurus Infrastructure",
-    author_email='centaurusinfra@gmail.com',
+    author="Zhuangwei Kang",
+    author_email='zhuangwei.kang@vanderbilt.edu',
     description="DLCache Job Dataset and DataLoader",
     package_dir={'': 'src'},
     py_modules=["DLCJob"],             # Name of the python package

@@ -1,4 +1,4 @@
-apiVersion: docgroup.com.my.domain/v1alpha1
+apiVersion: docgroup.com/v1alpha1
 kind: DLCPod
 metadata:
   name: dlcpod-sample

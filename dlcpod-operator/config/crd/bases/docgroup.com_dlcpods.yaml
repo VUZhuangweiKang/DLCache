@@ -5,9 +5,9 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.9.0
   creationTimestamp: null
-  name: dlcpods.docgroup.com.my.domain
+  name: dlcpods.docgroup.com
 spec:
-  group: docgroup.com.my.domain
+  group: docgroup.com
   names:
     kind: DLCPod
     listKind: DLCPodList
@@ -68,16 +68,6 @@ spec:
                       items:
                         type: string
                       type: array
-                    configurations:
-                      description: QoS configuration of the job from ConfigMap
-                      properties:
-                        lazyloading:
-                          description: Load data in a lazy way
-                          type: boolean
-                        usecache:
-                          description: Whether client should use Cache or s3
-                          type: boolean
-                      type: object
                     configurationsfromconfigmap:
                       description: QoS configuration of the job from ConfigMap
                       properties:
@@ -504,6 +494,20 @@ spec:
                         - containerPort
                         type: object
                       type: array
+                    qos:
+                      description: QoS configuration of the job from ConfigMap
+                      properties:
+                        lazyloading:
+                          description: Load data in a lazy way
+                          type: boolean
+                        maxmemorymill:
+                          description: Max size of the tmpfs folder
+                          format: int64
+                          type: integer
+                        usecache:
+                          description: Whether to use Cache or s3
+                          type: boolean
+                      type: object
                     resources:
                       description: 'Compute Resources required by this container.
                         More info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/'

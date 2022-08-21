@@ -1,4 +1,4 @@
 ## Append samples you want in your CSV to this file as resources ##
 resources:
-- docgroup.com_v1alpha1_dlcpod.yaml
+- docgroup_v1alpha1_dlcpod.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples

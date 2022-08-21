@@ -5,7 +5,7 @@ metadata:
   name: dlcpod-viewer-role
 rules:
 - apiGroups:
-  - docgroup.com.my.domain
+  - docgroup.com
   resources:
   - dlcpods
   verbs:
@@ -13,7 +13,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - docgroup.com.my.domain
+  - docgroup.com
   resources:
   - dlcpods/status
   verbs:

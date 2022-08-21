@@ -8,7 +8,7 @@ spec:
     name: dlcpod-client-secret
   jobs:
   - name: job
-    image: centaurusinfra/imagenet:latest
+    image: zhuangweikang/imagenet:latest
     # command: ["python3", "main.py"]
     command: ["bash"]
     datasource:

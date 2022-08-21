@@ -19,7 +19,7 @@ metadata:
   labels:
     app: manager
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: manager
@@ -30,20 +30,21 @@ spec:
       # annotations:
       #   k8s.v1.cni.cncf.io/networks: macvlan-conf
     spec:
-      nodeSelector:
-        dlcache: CacheCluster
+      # nodeSelector:
+      #   dlcache: CacheCluster
       containers:
       - name: dlcpod-manager
-        image: centaurusinfra/dlcpod:manager
+        image: zhuangweikang/dlcpod-dev:manager
         imagePullPolicy: Always
+        command: ["bash"]
         ports:
         - name: listen-port
           containerPort: 50051
         volumeMounts:
         - name: configuration
           mountPath: /configs/manager
-        - mountPath: /nfs-master
-          name: nfs-volume
+        - name: nfs-volume
+          mountPath: /nfs-master
         stdin: true
         tty: true
       volumes:

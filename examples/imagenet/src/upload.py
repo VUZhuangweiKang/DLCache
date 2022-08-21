@@ -20,14 +20,13 @@ def preprocess(path):
     return key
  
 def upload_objects(folder):
-    print(folder)
     with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
         futures = []
         imgs = glob.glob('{}/*/*'.format(folder))
         for path in imgs:
             futures.append(executor.submit(preprocess, path))
         concurrent.futures.wait(futures)
-            
+
             
 if __name__=="__main__":
     upload_objects('train')

@@ -16,15 +16,7 @@ sudo systemctl restart nfs-kernel-server
 
 # sudo mkdir /129.59.234.238
 # sudo mkdir /129.59.234.236
-# sudo mount -t nfs 129.59.234.238:/nfs_storage /129.59.234.238
-# sudo mount -t nfs 129.59.234.236:/nfs_storage /129.59.234.236
-
 # sudo mkdir /129.59.234.240
-# sudo mkdir /129.59.234.236
-# sudo mount -t nfs 129.59.234.240:/nfs_storage /129.59.234.240
-# sudo mount -t nfs 129.59.234.236:/nfs_storage /129.59.234.236
-
-# sudo mkdir /129.59.234.240
-# sudo mkdir /129.59.234.238
 # sudo mount -t nfs 129.59.234.240:/nfs_storage /129.59.234.240
 # sudo mount -t nfs 129.59.234.238:/nfs_storage /129.59.234.238
+# sudo mount -t nfs 129.59.234.236:/nfs_storage /129.59.234.236

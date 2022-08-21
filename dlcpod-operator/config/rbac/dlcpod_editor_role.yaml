@@ -5,7 +5,7 @@ metadata:
   name: dlcpod-editor-role
 rules:
 - apiGroups:
-  - docgroup.com.my.domain
+  - docgroup.com
   resources:
   - dlcpods
   verbs:
@@ -17,7 +17,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - docgroup.com.my.domain
+  - docgroup.com
   resources:
   - dlcpods/status
   verbs:

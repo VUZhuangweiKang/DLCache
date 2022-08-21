@@ -10,7 +10,6 @@ import configparser
 import multiprocessing
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
-import pyinotify
 from datetime import datetime
 from pymongo.mongo_client import MongoClient
 from utils import *
@@ -19,7 +18,7 @@ from utils import *
 logger = get_logger(name=__name__, level='debug')
 
 
-class Manager(pyinotify.ProcessEvent):
+class Manager():
     def __init__(self):
         parser = configparser.ConfigParser()
         parser.read('/configs/manager/manager.conf')
@@ -32,7 +31,7 @@ class Manager(pyinotify.ProcessEvent):
         
         self.mongoUri = "mongodb://{}:{}@{}:{}".format(mconf['username'], mconf['password'], mconf['host'], mconf['port'])
         mongo_client = MongoClient(self.mongoUri)        
-        def load_collection(name, schema, collections):
+        def load_collection(name, schema):
             collections = mongo_client.Cacher.list_collection_names()
             with open(schema, 'r') as f:
                 schema = json.load(f)
@@ -43,10 +42,6 @@ class Manager(pyinotify.ProcessEvent):
         self.client_col = load_collection('Client', "mongo-schemas/client.json")
         self.job_col = load_collection('Job', "mongo-schemas/job.json")
         self.dataset_col = load_collection('Datasets', "mongo-schemas/datasets.json")
-        
-        flush_thrd = threading.Thread(target=Manager.flush_data, args=(self,), daemon=True)
-        flush_thrd.start()
-        
         logger.info("start global manager")
 
     def auth_client(self, cred, s3auth=None, conn_check=False):
@@ -370,7 +365,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
         return resp
       
 
-class CacheMissService(pb_grpc.CacheMissServicer):
+class DataMissService(pb_grpc.DataMissServicer):
     def __init__(self, manager: Manager) -> None:
         super().__init__()
         self.manager = manager
@@ -393,7 +388,7 @@ class CacheMissService(pb_grpc.CacheMissServicer):
 
         # copy data
         self.manager.clone_s3obj(s3obj=chunk, bucket_name=request.bucket, s3_client=s3_client, chunk_size=chunk['ChunkSize'], part=chunk['Part'])
-        return pb.CacheMissResponse(response=True)
+        return pb.DataMissResponse(response=True)
 
 
 if __name__ == '__main__':
@@ -401,7 +396,7 @@ if __name__ == '__main__':
     server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()))
     pb_grpc.add_ConnectionServicer_to_server(ConnectionService(manager), server)
     pb_grpc.add_RegistrationServicer_to_server(RegistrationService(manager), server)
-    pb_grpc.add_CacheMissServicer_to_server(CacheMissService(manager), server)
+    pb_grpc.add_DataMissServicer_to_server(DataMissService(manager), server)
     server.add_insecure_port(address="{}:{}".format(manager.managerconf['bind'], manager.managerconf['port']))
     server.start()
     server.wait_for_termination()

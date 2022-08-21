@@ -10,6 +10,6 @@ spec:
   - ReadWriteMany
   persistentVolumeReclaimPolicy: Retain
   nfs:
-    server: 10.145.41.32
+    server: 129.59.234.240
     path: /nfs_storage
     readOnly: false
