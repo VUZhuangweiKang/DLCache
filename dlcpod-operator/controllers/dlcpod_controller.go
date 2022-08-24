@@ -20,17 +20,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -50,7 +50,7 @@ const (
 	PodKind       = "Pod"
 	SecretKind    = "Secret"
 	ConfigMapKind = "ConfigMap"
-	ClientImage   = "zhuangeweikang/dlcpod-dev:client"
+	ClientImage   = "zhuangweikang/dlcpod-dev:client"
 )
 
 // DLCPodReconciler reconciles a DLCPod object
@@ -94,14 +94,11 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, req.NamespacedName, pod); err != nil && k8serrors.IsNotFound(err) {
-		schedule := r.scheduler(ctx, dlcpod)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+		schedule := r.scheduler(ctx, &dlcpod)
 		dlcpod.Spec.NodeSequence = schedule
 
 		// create pod
-		pod, err := r.createPod(ctx, dlcpod)
+		pod, err := r.createPod(ctx, &dlcpod)
 		var selectNode string
 		if len(dlcpod.Spec.NodeSelector) == 0 {
 			selectNode = schedule[0]
@@ -151,7 +148,7 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	if !reflect.DeepEqual(dlcpod.Spec, oldspec) {
 		// update configmap
-		schedule := r.scheduler(ctx, dlcpod)
+		schedule := r.scheduler(ctx, &dlcpod)
 		dlcpod.Spec.NodeSequence = schedule
 		oldpod := corev1.Pod{}
 		if err := r.Get(ctx, req.NamespacedName, &oldpod); err != nil {
@@ -166,7 +163,7 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 
 		// create a new pod
-		newpod, _ := r.createPod(ctx, dlcpod)
+		newpod, _ := r.createPod(ctx, &dlcpod)
 		var selectNode string
 		if len(dlcpod.Spec.NodeSelector) == 0 {
 			selectNode = schedule[0]
@@ -190,7 +187,7 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{}, nil
 }
 
-func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod) []string {
+func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPod) []string {
 	spec := dlcpod.Spec
 	nodes := &corev1.NodeList{}
 	err := r.List(ctx, nodes, &client.ListOptions{})
@@ -201,16 +198,16 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 	}
 
 	// get dataset Etags (MD5 Hash) from S3
-	secret := corev1.Secret{}
+	var secret corev1.Secret
 	err = r.Get(ctx, types.NamespacedName{Namespace: dlcpod.Namespace, Name: spec.Secret.Name}, &secret)
 	checkErr(err)
 
 	// connect to S3
 	awsctx, cancel := context.WithTimeout(context.TODO(), 20*time.Second)
 	defer cancel()
-	key := string(secret.Data["AWS_ACCESS_KEY_ID"])
-	secretId := string(secret.Data["AWS_SECRET_ACCESS_KEY"])
-	region := string(secret.Data["REGION_NAME"])
+	key := string(secret.Data["aws_access_key_id"])
+	secretId := string(secret.Data["aws_secret_access_key"])
+	region := string(secret.Data["region_name"])
 	sessionToken := string(secret.Data["AWS_SESSION_TOKEN"])
 	if err != nil {
 		sessionToken = ""
@@ -238,12 +235,11 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 				Bucket: &job.DataSource.Bucket,
 				Prefix: &prefix,
 			})
-			var wg sync.WaitGroup
 
-			// 连接成功，bucket,prefix也load成功，但是NextPage调用有bug
+			var wg sync.WaitGroup
 			for paginator.HasMorePages() {
 				page, err := paginator.NextPage(awsctx)
-				checkErr(err)
+				checkErr(err) // if bucket doesn't exist, this will raise error
 				wg.Add(1)
 				go worker(&wg, page)
 			}
@@ -251,18 +247,29 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 		}
 	}
 
-	// find existing keys on NFS
-	mongoctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	// TODO: update the mongodb URI
-	mongoclient, err := mongo.Connect(mongoctx, options.Client().ApplyURI("mongodb://docgroup:docgroup@mongo:27017"))
-	checkErr(err)
-	collection := mongoclient.Database("DLCache").Collection("Datasets")
-	filterCursor, err := collection.Find(mongoctx, bson.M{"ETag": bson.M{"$in": etags}})
-	checkErr(err)
-	var existingETags []bson.M
-	err = filterCursor.All(mongoctx, &existingETags)
-	checkErr(err)
+	var existingETags []string
+	existingPaths := map[string]bool{}
+	for _, node := range nodes.Items {
+		err := filepath.Walk(fmt.Sprintf("/%s", node.Status.Addresses[0].Address), func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			log.Log.Info(path)
+			existingPaths[path] = true
+			return nil
+		})
+		if err != nil {
+			return nil
+		}
+	}
+	for _, etag := range etags {
+		if _, ok := existingPaths[etag]; ok {
+			existingETags = append(existingETags, etag)
+		}
+	}
 
 	// generate scheduling policy
 	weights := map[string]float64{}
@@ -275,10 +282,8 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 			allocatableGPU = 0
 		}
 		allocatableResource[node.Status.Addresses[0].Address] = map[string]int64{
-			"storage": allocatable.Storage().Value(),
-			"memory":  allocatable.Memory().Value(),
-			"cpu":     allocatable.Cpu().Value(),
-			"gpu":     allocatableGPU,
+			"storage":        allocatable.Storage().Value(),
+			"nvidia.com/gpu": allocatableGPU,
 		}
 	}
 	var totalCapacity float64
@@ -290,11 +295,11 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 		weights[node] = (#existingETagsOnNode/#totalETags) + (1-#totalExistingETags/#totalETags)*(allocataleNodeSpace/totalCapacity)
 	*/
 	if len(existingETags) > 0 {
-		for _, item := range existingETags {
-			if val, ok := weights[item["Location"].(string)]; ok {
-				weights[item["Location"].(string)] = val + 1
+		for _, etag := range existingETags {
+			if val, ok := weights[etag]; ok {
+				weights[etag] = val + 1
 			} else {
-				weights[item["Location"].(string)] = 1
+				weights[etag] = 1
 			}
 		}
 		for node := range weights {
@@ -303,7 +308,7 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 		r := 1 - (float64(len(existingETags)) / float64(len(etags)))
 		for _, node := range nodes.Items {
 			node := node.Status.Addresses[0].Address
-			freeDisk := allocatableResource[node]["disk"]
+			freeDisk := allocatableResource[node]["storage"]
 			if _, ok := weights[node]; ok {
 				weights[node] += r * float64(freeDisk) / totalCapacity
 			} else {
@@ -312,7 +317,7 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 		}
 	} else {
 		for _, node := range nodes.Items {
-			weights[node.Status.Addresses[0].Address] = float64(allocatableResource[node.Name]["disk"]) / totalCapacity
+			weights[node.Status.Addresses[0].Address] = float64(allocatableResource[node.Name]["storage"]) / totalCapacity
 		}
 	}
 
@@ -333,7 +338,7 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 	i := 0
 	for ; i < len(nodeAddresses); i++ {
 		node := nodeAddresses[i]
-		if allocatableResource[node]["gpu"] >= requestGPU {
+		if allocatableResource[node]["nvidia.com/gpu"] >= requestGPU {
 			schedule = append(schedule, node)
 			break
 		}
@@ -342,8 +347,8 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod v1alpha1.DLCPod
 	return append(schedule, nodeAddresses...)
 }
 
-func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod v1alpha1.DLCPod) (corev1.Pod, error) {
-	pod := corev1.Pod{}
+func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPod) (corev1.Pod, error) {
+	var pod corev1.Pod
 	spec := dlcpod.Spec
 	volumes := []corev1.Volume{
 		{
@@ -385,9 +390,8 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod v1alpha1.DLCPod
 		if nodeip == dlcpod.Spec.NodeSequence[0] {
 			jobNode = node
 		}
-		name := fmt.Sprintf("/%s", nodeip)
 		volumes = append(volumes, corev1.Volume{
-			Name: name,
+			Name: strings.ReplaceAll(nodeip, ".", "-"),
 			VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{
 				Server:   nodeip,
 				Path:     "/nfs_storage",
@@ -395,24 +399,25 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod v1alpha1.DLCPod
 			}},
 		})
 		vol_mounts = append(vol_mounts, corev1.VolumeMount{
-			Name:      name,
-			MountPath: name,
+			Name:      strings.ReplaceAll(nodeip, ".", "-"),
+			MountPath: fmt.Sprintf("/%s", nodeip),
 		})
 	}
 
-	capacity := jobNode.Status.Capacity
-	gpus := capacity["nvidia.com/gpu"]
-	capacityGPU, ok := gpus.AsInt64()
-	if !ok {
-		capacityGPU = 0
+	alloc := jobNode.Status.Allocatable
+	gpus := alloc["nvidia.com/gpu"]
+	allocGPU, ok := gpus.AsInt64()
+	if !ok || allocGPU == 0 {
+		allocGPU = 1
 	}
 	var containers []corev1.Container
+	alph := 0.8
 	for _, job := range spec.Jobs {
 		env := job.Env
 		env = append(env, corev1.EnvVar{Name: "JOBNAME", Value: job.Name})
-		cpuLimit := capacity.Cpu().MilliValue() / capacityGPU / int64(len(spec.Jobs))
-		memoryLimit := capacity.Memory().MilliValue() / capacityGPU / int64(len(spec.Jobs))
-		storageLimit := capacity.Storage().MilliValue() / capacityGPU / int64(len(spec.Jobs))
+		cpuLimit := int64(alph * float64(alloc.Cpu().MilliValue()/allocGPU/int64(len(spec.Jobs))))
+		memoryLimit := int64(alph * float64(alloc.Memory().MilliValue()/allocGPU/int64(len(spec.Jobs))))
+		ephemeralStorageLimit := int64(alph * float64(alloc.StorageEphemeral().MilliValue()/allocGPU/int64(len(spec.Jobs))))
 		gpuLimit := job.Resources.Limits["nvidia.com/gpu"]
 		container := corev1.Container{
 			Name:            job.Name,
@@ -427,10 +432,10 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod v1alpha1.DLCPod
 			Lifecycle:       job.Lifecycle,
 			Resources: corev1.ResourceRequirements{
 				Limits: corev1.ResourceList{
-					"cpu":            *resource.NewMilliQuantity(cpuLimit, resource.DecimalSI),
-					"memory":         *resource.NewMilliQuantity(memoryLimit, resource.DecimalSI),
-					"storage":        *resource.NewMilliQuantity(storageLimit, resource.DecimalSI),
-					"nvidia.com/gpu": *resource.NewQuantity(gpuLimit.Value(), resource.DecimalSI),
+					"cpu":               *resource.NewMilliQuantity(cpuLimit, resource.DecimalSI),
+					"memory":            *resource.NewMilliQuantity(memoryLimit, resource.DecimalSI),
+					"ephemeral-storage": *resource.NewMilliQuantity(ephemeralStorageLimit, resource.DecimalSI),
+					"nvidia.com/gpu":    *resource.NewQuantity(gpuLimit.Value(), resource.DecimalSI),
 				},
 				Requests: job.Resources.Requests,
 			},
@@ -469,13 +474,12 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod v1alpha1.DLCPod
 			Volumes:       volumes,
 			Containers:    containers,
 			RestartPolicy: corev1.RestartPolicyNever,
-			NodeSelector:  spec.NodeSelector,
-			NodeName:      spec.NodeName,
+			NodeName:      jobNode.Name,
 			HostNetwork:   spec.HostNetwork,
 		},
 	}
 
-	err = ctrl.SetControllerReference(&dlcpod, &pod, r.Scheme)
+	err = ctrl.SetControllerReference(dlcpod, &pod, r.Scheme)
 	checkErr(err)
 	return pod, nil
 }
@@ -489,9 +493,9 @@ func (r *DLCPodReconciler) createConfigMap(ctx context.Context, dlcpod v1alpha1.
 	spec := dlcpod.Spec
 	for _, job := range spec.Jobs {
 		jobinfo := map[string]interface{}{
-			"name":       job.Name,
-			"dataSource": job.DataSource,
-			"weights":    dlcpod.Spec.NodeSequence,
+			"name":         job.Name,
+			"dataSource":   job.DataSource,
+			"nodeSequence": dlcpod.Spec.NodeSequence,
 		}
 		if job.ConfigurationsFromConfigMap.Name != "" {
 			var qos_config corev1.ConfigMap

@@ -57,7 +57,7 @@ class Manager():
             else:
                 rc = pb.RC.WRONG_PASSWORD
         # check whether to update s3auth information
-        if rc == pb.RC.CONNECTED and s3auth is not None and result['S3auth'] != s3auth:
+        if rc == pb.RC.CONNECTED and s3auth is not None and result['S3Auth'] != s3auth:
             result = self.client_col.update_one(
                 filter={"Username": cred.username}, 
                 update={"$set": {"S3Auth": s3auth}})
@@ -70,15 +70,19 @@ class Manager():
         result = self.client_col.find_one(filter={"$and": [{"Username": cred.username, "Password": cred.password}]})
         s3auth = result['S3Auth']
         s3_session = boto3.Session(
-            aws_access_key_id=s3auth['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=s3auth['AWS_SECRET_ACCESS_KEY'],
-            region_name=s3auth['REGION_NAME']
+            aws_access_key_id=s3auth['aws_access_key_id'],
+            aws_secret_access_key=s3auth['aws_secret_access_key'],
+            region_name=s3auth['region_name']
         )
         s3_client = s3_session.client('s3')
         return s3_client
 
     def filter_objs(self, page):
-        etags = {info['ETag']: info['LastModified'] for info in page['Contents']}
+        try:
+            # if prefix is invalid, `Contents` field is not in page, raising error
+            etags = {info['ETag']: info['LastModified'] for info in page['Contents']}
+        except:
+            return []
         results = self.dataset_col.aggregate(pipeline=[
             {"$match": {"ETag": {"$in": list(etags.keys())}}},
             {"$project": {
@@ -137,6 +141,7 @@ class Manager():
                         return obj
                 self.evict_data(node=node_sequence[0])
 
+        # TODO: debug到了这里，会直接进入else，说明chunk_size小于图片大小，bug在/tmp位置，文件不存在
         if s3obj['Size'] <= chunk_size:
             if 'ETag' in s3obj:
                 etag = s3obj['ETag']
@@ -299,10 +304,9 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     for page in pages:
                         futures.append(executor.submit(self.manager.filter_objs, page))
                 for future in concurrent.futures.as_completed(futures):
-                    bucket_objs.extend(future.result)
+                    bucket_objs.extend(future.result())
             
             # TODO: if (partial) dataset is on the NFS, rebalance dataset across the cluster
-            
             # copy data from S3 to NFS, init the `ChunkSize`, `Location`, and `ChunkTag` fields
             obj_chunks = []
             key_lookup = {}
@@ -310,7 +314,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                 futures = []
                 for obj in bucket_objs:
                     if not obj['Exist']:
-                        futures.append(executor.submit(self.manager.clone_s3obj, obj, s3_client, bucket_name, request.qos.maxmemory))
+                        futures.append(executor.submit(self.manager.clone_s3obj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, request.nodeSequence))
                     else:
                         obj_chunks.append([obj])
 

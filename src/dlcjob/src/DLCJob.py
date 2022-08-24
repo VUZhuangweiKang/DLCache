@@ -66,9 +66,9 @@ class DLCJobDataset(Dataset):
             parser.read('/secret/client.conf')
             s3auth = parser['AWS']
             s3_session = boto3.Session(
-                aws_access_key_id=s3auth['AWS_ACCESS_KEY_ID'],
-                aws_secret_access_key=s3auth['AWS_SECRET_ACCESS_KEY'],
-                region_name=s3auth['REGION_NAME']
+                aws_access_key_id=s3auth['aws_access_key_id'],
+                aws_secret_access_key=s3auth['aws_secret_access_key'],
+                region_name=s3auth['region_name']
             )
             self.client = s3_session.client('s3')
             self.load_s3_keys()

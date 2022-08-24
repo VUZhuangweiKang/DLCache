@@ -5,7 +5,6 @@ import json
 import time
 import glob
 from pathlib import Path
-import configparser
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
@@ -25,26 +24,32 @@ HEARTBEAT_FREQ = 10
 
 class Client(pyinotify.ProcessEvent):
     def __init__(self):
-        secret = configparser.ConfigParser()
-        secret.read("/secret/client.conf")
-        aws_s3_sec = dict(secret["AWS"].items())
-        
+        def read_secret(arg):
+            path = '/secret/{}'.format(arg)
+            assert os.path.exists(path)
+            with open(path, 'r') as f:
+                data = f.read().strip()
+            return data
+
         self.jobsmeta = []
         for f in glob.glob('/jobsmeta/*.json'):
             with open(f, 'rb') as f:
                 job = json.load(f)
-            if job['qos']['usecache']:
+            if job['qos']['UseCache']:
                 self.jobsmeta.append(job)
         
         if len(self.jobsmeta) > 0:
-            manager_sec = secret['dlc_manager']
-            self.cred = pb.Credential(username=manager_sec["username"], password=manager_sec["password"])
-            self.channel = grpc.insecure_channel('{}:{}'.format(manager_sec["server_address"], manager_sec["server_port"]))
+            self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
+            self.channel = grpc.insecure_channel("dlcpod-manager:50051")
             self.conn_stub = pb_grpc.ConnectionStub(self.channel)
             
             req = pb.ConnectRequest(
                 cred=self.cred, 
-                s3auth=ParseDict(aws_s3_sec, pb.S3Auth(), ignore_unknown_fields=True),
+                s3auth=pb.S3Auth(
+                    aws_access_key_id=read_secret('aws_access_key_id'),
+                    aws_secret_access_key=read_secret('aws_secret_access_key'),
+                    region_name=read_secret('region_name')
+                ),
                 createUser=True
             )
             resp = self.conn_stub.connect(req)
@@ -83,7 +88,7 @@ class Client(pyinotify.ProcessEvent):
         """
         for job in self.jobsmeta:
             qos = job['qos']
-            ds = job['datasource']
+            ds = job['dataSource']
             if 'keys' not in ds: ds['keys'] = []
             request = pb.RegisterRequest(
                 cred=self.cred,
@@ -122,6 +127,7 @@ class Client(pyinotify.ProcessEvent):
             else:
                 logger.warning('failed to request missing key {}'.format(key))
 
+    # 
     def prefetch(self):
         if self.runtime_conf['lazyloading']:
             for _ in range(self.runtime_conf['num_workers']):

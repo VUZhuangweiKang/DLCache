@@ -53,6 +53,7 @@ message DataSource {
 message QoS {
     optional bool UseCache = 1 [default = true];
     optional bool LazyLoading = 2 [default = true];
+    optional int64 MaxMemoryMill = 3 [default=0];
 }
 message RegisterRequest {
     required Credential cred = 1;

@@ -6,6 +6,11 @@ data:
   mongo.conf: |
     storage:
       dbPath: /data/db
+    net:
+      port: 27017
+      bindIp: 0.0.0.0
+    security:
+      authorization: enabled
   ensure-users.js: |
     const targetDbStr = 'test';
     const rootUser = cat('/etc/k8-test/admin/MONGO_ROOT_USERNAME');

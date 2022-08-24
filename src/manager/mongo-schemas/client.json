@@ -13,14 +13,14 @@
         "S3auth": {
             "bsonType": "object",
             "required": [
-                "AWS_ACCESS_KEY_ID",
-                "AWS_SECRET_ACCESS_KEY",
-                "REGION_NAME"
+                "aws_access_key_id",
+                "aws_secret_access_key",
+                "region_name"
             ],
             "properties": {
-                "AWS_ACCESS_KEY_ID": {"bsonType": "string"},
-                "AWS_SECRET_ACCESS_KEY": {"bsonType": "string"},
-                "REGION_NAME": {"bsonType": "string"}
+                "aws_access_key_id": {"bsonType": "string"},
+                "aws_secret_access_key": {"bsonType": "string"},
+                "region_name": {"bsonType": "string"}
             }
         },
         "Status": {"bsonType": "bool"},

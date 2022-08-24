@@ -15,9 +15,9 @@ spec:
     command: ["bash"]
     datasource:
       name: Imagenet-Mini-Obj
-      bucket: zhuangwei-bucket
+      bucket: vuzhuangwei
       keys:
-      - Imagenet-Mini-Obj/train
+      # - Imagenet-Mini-Obj/train
       - Imagenet-Mini-Obj/val
     qos:
       usecache: true

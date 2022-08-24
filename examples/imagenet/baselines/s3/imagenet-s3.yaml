@@ -19,7 +19,7 @@ spec:
       - imagenet-mini/val
     configurations:
       usecache: false
-      maxmemory: 0
+      maxmemorymill: 0
       durabilityindisk: 1440
     tty: true
     stdin: true

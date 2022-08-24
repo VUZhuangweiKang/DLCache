@@ -8,7 +8,7 @@ import concurrent.futures
 
 session = boto3.Session()
 s3 = session.client("s3")
-bucket = 'zhuangwei-bucket'
+bucket = 'vuzhuangwei'
 
 
 def preprocess(path):
