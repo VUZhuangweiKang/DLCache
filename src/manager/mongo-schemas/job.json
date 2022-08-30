@@ -4,7 +4,7 @@
     "required": [
         "Meta",
         "QoS",
-        "Data"
+        "ETags"
     ],
     "properties": {
         "Meta": {
@@ -12,25 +12,23 @@
             "required": [
                 "Username",
                 "JobId",
-                "NodeIP",
                 "Datasource",
-                "ResourceInfo",
-                "CreateTime"
+                "ResourceInfo"
             ],
             "properties": {
                 "Username": {"bsonType": "string"},
                 "JobId": {"bsonType": "string"},
-                "NodeIP": {"bsonType": "string"},
                 "Datasource": {
                     "bsonType": "object",
                     "required": [
-                        "Name",
-                        "Bucket"
+                        "name",
+                        "bucket",
+                        "keys"
                     ],
                     "properties": {
-                        "Name": {"bsonType": "string"},
-                        "Bucket": {"bsonType": "string"},
-                        "Keys": {
+                        "name": {"bsonType": "string"},
+                        "bucket": {"bsonType": "string"},
+                        "keys": {
                             "bsonType": "array",
                             "items": {"bsonType": "string"}
                         }
@@ -38,26 +36,25 @@
                 },
                 "ResourceInfo": {
                     "bsonType": "object",
-                    "title": "resourceInfo",
                     "properties": {
                         "CPUMemoryFree": {"bsonType": ["long", "int"]},
                         "GPUMemoryFree": {"bsonType": ["long", "int"]}
                     },
                     "description": "GPU and CPU memory resource information"
-                },
-                "CreateTime": {"bsonType": "timestamp"}
+                }
             }
         },
         "QoS": {
             "bsonType": "object",
-            "title": "qos",
             "required": [
                 "UseCache",
-                "LazyLoading"
+                "LazyLoading",
+                "MaxMemoryMill"
             ],
             "properties": {
                 "UseCache": {"bsonType": "bool"},
-                "LazyLoading": {"bsonType": "bool"}
+                "LazyLoading": {"bsonType": "bool"},
+                "MaxMemoryMill": {"bsonType": "int"}
             },
             "description": "QoS configuration"
         },

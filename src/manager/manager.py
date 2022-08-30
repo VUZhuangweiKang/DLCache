@@ -99,10 +99,13 @@ class Manager():
 
         bucket_objs = []
         for info in page['Contents']:
-            if info['ETag'] not in existing_etags or info['LastModified'] > existing_etags[info['ETag']]['LastModified']:
+            print(info['LastModified'], existing_etags[info['ETag']]['LastModified'])
+            lastModified = bson.timestamp.Timestamp(int(info['LastModified'].timestamp()), inc=1)
+            if info['ETag'] not in existing_etags or lastModified > existing_etags[info['ETag']]['LastModified']:
                 info['Exist'] = False
             else:
                 info['Exist'] = True
+            info['ChunkETag'] = info['ETag']
             bucket_objs.append(info)
         return bucket_objs
     
@@ -141,18 +144,19 @@ class Manager():
                         return obj
                 self.evict_data(node=node_sequence[0])
 
-        # TODO: debug到了这里，会直接进入else，说明chunk_size小于图片大小，bug在/tmp位置，文件不存在
+        chunk_size *= 1e6 # Mill bytes --> bytes
         if s3obj['Size'] <= chunk_size:
+            # Bug: local variable 'value' referenced before assignment"
+            value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
             if 'ETag' in s3obj:
-                etag = s3obj['ETag']
+                etag = s3obj['ETag'].strip("\"")
             else:
-                value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
                 etag = hashing(value)
 
             s3obj['ChunkETag'] = etag
             s3obj['ChunkSize'] = s3obj['Size']
             s3obj = schedule_obj(s3obj)
-            path = "/{}/{}.{}".format(s3obj['Location'], etag, file_type)
+            path = "/%s/%s.%s" % (s3obj['Location'], etag, file_type)
             with open(path, 'wb') as f:
                 f.write(value)
             obj_chunks = [s3obj]
@@ -173,7 +177,7 @@ class Manager():
                         etag = hashing(chunk.compute())
                         s3obj['ChunkSize'] = chunk.memory_usage_per_partition(deep=True).compute()
                         s3obj = schedule_obj(s3obj)
-                        path = "/{}/{}".format(s3obj['Location'], etag)
+                        path = "/%s/%s.%s" % (s3obj['Location'], etag, file_type)
                         if file_type == 'csv':
                             chunk.to_csv(path, index=False)
                         elif file_type == 'parquet':
@@ -289,13 +293,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
         rc = self.manager.auth_client(cred, conn_check=True)
         jobId = "{}-{}".format(cred.username, request.datasource.name)
         if rc == pb.RC.CONNECTED:
-            s3_client = self.manager.get_s3_client(cred)
-            bucket_name = request.datasource.bucket    
-
-            # check whther data objs are exists or out-of-date, init the `Exist` field
-            bucket_objs = []
-            if len(request.datasource.keys) == 0:
-                request.datasource.keys = [bucket_name]
+            s3_client = self.manager.get_s3_client(cred)filter_objs
             for prefix in request.datasource.keys:
                 paginator = s3_client.get_paginator('list_objects_v2')
                 pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
@@ -316,7 +314,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     if not obj['Exist']:
                         futures.append(executor.submit(self.manager.clone_s3obj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, request.nodeSequence))
                     else:
-                        obj_chunks.append([obj])
+                        obj_chunks.append(obj)
 
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
                     rlt = future.result()
@@ -332,7 +330,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     "ResourceInfo": MessageToDict(request.resource)
                 },
                 "QoS": MessageToDict(request.qos),
-                "ETags": [item['ChunkETags'] for item in obj_chunks]
+                "ETags": [item['ChunkETag'] for item in obj_chunks]
             }
             self.manager.job_col.insert_one(jobInfo)
 
@@ -355,7 +353,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
 
     def deresgister(self, request, context):
         cred = request.cred
-        jobId = request.jinfo.jobId
+        jobId = request.jobId
         rc = self.manager.auth_client(cred)
         if rc in [pb.RC.CONNECTED, pb.RC.DISCONNECTED]:
             result = self.manager.job_col.delete_one(filter={"JobId": jobId}) 

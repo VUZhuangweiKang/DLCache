@@ -9,7 +9,7 @@ fi
 sudo apt install -y nfs-kernel-server
 sudo mkdir /nfs_storage
 sudo chmod -R 777 /nfs_storage/
-sudo echo "/nfs_storage $cidr(rw,sync,no_all_squash,no_subtree_check)" >> /etc/exports
+sudo echo "/nfs_storage $cidr(insecure,rw,sync,no_root_squash)" >> /etc/exports
 sudo exportfs -rv
 sudo systemctl restart nfs-kernel-server
 

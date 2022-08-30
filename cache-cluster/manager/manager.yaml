@@ -43,14 +43,32 @@ spec:
         volumeMounts:
         - name: configuration
           mountPath: /configs/manager
-        - name: nfs-volume
-          mountPath: /nfs-master
+        # - name: nfs-volume
+        #   mountPath: /nfs-master
+        - name: 129-59-234-240
+          mountPath: /129.59.234.240
+        - name: 129-59-234-236
+          mountPath: /129.59.234.236
+        - name: 129-59-234-238
+          mountPath: /129.59.234.238
         stdin: true
         tty: true
       volumes:
         - name: configuration
           configMap:
             name: dlcpod-manager-config
-        - name: nfs-volume
-          persistentVolumeClaim:
-            claimName: nfs-pvc
+        # - name: nfs-volume
+        #   persistentVolumeClaim:
+        #     claimName: nfs-pvc
+        - name: 129-59-234-240
+          nfs: 
+            server: 129.59.234.240
+            path: /nfs_storage
+        - name: 129-59-234-236
+          nfs: 
+            server: 129.59.234.236
+            path: /nfs_storage
+        - name: 129-59-234-238
+          nfs: 
+            server: 129.59.234.238
+            path: /nfs_storage

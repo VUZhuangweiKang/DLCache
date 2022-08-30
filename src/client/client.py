@@ -38,6 +38,8 @@ class Client(pyinotify.ProcessEvent):
             if job['qos']['UseCache']:
                 self.jobsmeta.append(job)
         
+        self.prefetchPaths = None
+
         if len(self.jobsmeta) > 0:
             self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
             self.channel = grpc.insecure_channel("dlcpod-manager:50051")
@@ -70,7 +72,6 @@ class Client(pyinotify.ProcessEvent):
             # runtime tmpfs waterline: n*num_workers*batch_size, n=2 initially
             self.waterline = 2
             self.pidx = 0
-            self.pf_paths = None
             
             signal.signal(signal.SIGINT, self.exit_gracefully)
             signal.signal(signal.SIGTERM, self.exit_gracefully)
@@ -106,15 +107,17 @@ class Client(pyinotify.ProcessEvent):
                 resp = resp.regerr
                 logger.error("failed to register job {}: {}".format(job['name'], resp.error))
                 os.kill(os.getpid(), signal.SIGINT)
-            logger.info('registered job {}, assigned jobId is {}'.format(job['name'], resp.jinfo.jobId))
-            while not self.pf_paths: pass
-            for _ in range(self.waterline): 
-                self.prefetch()
+            logger.info('registered job {}, assigned jobId is {}'.format(job['name'], resp.jobId))
             with open('/share/{}.json'.format(job['name']), 'w') as f:  # marshelled registration response
                 json.dump(MessageToDict(resp), f)
             
             mongo_client = MongoClient(resp.mongoUri)
             self.dataset_col = mongo_client.Cacher.Datasets
+
+            # prefetch the first 2 batches
+            while not self.prefetchPaths: pass
+            for _ in range(self.waterline): 
+                self.prefetch()
 
     def handle_datamiss(self):
         with open('/share/datamiss', 'r') as f:
@@ -127,11 +130,10 @@ class Client(pyinotify.ProcessEvent):
             else:
                 logger.warning('failed to request missing key {}'.format(key))
 
-    # 
     def prefetch(self):
         if self.runtime_conf['lazyloading']:
             for _ in range(self.runtime_conf['num_workers']):
-                for path in self.pf_paths[self.pidx]:
+                for path in self.prefetchPaths[self.pidx]:
                     if self.pidx not in self.runtime_buffer:
                         self.runtime_buffer[self.pidx] = []
                     if path not in self.runtime_buffer[self.pidx]:
@@ -139,7 +141,7 @@ class Client(pyinotify.ProcessEvent):
                         self.runtime_buffer[self.pidx].append(path)
                 self.pidx += 1
         else:
-            path = self.pf_paths[self.pidx]
+            path = self.prefetchPaths[self.pidx]
             shutil.copyfile(path, '/runtime/{}'.format(path))  # NFS --> tmpfs
             self.pidx += 1
 
@@ -153,7 +155,7 @@ class Client(pyinotify.ProcessEvent):
             with open('/share/prefetch_policy.json', 'r') as f:
                 tmp = json.load(f)
                 self.runtime_conf = tmp['meta']
-                self.pf_paths = tmp['policy']
+                self.prefetchPaths = tmp['policy']
 
     def process_IN_MODIFY(self, event):
         self.process_IN_CREATE(event)
@@ -173,7 +175,7 @@ class Client(pyinotify.ProcessEvent):
                 # decide alpha and beta based on the latest 3 measurements
                 alpha = np.diff(self.req_time[-4:])[1:]
                 beta = np.array(self.load_time[-3:])
-                N = len(self.pf_paths)
+                N = len(self.prefetchPaths)
                 k = len(self.req_time)
                 """
                 To ensure the data is always available for DataLoader, the length of buffer should be:
