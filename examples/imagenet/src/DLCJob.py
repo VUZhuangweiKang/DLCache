@@ -3,7 +3,7 @@ import json
 import concurrent.futures
 import multiprocessing
 from math import inf
-from urllib import request
+import math
 import numpy as np
 import time
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
@@ -75,13 +75,13 @@ class DLCJobDataset(Dataset):
             self.client = s3_session.client('s3')
             self.load_s3_keys()
 
-        self.file_paths_nfs = []
+        self.nfsFilePaths = []
         self.targets = None
         self.load_data(0)
                     
     def get_data(self, index):
         if self.qos['LazyLoading']:
-            return self.load(self.data[index])
+            return self.read(self.data[index])
         else:
             return self.data[index]
     
@@ -146,12 +146,17 @@ class DLCJobDataset(Dataset):
             etag = chunk['ChunkETag']
             loc = chunk['Location']
             nfs_path = '/{}/{}'.format(loc, etag)
-            tmpfs_path = '/runtime/{}'.format(nfs_path)
+            tmpfs_path = '/runtime{}'.format(nfs_path)
             try:
-                path = tmpfs_path if os.path.exists(tmpfs_path) else nfs_path
-                with open(path, 'rb') as f:
+                while not os.path.exists(tmpfs_path): pass
+                with open(tmpfs_path, 'rb') as f:
                     val = f.read()
             except FileNotFoundError:
+                print("miss file {}".format(tmpfs_path))
+                with open(nfs_path, 'rb') as f:
+                    val = f.read()
+            except FileNotFoundError:
+                print("miss file {}".format(nfs_path))
                 with open('/share/datamiss', 'w') as f:
                     f.writelines("{}:{}".format(self.bucket, key))
                 while not os.path.exists(etag): pass
@@ -169,7 +174,7 @@ class DLCJobDataset(Dataset):
             # are individual files, such as image dataset
             for chunk in self.chunks[index]:
                 self.keys.append(chunk['Key'])
-                self.file_paths_nfs.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
+                self.nfsFilePaths.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
                 self.data[chunk['Key']] = chunk
         else:
             # Normal mode fits tabular or block datasets, 
@@ -181,7 +186,7 @@ class DLCJobDataset(Dataset):
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
                     chunk = self.chunks[index][i]
                     self.keys.append(chunk['Key'])
-                    self.file_paths_nfs.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
+                    self.nfsFilePaths.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
                     self.data[chunk['Key']] = future.result()
                 
         self.data, self.targets = self.__convert__()
@@ -313,16 +318,16 @@ class DLCJobDataLoader(object):
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
+        self.lazy = self.dataset.qos['LazyLoading']
         self.init_loader()
         self.index = 1
-        self.lazy = self.dataset.qos['LazyLoading']
         
         # prefetch size depends on the chunk size when LazyLoading is disabled
         if not self.lazy:
-            with open('/share/prefetch_policy.json', 'w') as f:
+            with open('/share/prefetchKeys.json', 'w') as f:
                 json.dump(f, {
                     "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                    "policy": self.dataset.file_paths})
+                    "policy": self.dataset.nfsFilePaths})
     
     def init_loader(self):
         # shuffle if disabled under the LazyLoading mode
@@ -330,13 +335,15 @@ class DLCJobDataLoader(object):
                             self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
                             prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
         self.loader = loader._get_iterator()
-        file_paths = np.array(self.dataset.file_paths)
+        file_paths = np.array(self.dataset.nfsFilePaths)
         if self.lazy:
             prefetchPaths = [file_paths[indices].tolist() for indices in loader._index_sampler]
-            with open('/share/prefetch_policy.json', 'w') as f:
-                json.dump(f, {
-                    "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                    "policy": prefetchPaths})
+            with open('/share/prefetchKeys.json', 'w') as f:
+                json.dump(
+                    {
+                        "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
+                        "policy": prefetchPaths
+                    }, f)
         else:
             with open('/share/next', 'w') as f:
                 f.write(str(time.time()))

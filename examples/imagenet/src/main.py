@@ -23,8 +23,7 @@ import torchvision.datasets as datasets
 import torchvision.models as models
 from torch.utils.data import Subset
 from ImageNetMiniDataset import *
-from DLCJob import DLCJobDataLoader
-from torch.utils.data.dataloader import DataLoader
+from DLCJob import *
 
 
 model_names = sorted(name for name in models.__dict__
@@ -228,7 +227,7 @@ def main_worker(gpu, ngpus_per_node, args):
     ])
     
     t = time.time()
-    val_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/val'], transform=transform)
+    val_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/val'], transform=transform, shuffle=True)
     print('dataset init time: ', time.time()-t)
     
     if args.distributed:
@@ -237,22 +236,21 @@ def main_worker(gpu, ngpus_per_node, args):
         val_sampler = None
 
     t = time.time()
-    val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True, sampler=val_sampler)
+    val_loader = DLCJobDataLoader(
+        val_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
     print('dataloader init time: ', time.time()-t)
     
     if args.evaluate:
         validate(val_loader, model, criterion, args)
         return
     else:
-        train_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/train'], transform=transform)
+        train_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/train'], transform=transform, shuffle=True)
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         else:
             train_sampler = None
-        train_loader = DataLoader(
-            train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+        train_loader = DLCJobDataLoader(
+            train_dataset, batch_size=args.batch_size,
             num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
     train_time_hist = []
@@ -342,7 +340,7 @@ def validate(val_loader, model, criterion, args):
         t = time.time()
         for i, item in enumerate(val_loader):
             e = time.time()
-            # print(e-t)
+            print(e-t)
             t = e
     return 1
 

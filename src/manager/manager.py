@@ -146,7 +146,7 @@ class Manager():
 
         chunk_size *= 1e6 # Mill bytes --> bytes
         if s3obj['Size'] <= chunk_size:
-            # Bug: local variable 'value' referenced before assignment"
+            # Possible bug: local variable 'value' referenced before assignment"
             value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
             if 'ETag' in s3obj:
                 etag = s3obj['ETag'].strip("\"")
@@ -156,7 +156,7 @@ class Manager():
             s3obj['ChunkETag'] = etag
             s3obj['ChunkSize'] = s3obj['Size']
             s3obj = schedule_obj(s3obj)
-            path = "/%s/%s.%s" % (s3obj['Location'], etag, file_type)
+            path = "/%s/%s" % (s3obj['Location'], etag)
             with open(path, 'wb') as f:
                 f.write(value)
             obj_chunks = [s3obj]
@@ -177,7 +177,7 @@ class Manager():
                         etag = hashing(chunk.compute())
                         s3obj['ChunkSize'] = chunk.memory_usage_per_partition(deep=True).compute()
                         s3obj = schedule_obj(s3obj)
-                        path = "/%s/%s.%s" % (s3obj['Location'], etag, file_type)
+                        path = "/%s/%s" % (s3obj['Location'], etag)
                         if file_type == 'csv':
                             chunk.to_csv(path, index=False)
                         elif file_type == 'parquet':
@@ -293,7 +293,11 @@ class RegistrationService(pb_grpc.RegistrationServicer):
         rc = self.manager.auth_client(cred, conn_check=True)
         jobId = "{}-{}".format(cred.username, request.datasource.name)
         if rc == pb.RC.CONNECTED:
-            s3_client = self.manager.get_s3_client(cred)filter_objs
+            s3_client = self.manager.get_s3_client(cred)
+            bucket_name = request.datasource.bucket
+            
+            # check whther data objs are exists or out-of-date, init the `Exist` field
+            bucket_objs = []
             for prefix in request.datasource.keys:
                 paginator = s3_client.get_paginator('list_objects_v2')
                 pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)

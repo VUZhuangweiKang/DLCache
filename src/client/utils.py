@@ -1,4 +1,5 @@
 import os
+import shutil
 import logging
 import string
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -94,3 +95,11 @@ def MessageToDict(message):
                 message_dict[key] = value
     
     return message_dict
+
+
+def copyfile(src, dst):
+    assert os.path.exists(src)
+    base_dir = '/'.join(dst.split('/')[:-1])
+    if not os.path.exists(base_dir):
+        os.system('mkdir -p {}'.format(base_dir))
+    shutil.copy(src, dst)

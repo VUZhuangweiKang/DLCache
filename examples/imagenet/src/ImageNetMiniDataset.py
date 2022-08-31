@@ -9,8 +9,9 @@ summary = []
 class ImageNetDataset(DLCJobDataset):
     def __init__(self, keys, 
                  transform: Optional[Callable] = None,
-                 target_transform: Optional[Callable] = None):
-        super().__init__(keys)
+                 target_transform: Optional[Callable] = None,
+                 shuffle=False):
+        super().__init__(keys, shuffle=shuffle)
         self.transform = transform
         self.target_transform = target_transform
         self.count = 0

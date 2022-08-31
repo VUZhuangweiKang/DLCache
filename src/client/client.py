@@ -10,6 +10,7 @@ import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import pyinotify
 import shutil
+import threading
 from collections import OrderedDict
 import numpy as np
 from pymongo import MongoClient
@@ -18,19 +19,19 @@ import bson
 from utils import *
 
 
-logger = get_logger(__name__, level='Info')
-HEARTBEAT_FREQ = 10
+logger = get_logger(__name__, level='Debug')
 
+
+def read_secret(arg):
+    path = '/secret/{}'.format(arg)
+    assert os.path.exists(path)
+    with open(path, 'r') as f:
+        data = f.read().strip()
+    return data
+        
 
 class Client(pyinotify.ProcessEvent):
     def __init__(self):
-        def read_secret(arg):
-            path = '/secret/{}'.format(arg)
-            assert os.path.exists(path)
-            with open(path, 'r') as f:
-                data = f.read().strip()
-            return data
-
         self.jobsmeta = []
         for f in glob.glob('/jobsmeta/*.json'):
             with open(f, 'rb') as f:
@@ -38,8 +39,36 @@ class Client(pyinotify.ProcessEvent):
             if job['qos']['UseCache']:
                 self.jobsmeta.append(job)
         
-        self.prefetchPaths = None
+        self.runtimeBuffer = OrderedDict()
+        self.req_time = []
+        self.load_time = []
+        
+        # runtime tmpfs waterline: n*num_workers*batch_size, n=2 initially
+        self.waterline = 2
+        self.prefetchIndex = 0
+        try:
+            with open('/share/prefetchKeys.json', 'r') as f:
+                tmp = json.load(f)
+                self.runtime_conf = tmp['meta']
+                self.prefetchPaths = tmp['policy']
+        except FIleNotFoundError:
+            self.prefetchPaths = None
+            
+        # create inotify
+        wm = pyinotify.WatchManager()
+        mask = pyinotify.IN_CREATE | pyinotify.IN_MODIFY | pyinotify.IN_CLOSE_NOWRITE
+        wm.add_watch("/share", mask, auto_add=True, rec=False)
+        wm.add_watch('/runtime', mask, auto_add=True, rec=False)
+        
+        # watch data access events
+        self.nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
+        for svr in self.nfs_servers:
+            wm.add_watch(svr, mask, auto_add=True, rec=False)
 
+        self.notifier = pyinotify.Notifier(wm, self)
+        notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
+        notifierThread.start()
+        
         if len(self.jobsmeta) > 0:
             self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
             self.channel = grpc.insecure_channel("dlcpod-manager:50051")
@@ -62,24 +91,17 @@ class Client(pyinotify.ProcessEvent):
                 logger.info("connect to server")
             
             self.register_stub = pb_grpc.RegistrationStub(self.channel)
-            self.register_job()
             self.datamiss_stub = pb_grpc.DataMissStub(self.channel)
-                        
-            self.runtime_buffer = OrderedDict()
-            self.req_time = []
-            self.load_time = []
-            
-            # runtime tmpfs waterline: n*num_workers*batch_size, n=2 initially
-            self.waterline = 2
-            self.pidx = 0
-            
+            self.register_job()
+
             signal.signal(signal.SIGINT, self.exit_gracefully)
             signal.signal(signal.SIGTERM, self.exit_gracefully)
-
+        
         self.dataset_col = None
             
     def exit_gracefully(self):
         self.channel.close()
+        self.notifier.stop()
             
     def register_job(self):
         """Register a list of jobs to the GM
@@ -115,7 +137,7 @@ class Client(pyinotify.ProcessEvent):
             self.dataset_col = mongo_client.Cacher.Datasets
 
             # prefetch the first 2 batches
-            while not self.prefetchPaths: pass
+            # while not self.prefetchPaths: pass
             for _ in range(self.waterline): 
                 self.prefetch()
 
@@ -131,19 +153,19 @@ class Client(pyinotify.ProcessEvent):
                 logger.warning('failed to request missing key {}'.format(key))
 
     def prefetch(self):
-        if self.runtime_conf['lazyloading']:
+        if self.runtime_conf['LazyLoading']:
             for _ in range(self.runtime_conf['num_workers']):
-                for path in self.prefetchPaths[self.pidx]:
-                    if self.pidx not in self.runtime_buffer:
-                        self.runtime_buffer[self.pidx] = []
-                    if path not in self.runtime_buffer[self.pidx]:
-                        shutil.copyfile(path, '/runtime/{}'.format(path))  # NFS --> tmpfs
-                        self.runtime_buffer[self.pidx].append(path)
-                self.pidx += 1
+                for path in self.prefetchPaths[self.prefetchIndex]:
+                    if self.prefetchIndex not in self.runtimeBuffer:
+                        self.runtimeBuffer[self.prefetchIndex] = []
+                    if path not in self.runtimeBuffer[self.prefetchIndex]:
+                        copyfile(path, '/runtime/{}'.format(path))  # NFS --> tmpfs
+                        self.runtimeBuffer[self.prefetchIndex].append(path)
+                self.prefetchIndex += 1
         else:
-            path = self.prefetchPaths[self.pidx]
-            shutil.copyfile(path, '/runtime/{}'.format(path))  # NFS --> tmpfs
-            self.pidx += 1
+            path = self.prefetchPaths[self.prefetchIndex]
+            copyfile(path, '/runtime/{}'.format(path))  # NFS --> tmpfs
+            self.prefetchIndex += 1
 
     def process_IN_CREATE(self, event):
         if event.pathname == '/share/datamiss':
@@ -151,8 +173,8 @@ class Client(pyinotify.ProcessEvent):
         elif event.pathname == '/share/next':
             self.req_time.append(time.time())
             self.prefetch()
-        elif event.path == '/share/prefetch_policy.json':
-            with open('/share/prefetch_policy.json', 'r') as f:
+        elif event.path == '/share/prefetchKeys.json':
+            with open('/share/prefetchKeys.json', 'r') as f:
                 tmp = json.load(f)
                 self.runtime_conf = tmp['meta']
                 self.prefetchPaths = tmp['policy']
@@ -161,22 +183,19 @@ class Client(pyinotify.ProcessEvent):
         self.process_IN_CREATE(event)
             
     def process_IN_CLOSE_NOWRITE(self, event):
-        path = event.pathname
-        if '/runtime' in path:
+        path = event.pathname.strip().split('/')[1:]
+        if '/runtime' in path and len(path) > 2:
             # pop head
-            batch_index = self.runtime_buffer.keys[0]
-            self.runtime_buffer[batch_index].pop(0)
-            if len(self.runtime_buffer[batch_index]) == 0:
-                self.runtime_buffer.popitem(last=False)
-            shutil.rmtree(path, ignore_errors=True)
+            batch_index = list(self.runtimeBuffer.keys())[0]
+            self.runtimeBuffer[batch_index].pop(0)
+            if len(self.runtimeBuffer[batch_index]) == 0:
+                self.runtimeBuffer.popitem(last=False)
+            os.remove("/{}".format("/".join(path)))
             
             # tune buffer size
             if len(self.req_time) > 1:
                 # decide alpha and beta based on the latest 3 measurements
                 alpha = np.diff(self.req_time[-4:])[1:]
-                beta = np.array(self.load_time[-3:])
-                N = len(self.prefetchPaths)
-                k = len(self.req_time)
                 """
                 To ensure the data is always available for DataLoader, the length of buffer should be:
                 s >= 2*B, if alpha >= beta; otherwise,
@@ -189,14 +208,14 @@ class Client(pyinotify.ProcessEvent):
                     return
                 else:
                     self.waterline = s
-                    while len(self.runtime_buffer) > s:
-                        self.runtime_buffer.popitem(last=False)
-                        self.pidx -= 1
-                    while len(self.runtime_buffer) < s:
+                    while len(self.runtimeBuffer) > s:
+                        self.runtimeBuffer.popitem(last=False)
+                        self.prefetchIndex -= 1
+                    while len(self.runtimeBuffer) < s:
                         self.prefetch()
-        elif path.split('/')[0] in nfs_servers:
+        elif path[0] in self.nfs_servers:
             assert self.dataset_col is not None
-            etag = path.split('/')[1]
+            etag = path[1]
             now = datetime.utcnow().timestamp()
             self.dataset_col.update_one(
                 {"ETag": etag}, 
@@ -207,21 +226,10 @@ class Client(pyinotify.ProcessEvent):
 
 
 if __name__ == '__main__':
-    client = Client()
-    if not os.path.exists("/share/datamiss"):
-        Path("/share/datamiss").touch()
-    wm = pyinotify.WatchManager()
-    mask = pyinotify.IN_CREATE | pyinotify.IN_MODIFY | pyinotify.IN_CLOSE_NOWRITE
-    wm.add_watch("/share", mask)
-    wm.add_watch('/runtime', mask)
-
-    # watch data access events
-    nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
-    for svr in nfs_servers:
-        wm.add_watch(svr, mask)
-    
-    notifier = pyinotify.Notifier(wm, client)
     try:
-        notifier.loop()
+        Client()
+        while True:
+            pass
     except KeyboardInterrupt:
-        notifier.stop()
+        pass
+        
