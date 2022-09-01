@@ -148,7 +148,6 @@ class DLCJobDataset(Dataset):
             nfs_path = '/{}/{}'.format(loc, etag)
             tmpfs_path = '/runtime{}'.format(nfs_path)
             try:
-                while not os.path.exists(tmpfs_path): pass
                 with open(tmpfs_path, 'rb') as f:
                     val = f.read()
             except FileNotFoundError:

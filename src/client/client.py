@@ -39,13 +39,15 @@ class Client(pyinotify.ProcessEvent):
             if job['qos']['UseCache']:
                 self.jobsmeta.append(job)
         
-        self.runtimeBuffer = OrderedDict()
+        # runtimeBuffer is used to track which file is consumed in tmpfs
+        self.runtimeBuffer = OrderedDict() # {batch_index: [tmpfs_path]}
         self.req_time = []
         self.load_time = []
         
         # runtime tmpfs waterline: n*num_workers*batch_size, n=2 initially
         self.waterline = 2
         self.prefetchIndex = 0
+        # prefetchPaths is the file list in nfs
         try:
             with open('/share/prefetchKeys.json', 'r') as f:
                 tmp = json.load(f)
@@ -53,17 +55,17 @@ class Client(pyinotify.ProcessEvent):
                 self.prefetchPaths = tmp['policy']
         except FIleNotFoundError:
             self.prefetchPaths = None
-            
+        
         # create inotify
         wm = pyinotify.WatchManager()
         mask = pyinotify.IN_CREATE | pyinotify.IN_MODIFY | pyinotify.IN_CLOSE_NOWRITE
-        wm.add_watch("/share", mask, auto_add=True, rec=False)
-        wm.add_watch('/runtime', mask, auto_add=True, rec=False)
+        wm.add_watch("/share", mask, auto_add=True, rec=True)
+        wm.add_watch('/runtime', mask, auto_add=True, rec=True)
         
         # watch data access events
         self.nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
         for svr in self.nfs_servers:
-            wm.add_watch(svr, mask, auto_add=True, rec=False)
+            wm.add_watch(svr, mask, auto_add=True, rec=True)
 
         self.notifier = pyinotify.Notifier(wm, self)
         notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
@@ -137,7 +139,7 @@ class Client(pyinotify.ProcessEvent):
             self.dataset_col = mongo_client.Cacher.Datasets
 
             # prefetch the first 2 batches
-            # while not self.prefetchPaths: pass
+            while not self.prefetchPaths: pass
             for _ in range(self.waterline): 
                 self.prefetch()
 
@@ -155,16 +157,22 @@ class Client(pyinotify.ProcessEvent):
     def prefetch(self):
         if self.runtime_conf['LazyLoading']:
             for _ in range(self.runtime_conf['num_workers']):
-                for path in self.prefetchPaths[self.prefetchIndex]:
-                    if self.prefetchIndex not in self.runtimeBuffer:
-                        self.runtimeBuffer[self.prefetchIndex] = []
-                    if path not in self.runtimeBuffer[self.prefetchIndex]:
-                        copyfile(path, '/runtime/{}'.format(path))  # NFS --> tmpfs
-                        self.runtimeBuffer[self.prefetchIndex].append(path)
-                self.prefetchIndex += 1
+                if self.prefetchIndex < len(self.prefetchPaths):
+                    for path in self.prefetchPaths[self.prefetchIndex]:
+                        if self.prefetchIndex not in self.runtimeBuffer:
+                            self.runtimeBuffer[self.prefetchIndex] = []
+                        if path not in self.runtimeBuffer[self.prefetchIndex]:
+                            t = time.time()
+                            tmpfs_path = '/runtime{}'.format(path)
+                            copyfile(path, tmpfs_path)  # NFS --> tmpfs
+                            self.load_time.append(time.time()-t)
+                            self.runtimeBuffer[self.prefetchIndex].append(tmpfs_path)
+                    self.prefetchIndex += 1
         else:
             path = self.prefetchPaths[self.prefetchIndex]
+            t = time.time()
             copyfile(path, '/runtime/{}'.format(path))  # NFS --> tmpfs
+            self.load_time.append(time.time()-t)
             self.prefetchIndex += 1
 
     def process_IN_CREATE(self, event):
@@ -181,38 +189,42 @@ class Client(pyinotify.ProcessEvent):
 
     def process_IN_MODIFY(self, event):
         self.process_IN_CREATE(event)
-            
+
+    # bug: tmpfs中的文件在读取前（中）被删除
     def process_IN_CLOSE_NOWRITE(self, event):
         path = event.pathname.strip().split('/')[1:]
-        if '/runtime' in path and len(path) > 2:
-            # pop head
-            batch_index = list(self.runtimeBuffer.keys())[0]
-            self.runtimeBuffer[batch_index].pop(0)
-            if len(self.runtimeBuffer[batch_index]) == 0:
-                self.runtimeBuffer.popitem(last=False)
-            os.remove("/{}".format("/".join(path)))
-            
-            # tune buffer size
-            if len(self.req_time) > 1:
-                # decide alpha and beta based on the latest 3 measurements
-                alpha = np.diff(self.req_time[-4:])[1:]
-                """
-                To ensure the data is always available for DataLoader, the length of buffer should be:
-                s >= 2*B, if alpha >= beta; otherwise,
-                s >= (N-k)*(1-alpha/beta) 
-                """
-                s = max(2, np.mean((1-alpha/beta)*(N-k), dtype=int))
-                
-                # update waterline according to load/consume speed
-                if self.waterline == s:
-                    return
-                else:
-                    self.waterline = s
-                    while len(self.runtimeBuffer) > s:
+        if 'runtime' in path and len(path) > 2:
+            if len(self.runtimeBuffer) > 1:
+                prefetchIndex = list(self.runtimeBuffer.keys())[0]
+                if len(self.runtimeBuffer[prefetchIndex]) > 0:
+                    tmpfsPath = self.runtimeBuffer[prefetchIndex].pop(0)
+                    if len(self.runtimeBuffer[prefetchIndex]) == 0:
                         self.runtimeBuffer.popitem(last=False)
-                        self.prefetchIndex -= 1
-                    while len(self.runtimeBuffer) < s:
-                        self.prefetch()
+                    os.remove(tmpfsPath)
+            
+                # tune buffer size
+                if len(self.req_time) > 2:
+                    """
+                    To ensure the data is always available for DataLoader, the length of buffer should be:
+                    s >= 2*B, if alpha >= beta; otherwise,
+                    s >= (N-k)*(1-alpha/beta) 
+                    """
+                    alpha = np.mean(np.diff(self.req_time[-4:])[1:])
+                    beta = np.mean(np.array(self.load_time[-3:]))
+                    N = len(self.prefetchPaths)
+                    k = len(self.req_time)
+                    s = max(2, (1-alpha/beta)*(N-k))
+                    
+                    # update waterline according to load/consume speed
+                    if self.waterline == s:
+                        return
+                    else:
+                        self.waterline = s
+                        while len(self.runtimeBuffer) > s:
+                            self.runtimeBuffer.popitem(last=True)
+                            self.prefetchIndex -= 1
+                        while len(self.runtimeBuffer) < s:
+                            self.prefetch()
         elif path[0] in self.nfs_servers:
             assert self.dataset_col is not None
             etag = path[1]
