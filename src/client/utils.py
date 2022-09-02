@@ -102,4 +102,4 @@ def copyfile(src, dst):
     base_dir = '/'.join(dst.split('/')[:-1])
     if not os.path.exists(base_dir):
         os.system('mkdir -p {}'.format(base_dir))
-    shutil.copy(src, dst)
+    shutil.copy2(src, dst)

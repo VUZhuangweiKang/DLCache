@@ -53,7 +53,7 @@ class Client(pyinotify.ProcessEvent):
                 tmp = json.load(f)
                 self.runtime_conf = tmp['meta']
                 self.prefetchPaths = tmp['policy']
-        except FIleNotFoundError:
+        except FileNotFoundError:
             self.prefetchPaths = None
         
         # create inotify
@@ -67,7 +67,8 @@ class Client(pyinotify.ProcessEvent):
         for svr in self.nfs_servers:
             wm.add_watch(svr, mask, auto_add=True, rec=True)
 
-        self.notifier = pyinotify.Notifier(wm, self)
+        # self.notifier = pyinotify.Notifier(wm, self)
+        self.notifier = pyinotify.AsyncNotifier(wm, self)
         notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
         notifierThread.start()
         
@@ -168,39 +169,44 @@ class Client(pyinotify.ProcessEvent):
                             self.load_time.append(time.time()-t)
                             self.runtimeBuffer[self.prefetchIndex].append(tmpfs_path)
                     self.prefetchIndex += 1
+                    if self.prefetchIndex >= len(self.prefetchPaths):
+                        self.prefetchIndex = 0
+                        break
         else:
             path = self.prefetchPaths[self.prefetchIndex]
             t = time.time()
             copyfile(path, '/runtime/{}'.format(path))  # NFS --> tmpfs
             self.load_time.append(time.time()-t)
             self.prefetchIndex += 1
+            if self.prefetchIndex == len(self.prefetchPaths):
+                self.prefetchIndex = 0
 
     def process_IN_CREATE(self, event):
         if event.pathname == '/share/datamiss':
             return self.handle_datamiss()
         elif event.pathname == '/share/next':
-            self.req_time.append(time.time())
             self.prefetch()
+            self.req_time.append(time.time())
         elif event.path == '/share/prefetchKeys.json':
             with open('/share/prefetchKeys.json', 'r') as f:
                 tmp = json.load(f)
                 self.runtime_conf = tmp['meta']
                 self.prefetchPaths = tmp['policy']
-
+                
     def process_IN_MODIFY(self, event):
         self.process_IN_CREATE(event)
 
-    # bug: tmpfs中的文件在读取前（中）被删除
+    # TODO: bug: prefetch copy 文件的速度跟不上DLCJob请求数据的速度，所以要么出现data miss，要么碎片化的数据被load，造成读取失败
     def process_IN_CLOSE_NOWRITE(self, event):
         path = event.pathname.strip().split('/')[1:]
         if 'runtime' in path and len(path) > 2:
             if len(self.runtimeBuffer) > 1:
+                # LRU Eviction
                 prefetchIndex = list(self.runtimeBuffer.keys())[0]
                 if len(self.runtimeBuffer[prefetchIndex]) > 0:
-                    tmpfsPath = self.runtimeBuffer[prefetchIndex].pop(0)
+                    self.runtimeBuffer[prefetchIndex].pop(0)
                     if len(self.runtimeBuffer[prefetchIndex]) == 0:
                         self.runtimeBuffer.popitem(last=False)
-                    os.remove(tmpfsPath)
             
                 # tune buffer size
                 if len(self.req_time) > 2:

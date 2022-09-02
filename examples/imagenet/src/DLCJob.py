@@ -4,6 +4,7 @@ import concurrent.futures
 import multiprocessing
 from math import inf
 import math
+import threading
 import numpy as np
 import time
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
@@ -148,13 +149,15 @@ class DLCJobDataset(Dataset):
             nfs_path = '/{}/{}'.format(loc, etag)
             tmpfs_path = '/runtime{}'.format(nfs_path)
             try:
+                # while not os.path.exists(tmpfs_path): pass
                 with open(tmpfs_path, 'rb') as f:
                     val = f.read()
+                threading.Thread(target=lambda: os.remove(tmpfs_path), daemon=True).start()  # 在后台删除
             except FileNotFoundError:
                 print("miss file {}".format(tmpfs_path))
                 with open(nfs_path, 'rb') as f:
                     val = f.read()
-            except FileNotFoundError:
+            else:
                 print("miss file {}".format(nfs_path))
                 with open('/share/datamiss', 'w') as f:
                     f.writelines("{}:{}".format(self.bucket, key))
