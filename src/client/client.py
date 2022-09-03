@@ -4,16 +4,16 @@ import signal
 import json
 import time
 import glob
-from pathlib import Path
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import pyinotify
-import shutil
 import threading
 from collections import OrderedDict
 import numpy as np
 from pymongo import MongoClient
+import concurrent
+import multiprocessing
 import datetime
 import bson
 from utils import *
@@ -156,18 +156,24 @@ class Client(pyinotify.ProcessEvent):
                 logger.warning('failed to request missing key {}'.format(key))
 
     def prefetch(self):
+        def docopy(path):
+            if self.prefetchIndex not in self.runtimeBuffer:
+                self.runtimeBuffer[self.prefetchIndex] = []
+            if path not in self.runtimeBuffer[self.prefetchIndex]:
+                t = time.time()
+                tmpfs_path = '/runtime{}'.format(path)
+                copyfile(path, tmpfs_path)  # NFS --> tmpfs
+                self.load_time.append(time.time()-t)
+                self.runtimeBuffer[self.prefetchIndex].append(tmpfs_path)
+                            
         if self.runtime_conf['LazyLoading']:
             for _ in range(self.runtime_conf['num_workers']):
                 if self.prefetchIndex < len(self.prefetchPaths):
-                    for path in self.prefetchPaths[self.prefetchIndex]:
-                        if self.prefetchIndex not in self.runtimeBuffer:
-                            self.runtimeBuffer[self.prefetchIndex] = []
-                        if path not in self.runtimeBuffer[self.prefetchIndex]:
-                            t = time.time()
-                            tmpfs_path = '/runtime{}'.format(path)
-                            copyfile(path, tmpfs_path)  # NFS --> tmpfs
-                            self.load_time.append(time.time()-t)
-                            self.runtimeBuffer[self.prefetchIndex].append(tmpfs_path)
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                        futures = []
+                        for path in self.prefetchPaths[self.prefetchIndex]:
+                            futures.append(executor.submit(docopy, path))
+                        concurrent.futures.wait(futures)
                     self.prefetchIndex += 1
                     if self.prefetchIndex >= len(self.prefetchPaths):
                         self.prefetchIndex = 0
