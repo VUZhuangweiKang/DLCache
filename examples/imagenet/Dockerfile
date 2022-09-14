@@ -1,5 +1,5 @@
 FROM pytorch/pytorch:latest
-RUN apt-get update && apt-get install nano
+RUN apt-get update && apt-get install nano pymongo
 RUN mkdir app
 WORKDIR /app
 COPY src ./

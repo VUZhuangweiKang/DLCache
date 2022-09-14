@@ -1,3 +1,4 @@
+from collections import defaultdict
 import pickle
 import time
 import sys
@@ -18,29 +19,23 @@ class ImageNetDataset(DLCJobDataset):
         self.dur = []
     
     def find_classes(self, keys):
-        cls_keys = {}
-        classes = []
+        cls_keys = defaultdict(list)
         for x in keys:
-            clas = x.split('/')[2]
-            classes.append(clas)
-            if clas in cls_keys:
-                cls_keys[clas].append(x)
-            else:
-                cls_keys[clas] = [x]
-        classes = sorted(classes)
-        if len(classes) == 0:
+            cls_name = x.split('/')[2]
+            cls_keys[cls_name].append(x)
+        if len(cls_keys) == 0:
             raise FileNotFoundError(f"Couldn't find any class.")
-        class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
-        return cls_keys, class_to_idx
+        classes = list(cls_keys.keys())
+        return cls_keys, classes
 
     def __convert__(self):
         samples = []
         targets = []
-        cls_keys, class_to_idx = self.find_classes(self.keys)
-        for target_class in class_to_idx:
-            for key in cls_keys[target_class]:
+        cls_keys, classes = self.find_classes(self.keys)
+        for i, class_name in enumerate(classes):
+            for key in cls_keys[class_name]:
                 samples.append(self.data[key])
-                targets.append(class_to_idx[target_class])
+                targets.append(i)
         return samples, targets
     
     def __getitem__(self, index: int):

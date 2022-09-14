@@ -21,6 +21,11 @@ from utils import *
 
 logger = get_logger(__name__, level='Debug')
 
+# data sharing channels between DLJob and Client
+prefetchChannel = "/share/prefetchKeys.json"
+dataReqChannel = "/share/next"
+dataMissChannel = '/share/datamiss'
+
 
 def read_secret(arg):
     path = '/secret/{}'.format(arg)
@@ -28,7 +33,7 @@ def read_secret(arg):
     with open(path, 'r') as f:
         data = f.read().strip()
     return data
-        
+
 
 class Client(pyinotify.ProcessEvent):
     def __init__(self):
@@ -39,39 +44,13 @@ class Client(pyinotify.ProcessEvent):
             if job['qos']['UseCache']:
                 self.jobsmeta.append(job)
         
-        # runtimeBuffer is used to track which file is consumed in tmpfs
-        self.runtimeBuffer = OrderedDict() # {batch_index: [tmpfs_path]}
-        self.req_time = []
-        self.load_time = []
-        
-        # runtime tmpfs waterline: n*num_workers*batch_size, n=2 initially
-        self.waterline = 2
-        self.prefetchIndex = 0
-        # prefetchPaths is the file list in nfs
-        try:
-            with open('/share/prefetchKeys.json', 'r') as f:
-                tmp = json.load(f)
-                self.runtime_conf = tmp['meta']
-                self.prefetchPaths = tmp['policy']
-        except FileNotFoundError:
-            self.prefetchPaths = None
-        
-        # create inotify
-        wm = pyinotify.WatchManager()
-        mask = pyinotify.IN_CREATE | pyinotify.IN_MODIFY | pyinotify.IN_CLOSE_NOWRITE
-        wm.add_watch("/share", mask, auto_add=True, rec=True)
-        wm.add_watch('/runtime', mask, auto_add=True, rec=True)
-        
-        # watch data access events
-        self.nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
-        for svr in self.nfs_servers:
-            wm.add_watch(svr, mask, auto_add=True, rec=True)
-
-        # self.notifier = pyinotify.Notifier(wm, self)
-        self.notifier = pyinotify.AsyncNotifier(wm, self)
-        notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
-        notifierThread.start()
-        
+        # delete the old prefetchKeys
+        if os.path.exists(prefetchChannel):
+            os.remove(prefetchChannel)
+        if os.path.exists(dataReqChannel):
+            os.remove(dataReqChannel)
+            
+        # register the job to Manager
         if len(self.jobsmeta) > 0:
             self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
             self.channel = grpc.insecure_channel("dlcpod-manager:50051")
@@ -95,12 +74,46 @@ class Client(pyinotify.ProcessEvent):
             
             self.register_stub = pb_grpc.RegistrationStub(self.channel)
             self.datamiss_stub = pb_grpc.DataMissStub(self.channel)
+            self.dataset_col = None
             self.register_job()
-
-            signal.signal(signal.SIGINT, self.exit_gracefully)
-            signal.signal(signal.SIGTERM, self.exit_gracefully)
         
-        self.dataset_col = None
+        # ------------------------ Coordinated Data Prefetching ------------------------
+        # runtimeBuffer is used to track which file is consumed in tmpfs
+        self.runtimeBuffer = OrderedDict() # {batch_index: [tmpfs_path]}
+        
+        # record data requesting and loading time for dynamically tuning the cache capacity
+        self.req_time = []
+        self.load_time = []
+        
+        # runtime tmpfs waterline: n*num_workers*batch_size, n=2 initially
+        self.waterline = 2
+        self.prefetchIndex = 0
+        self.runtimeConf = None
+        self.prefetchPaths = None
+        
+        # create inotify
+        wm = pyinotify.WatchManager()
+        mask = pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CLOSE_NOWRITE
+        wm.add_watch("/share", pyinotify.IN_CLOSE_WRITE, auto_add=True, rec=True)
+        wm.add_watch('/runtime', pyinotify.IN_CLOSE_NOWRITE, auto_add=True, rec=True)
+        
+        # watch NFS data access events, which will be used for data eviction
+        self.nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
+        for svr in self.nfs_servers:
+            wm.add_watch(svr, mask, auto_add=True, rec=True)
+
+        self.notifier = pyinotify.Notifier(wm, self)
+        notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
+        notifierThread.start()
+        
+        # prefetch the first 2 batches
+        while not self.prefetchPaths: continue
+        for _ in range(self.waterline):
+            with open(dataReqChannel, 'w') as f:  # push signal into the dataReqChannel for initial data loading
+                f.write(str(time.time()))
+        
+        signal.signal(signal.SIGINT, self.exit_gracefully)
+        signal.signal(signal.SIGTERM, self.exit_gracefully)
             
     def exit_gracefully(self):
         self.channel.close()
@@ -133,27 +146,23 @@ class Client(pyinotify.ProcessEvent):
                 logger.error("failed to register job {}: {}".format(job['name'], resp.error))
                 os.kill(os.getpid(), signal.SIGINT)
             logger.info('registered job {}, assigned jobId is {}'.format(job['name'], resp.jobId))
+
             with open('/share/{}.json'.format(job['name']), 'w') as f:  # marshelled registration response
                 json.dump(MessageToDict(resp), f)
             
-            mongo_client = MongoClient(resp.mongoUri)
-            self.dataset_col = mongo_client.Cacher.Datasets
-
-            # prefetch the first 2 batches
-            while not self.prefetchPaths: pass
-            for _ in range(self.waterline): 
-                self.prefetch()
+            if not self.dataset_col:
+                mongo_client = MongoClient(resp.mongoUri)
+                self.dataset_col = mongo_client.Cacher.Datasets
 
     def handle_datamiss(self):
-        with open('/share/datamiss', 'r') as f:
-            misskeys = f.readlines()
-        for key in misskeys:
-            bucket, key = key.split(':')
-            resp = self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, bucket=bucket, key=key))
+        with open(dataMissChannel, 'r') as f:
+            etags = f.readlines()
+        for etag in etags:
+            resp = self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
             if resp.response:
-                logger.info('request missing key {}'.format(key))
+                logger.info('request missing etag {}'.format(etag))
             else:
-                logger.warning('failed to request missing key {}'.format(key))
+                logger.warning('failed to request missing etag {}'.format(etag))
 
     def prefetch(self):
         def docopy(path):
@@ -166,8 +175,8 @@ class Client(pyinotify.ProcessEvent):
                 self.load_time.append(time.time()-t)
                 self.runtimeBuffer[self.prefetchIndex].append(tmpfs_path)
                             
-        if self.runtime_conf['LazyLoading']:
-            for _ in range(self.runtime_conf['num_workers']):
+        if self.runtimeConf['LazyLoading']:
+            for _ in range(self.runtimeConf['num_workers']):
                 if self.prefetchIndex < len(self.prefetchPaths):
                     with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                         futures = []
@@ -187,20 +196,18 @@ class Client(pyinotify.ProcessEvent):
             if self.prefetchIndex == len(self.prefetchPaths):
                 self.prefetchIndex = 0
 
-    def process_IN_CREATE(self, event):
-        if event.pathname == '/share/datamiss':
+    def process_IN_CLOSE_WRITE(self, event):
+        path = event.pathname
+        if path == dataMissChannel:
             return self.handle_datamiss()
-        elif event.pathname == '/share/next':
+        elif path == dataReqChannel:
             self.prefetch()
             self.req_time.append(time.time())
-        elif event.path == '/share/prefetchKeys.json':
-            with open('/share/prefetchKeys.json', 'r') as f:
+        elif path == prefetchChannel:
+            with open(prefetchChannel, 'r') as f:
                 tmp = json.load(f)
-                self.runtime_conf = tmp['meta']
-                self.prefetchPaths = tmp['policy']
-                
-    def process_IN_MODIFY(self, event):
-        self.process_IN_CREATE(event)
+                self.runtimeConf = tmp['meta']
+                self.prefetchPaths = tmp['paths']
 
     # TODO: bug: prefetch copy 文件的速度跟不上DLCJob请求数据的速度，所以要么出现data miss，要么碎片化的数据被load，造成读取失败
     def process_IN_CLOSE_NOWRITE(self, event):
@@ -221,11 +228,10 @@ class Client(pyinotify.ProcessEvent):
                     s >= 2*B, if alpha >= beta; otherwise,
                     s >= (N-k)*(1-alpha/beta) 
                     """
-                    alpha = np.mean(np.diff(self.req_time[-4:])[1:])
-                    beta = np.mean(np.array(self.load_time[-3:]))
-                    N = len(self.prefetchPaths)
-                    k = len(self.req_time)
-                    s = max(2, (1-alpha/beta)*(N-k))
+                    alpha = np.mean(np.diff(self.req_time)[1:])
+                    beta = np.mean(np.array(self.load_time))
+                    N = len(self.prefetchPaths) - len(self.req_time)
+                    s = max(2, (1-alpha/beta)*N)
                     
                     # update waterline according to load/consume speed
                     if self.waterline == s:

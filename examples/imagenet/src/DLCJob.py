@@ -12,6 +12,12 @@ from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 
 
+# data sharing channels between DLJob and Client
+prefetchChannel = "/share/prefetchKeys.json"
+dataReqChannel = "/share/next"
+dataMissChannel = '/share/datamiss'
+
+
 class dotdict(dict):
     """dot.notation access to dictionary attributes"""
     __getattr__ = dict.get
@@ -159,8 +165,8 @@ class DLCJobDataset(Dataset):
                     val = f.read()
             else:
                 print("miss file {}".format(nfs_path))
-                with open('/share/datamiss', 'w') as f:
-                    f.writelines("{}:{}".format(self.bucket, key))
+                with open(dataMissChannel, 'w') as f:
+                    f.writelines(etag)
                 while not os.path.exists(etag): pass
                 with open(nfs_path, 'rb') as f:
                     val = f.read()
@@ -320,14 +326,15 @@ class DLCJobDataLoader(object):
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
         self.init_loader()
+        while not os.path.exists(dataReqChannel): continue
         self.index = 1
         
         # prefetch size depends on the chunk size when LazyLoading is disabled
         if not self.lazy:
-            with open('/share/prefetchKeys.json', 'w') as f:
+            with open(prefetchChannel, 'w') as f:
                 json.dump(f, {
                     "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                    "policy": self.dataset.nfsFilePaths})
+                    "paths": self.dataset.nfsFilePaths})
     
     def init_loader(self):
         # shuffle if disabled under the LazyLoading mode
@@ -336,16 +343,17 @@ class DLCJobDataLoader(object):
                             prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
         self.loader = loader._get_iterator()
         file_paths = np.array(self.dataset.nfsFilePaths)
+        
         if self.lazy:
             prefetchPaths = [file_paths[indices].tolist() for indices in loader._index_sampler]
-            with open('/share/prefetchKeys.json', 'w') as f:
+            with open(prefetchChannel, 'w') as f:
                 json.dump(
                     {
                         "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                        "policy": prefetchPaths
+                        "paths": prefetchPaths
                     }, f)
         else:
-            with open('/share/next', 'w') as f:
+            with open(dataReqChannel, 'w') as f:
                 f.write(str(time.time()))
         
     def __iter__(self):
@@ -355,7 +363,7 @@ class DLCJobDataLoader(object):
         try:
             data = self.loader.next()
             if self.lazy:
-                with open('/share/next', 'w') as f:
+                with open(dataReqChannel, 'w') as f:
                     f.write(str(time.time()))
         except StopIteration:
             if self.index == len(self.dataset.chunks):  # epoch is down

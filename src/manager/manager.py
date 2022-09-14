@@ -110,6 +110,7 @@ class Manager():
         return bucket_objs
     
     # evict keys from a specific NFS server
+    # Todo: substituable hit
     def evict_data(self, node):        
         if self.managerconf['eviction-policy'] == 'lru':
             pipeline = [
@@ -135,7 +136,7 @@ class Manager():
         s3obj['LastAccessTime'] = bson.timestamp.Timestamp(int(now), inc=1)
         file_type = key.split('.')[-1].lower()
 
-        def schedule_obj(obj):
+        def assignLocation(obj):
             while True:
                 for node in node_sequence:
                     free_space = shutil.disk_usage("/{}".format(node))[-1]
@@ -146,7 +147,6 @@ class Manager():
 
         chunk_size *= 1e6 # Mill bytes --> bytes
         if s3obj['Size'] <= chunk_size:
-            # Possible bug: local variable 'value' referenced before assignment"
             value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
             if 'ETag' in s3obj:
                 etag = s3obj['ETag'].strip("\"")
@@ -155,7 +155,7 @@ class Manager():
 
             s3obj['ChunkETag'] = etag
             s3obj['ChunkSize'] = s3obj['Size']
-            s3obj = schedule_obj(s3obj)
+            s3obj = assignLocation(s3obj)
             path = "/%s/%s" % (s3obj['Location'], etag)
             with open(path, 'wb') as f:
                 f.write(value)
@@ -176,7 +176,7 @@ class Manager():
                     if part is None or part == i:
                         etag = hashing(chunk.compute())
                         s3obj['ChunkSize'] = chunk.memory_usage_per_partition(deep=True).compute()
-                        s3obj = schedule_obj(s3obj)
+                        s3obj = assignLocation(s3obj)
                         path = "/%s/%s" % (s3obj['Location'], etag)
                         if file_type == 'csv':
                             chunk.to_csv(path, index=False)
@@ -207,7 +207,7 @@ class Manager():
                             value = value.reshape((-1,) + shape[1:])
                             etag = hashing(value)
                             s3obj['ChunkSize'] = value.nbytes
-                            s3obj = schedule_obj(s3obj)
+                            s3obj = assignLocation(s3obj)
                             path = "/{}/{}".format(s3obj['Location'], etag)
                             np.save(path, value)
                             s3obj['ChunkETag'] = etag
@@ -224,7 +224,7 @@ class Manager():
                         if part is None or part == p:
                             etag = hashing(value)
                             s3obj['ChunkSize'] = sys.getsizeof(value)
-                            s3obj = schedule_obj(s3obj)
+                            s3obj = assignLocation(s3obj)
                             path = "/{}/{}".format(s3obj['Location'], etag)
                             with open(path, 'wb') as f:
                                 f.write(value)
@@ -307,6 +307,8 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                         futures.append(executor.submit(self.manager.filter_objs, page))
                 for future in concurrent.futures.as_completed(futures):
                     bucket_objs.extend(future.result())
+            
+            # TODO: Data Eviction if necessary
             
             # TODO: if (partial) dataset is on the NFS, rebalance dataset across the cluster
             # copy data from S3 to NFS, init the `ChunkSize`, `Location`, and `ChunkTag` fields

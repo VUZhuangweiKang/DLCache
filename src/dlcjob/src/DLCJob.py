@@ -3,12 +3,19 @@ import json
 import concurrent.futures
 import multiprocessing
 from math import inf
-from urllib import request
+import math
+import threading
 import numpy as np
 import time
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
+
+
+# data sharing channels between DLJob and Client
+prefetchChannel = "/share/prefetchKeys.json"
+dataReqChannel = "/share/next"
+dataMissChannel = '/share/datamiss'
 
 
 class dotdict(dict):
@@ -20,25 +27,25 @@ class dotdict(dict):
         
 class DLCJobDataset(Dataset):
     def __init__(self, keys: List[str] = None, shuffle=False):
-        # """An abstract class subclassing the torch.utils.data.Dataset class
+        """An abstract class subclassing the torch.utils.data.Dataset class
         
-        # All datasets that represent a map from keys to data samples should subclass
-        # it. All subclasses should overwrite :meth:`__convert__`, supporting pre-processing loaded data. 
-        # Subclasses should also overwrite meth:`__getitem__`, supporting fetching a
-        # data sample for a given key. Subclasses could also optionally overwrite
-        # :meth:`__len__`, which is expected to return the size of the dataset by many
-        # :class:`~torch.utils.data.Sampler` implementations and the default options
-        # of :class:`~DLCJobDataLoader`.
+        All datasets that represent a map from keys to data samples should subclass
+        it. All subclasses should overwrite :meth:`__convert__`, supporting pre-processing loaded data. 
+        Subclasses should also overwrite meth:`__getitem__`, supporting fetching a
+        data sample for a given key. Subclasses could also optionally overwrite
+        :meth:`__len__`, which is expected to return the size of the dataset by many
+        :class:`~torch.utils.data.Sampler` implementations and the default options
+        of :class:`~DLCJobDataLoader`.
         
-        # .. note::
-        # Subclassing ~DLCJobDataset will load data under provided keys from DLCache to var:`self.data` as Map<Key, Value>.
-        # Overwriting meth:`__convert__` allows you to replace var:`self.data` and var:`self.targets` with
-        # iteratable variables that can be iterated in meth:`__get_item__`.
+        .. note::
+        Subclassing ~DLCJobDataset will load data under provided keys from DLCache to var:`self.data` as Map<Key, Value>.
+        Overwriting meth:`__convert__` allows you to replace var:`self.data` and var:`self.targets` with
+        iteratable variables that can be iterated in meth:`__get_item__`.
         
-        # Args:
-        #     keys (List, optional): a list of bucket keys. Defaults to None, meaning loading all keys in the bucket.
-        #     shuffle (Bool, optional): default False
-        # """
+        Args:
+            keys (List, optional): a list of bucket keys. Defaults to None, meaning loading all keys in the bucket.
+            shuffle (Bool, optional): default False
+        """
         self.shuffle = shuffle
         jobname = os.environ.get('JOBNAME')
         self.keys = keys
@@ -75,13 +82,13 @@ class DLCJobDataset(Dataset):
             self.client = s3_session.client('s3')
             self.load_s3_keys()
 
-        self.file_paths_nfs = []
+        self.nfsFilePaths = []
         self.targets = None
         self.load_data(0)
                     
     def get_data(self, index):
         if self.qos['LazyLoading']:
-            return self.load(self.data[index])
+            return self.read(self.data[index])
         else:
             return self.data[index]
     
@@ -146,13 +153,19 @@ class DLCJobDataset(Dataset):
             etag = chunk['ChunkETag']
             loc = chunk['Location']
             nfs_path = '/{}/{}'.format(loc, etag)
-            tmpfs_path = '/runtime/{}'.format(nfs_path)
+            tmpfs_path = '/runtime{}'.format(nfs_path)
             try:
-                path = tmpfs_path if os.path.exists(tmpfs_path) else nfs_path
-                with open(path, 'rb') as f:
+                # while not os.path.exists(tmpfs_path): pass
+                with open(tmpfs_path, 'rb') as f:
                     val = f.read()
+                threading.Thread(target=lambda: os.remove(tmpfs_path), daemon=True).start()  # 在后台删除
             except FileNotFoundError:
-                with open('/share/datamiss', 'w') as f:
+                print("miss file {}".format(tmpfs_path))
+                with open(nfs_path, 'rb') as f:
+                    val = f.read()
+            else:
+                print("miss file {}".format(nfs_path))
+                with open(dataMissChannel, 'w') as f:
                     f.writelines("{}:{}".format(self.bucket, key))
                 while not os.path.exists(etag): pass
                 with open(nfs_path, 'rb') as f:
@@ -163,17 +176,15 @@ class DLCJobDataset(Dataset):
 
     def load_data(self, index):
         self.data = {}
-        self.keys = []        
+        self.keys = []
         if self.qos['LazyLoading']:
-            # LazyLoading mode fits dataset which data items 
-            # are individual files, such as image dataset
+            # LazyLoading mode fits dataset which data items are individual files, such as image dataset
             for chunk in self.chunks[index]:
                 self.keys.append(chunk['Key'])
-                self.file_paths_nfs.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
+                self.nfsFilePaths.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
                 self.data[chunk['Key']] = chunk
         else:
-            # Normal mode fits tabular or block datasets, 
-            # so we load a subset of the original dataset here
+            # Normal mode fits tabular or block datasets, so we load a subset of the original dataset here
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
                 for chunk in self.chunks[index]:
@@ -181,7 +192,7 @@ class DLCJobDataset(Dataset):
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
                     chunk = self.chunks[index][i]
                     self.keys.append(chunk['Key'])
-                    self.file_paths_nfs.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
+                    self.nfsFilePaths.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
                     self.data[chunk['Key']] = future.result()
                 
         self.data, self.targets = self.__convert__()
@@ -197,13 +208,13 @@ class DLCJobDataset(Dataset):
         raise NotImplementedError
     
     def __getitem__(self, index: int) -> Any:
-        # """
-        # Args:
-        #     index (int): Index
+        """
+        Args:
+            index (int): Index
 
-        # Returns:
-        #     (Any): Sample and meta data, optionally transformed by the respective transforms.
-        # """
+        Returns:
+            (Any): Sample and meta data, optionally transformed by the respective transforms.
+        """
         raise NotImplementedError
 
 
@@ -220,83 +231,83 @@ class DLCJobDataLoader(object):
                  timeout: float = 0, worker_init_fn: Optional[_worker_init_fn_t] = None,
                  multiprocessing_context=None, generator=None, *, prefetch_factor: int = 2,
                  persistent_workers: bool = False):
-        # """
-        # Data loader. Combines a dataset and a sampler, and provides an iterable over
-        # the given dataset.
+        """
+        Data loader. Combines a dataset and a sampler, and provides an iterable over
+        the given dataset.
 
-        # The :class:`~torch.utils.data.DataLoader` supports both map-style and
-        # iterable-style datasets with single- or multi-process loading, customizing
-        # loading order and optional automatic batching (collation) and memory pinning.
+        The :class:`~torch.utils.data.DataLoader` supports both map-style and
+        iterable-style datasets with single- or multi-process loading, customizing
+        loading order and optional automatic batching (collation) and memory pinning.
 
-        # See :py:mod:`torch.utils.data` documentation page for more details.
+        See :py:mod:`torch.utils.data` documentation page for more details.
 
-        # Args:
-        #     dataset (DLCJobDataset): dataset from which to load the data.
-        #     batch_size (int, optional): how many samples per batch to load
-        #         (default: ``1``).
-        #     sampler (Sampler or Iterable, optional): defines the strategy to draw
-        #         samples from the dataset. Can be any ``Iterable`` with ``__len__``
-        #         implemented. If specified, :attr:`shuffle` must not be specified.
-        #     batch_sampler (Sampler or Iterable, optional): like :attr:`sampler`, but
-        #         returns a batch of indices at a time. Mutually exclusive with
-        #         :attr:`batch_size`, :attr:`shuffle`, :attr:`sampler`,
-        #         and :attr:`drop_last`.
-        #     num_workers (int, optional): how many subprocesses to use for data
-        #         loading. ``0`` means that the data will be loaded in the main process.
-        #         (default: ``0``)
-        #     collate_fn (callable, optional): merges a list of samples to form a
-        #         mini-batch of Tensor(s).  Used when using batched loading from a
-        #         map-style dataset.
-        #     pin_memory (bool, optional): If ``True``, the data loader will copy Tensors
-        #         into CUDA pinned memory before returning them.  If your data elements
-        #         are a custom type, or your :attr:`collate_fn` returns a batch that is a custom type,
-        #         see the example below.
-        #     drop_last (bool, optional): set to ``True`` to drop the last incomplete batch,
-        #         if the dataset size is not divisible by the batch size. If ``False`` and
-        #         the size of dataset is not divisible by the batch size, then the last batch
-        #         will be smaller. (default: ``False``)
-        #     timeout (numeric, optional): if positive, the timeout value for collecting a batch
-        #         from workers. Should always be non-negative. (default: ``0``)
-        #     worker_init_fn (callable, optional): If not ``None``, this will be called on each
-        #         worker subprocess with the worker id (an int in ``[0, num_workers - 1]``) as
-        #         input, after seeding and before data loading. (default: ``None``)
-        #     generator (torch.Generator, optional): If not ``None``, this RNG will be used
-        #         by RandomSampler to generate random self.indexes and multiprocessing to generate
-        #         `base_seed` for workers. (default: ``None``)
-        #     prefetch_factor (int, optional, keyword-only arg): Number of samples loaded
-        #         in advance by each worker. ``2`` means there will be a total of
-        #         2 * num_workers samples prefetched across all workers. (default: ``2``)
-        #     persistent_workers (bool, optional): If ``True``, the data loader will not shutdown
-        #         the worker processes after a dataset has been consumed once. This allows to
-        #         maintain the workers `Dataset` instances alive. (default: ``False``)
+        Args:
+            dataset (DLCJobDataset): dataset from which to load the data.
+            batch_size (int, optional): how many samples per batch to load
+                (default: ``1``).
+            sampler (Sampler or Iterable, optional): defines the strategy to draw
+                samples from the dataset. Can be any ``Iterable`` with ``__len__``
+                implemented. If specified, :attr:`shuffle` must not be specified.
+            batch_sampler (Sampler or Iterable, optional): like :attr:`sampler`, but
+                returns a batch of indices at a time. Mutually exclusive with
+                :attr:`batch_size`, :attr:`shuffle`, :attr:`sampler`,
+                and :attr:`drop_last`.
+            num_workers (int, optional): how many subprocesses to use for data
+                loading. ``0`` means that the data will be loaded in the main process.
+                (default: ``0``)
+            collate_fn (callable, optional): merges a list of samples to form a
+                mini-batch of Tensor(s).  Used when using batched loading from a
+                map-style dataset.
+            pin_memory (bool, optional): If ``True``, the data loader will copy Tensors
+                into CUDA pinned memory before returning them.  If your data elements
+                are a custom type, or your :attr:`collate_fn` returns a batch that is a custom type,
+                see the example below.
+            drop_last (bool, optional): set to ``True`` to drop the last incomplete batch,
+                if the dataset size is not divisible by the batch size. If ``False`` and
+                the size of dataset is not divisible by the batch size, then the last batch
+                will be smaller. (default: ``False``)
+            timeout (numeric, optional): if positive, the timeout value for collecting a batch
+                from workers. Should always be non-negative. (default: ``0``)
+            worker_init_fn (callable, optional): If not ``None``, this will be called on each
+                worker subprocess with the worker id (an int in ``[0, num_workers - 1]``) as
+                input, after seeding and before data loading. (default: ``None``)
+            generator (torch.Generator, optional): If not ``None``, this RNG will be used
+                by RandomSampler to generate random self.indexes and multiprocessing to generate
+                `base_seed` for workers. (default: ``None``)
+            prefetch_factor (int, optional, keyword-only arg): Number of samples loaded
+                in advance by each worker. ``2`` means there will be a total of
+                2 * num_workers samples prefetched across all workers. (default: ``2``)
+            persistent_workers (bool, optional): If ``True``, the data loader will not shutdown
+                the worker processes after a dataset has been consumed once. This allows to
+                maintain the workers `Dataset` instances alive. (default: ``False``)
 
 
-        # .. warning:: If the ``spawn`` start method is used, :attr:`worker_init_fn`
-        #             cannot be an unpicklable object, e.g., a lambda function. See
-        #             :ref:`multiprocessing-best-practices` on more details related
-        #             to multiprocessing in PyTorch.
+        .. warning:: If the ``spawn`` start method is used, :attr:`worker_init_fn`
+                    cannot be an unpicklable object, e.g., a lambda function. See
+                    :ref:`multiprocessing-best-practices` on more details related
+                    to multiprocessing in PyTorch.
 
-        # .. warning:: ``len(dataloader)`` heuristic is based on the length of the sampler used.
-        #             When :attr:`dataset` is an :class:`~torch.utils.data.IterableDataset`,
-        #             it instead returns an estimate based on ``len(dataset) / batch_size``, with proper
-        #             rounding depending on :attr:`drop_last`, regardless of multi-process loading
-        #             configurations. This represents the best guess PyTorch can make because PyTorch
-        #             trusts user :attr:`dataset` code in correctly handling multi-process
-        #             loading to avoid duplicate data.
+        .. warning:: ``len(dataloader)`` heuristic is based on the length of the sampler used.
+                    When :attr:`dataset` is an :class:`~torch.utils.data.IterableDataset`,
+                    it instead returns an estimate based on ``len(dataset) / batch_size``, with proper
+                    rounding depending on :attr:`drop_last`, regardless of multi-process loading
+                    configurations. This represents the best guess PyTorch can make because PyTorch
+                    trusts user :attr:`dataset` code in correctly handling multi-process
+                    loading to avoid duplicate data.
 
-        #             However, if sharding results in multiple workers having incomplete last batches,
-        #             this estimate can still be inaccurate, because (1) an otherwise complete batch can
-        #             be broken into multiple ones and (2) more than one batch worth of samples can be
-        #             dropped when :attr:`drop_last` is set. Unfortunately, PyTorch can not detect such
-        #             cases in general.
+                    However, if sharding results in multiple workers having incomplete last batches,
+                    this estimate can still be inaccurate, because (1) an otherwise complete batch can
+                    be broken into multiple ones and (2) more than one batch worth of samples can be
+                    dropped when :attr:`drop_last` is set. Unfortunately, PyTorch can not detect such
+                    cases in general.
 
-        #             See `Dataset Types`_ for more details on these two types of datasets and how
-        #             :class:`~torch.utils.data.IterableDataset` interacts with
-        #             `Multi-process data loading`_.
+                    See `Dataset Types`_ for more details on these two types of datasets and how
+                    :class:`~torch.utils.data.IterableDataset` interacts with
+                    `Multi-process data loading`_.
 
-        # .. warning:: See :ref:`reproducibility`, and :ref:`dataloader-workers-random-seed`, and
-        #             :ref:`data-loading-randomness` notes for random seed related questions.
-        # """
+        .. warning:: See :ref:`reproducibility`, and :ref:`dataloader-workers-random-seed`, and
+                    :ref:`data-loading-randomness` notes for random seed related questions.
+        """
     
         self.dataset = dataset
         self.batch_size = batch_size
@@ -313,16 +324,17 @@ class DLCJobDataLoader(object):
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
-        self.init_loader()
-        self.index = 1
         self.lazy = self.dataset.qos['LazyLoading']
+        self.init_loader()
+        while os.path.exists(dataReqChannel): continue
+        self.index = 1
         
         # prefetch size depends on the chunk size when LazyLoading is disabled
         if not self.lazy:
-            with open('/share/prefetchKeys.json', 'w') as f:
+            with open(prefetchChannel, 'w') as f:
                 json.dump(f, {
                     "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                    "policy": self.dataset.file_paths})
+                    "paths": self.dataset.nfsFilePaths})
     
     def init_loader(self):
         # shuffle if disabled under the LazyLoading mode
@@ -330,15 +342,18 @@ class DLCJobDataLoader(object):
                             self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
                             prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
         self.loader = loader._get_iterator()
-        file_paths = np.array(self.dataset.file_paths)
+        file_paths = np.array(self.dataset.nfsFilePaths)
+        
         if self.lazy:
             prefetchPaths = [file_paths[indices].tolist() for indices in loader._index_sampler]
-            with open('/share/prefetchKeys.json', 'w') as f:
-                json.dump(f, {
-                    "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                    "policy": prefetchPaths})
+            with open(prefetchChannel, 'w') as f:
+                json.dump(
+                    {
+                        "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
+                        "paths": prefetchPaths
+                    }, f)
         else:
-            with open('/share/next', 'w') as f:
+            with open(dataReqChannel, 'w') as f:
                 f.write(str(time.time()))
         
     def __iter__(self):
@@ -348,7 +363,7 @@ class DLCJobDataLoader(object):
         try:
             data = self.loader.next()
             if self.lazy:
-                with open('/share/next', 'w') as f:
+                with open(dataReqChannel, 'w') as f:
                     f.write(str(time.time()))
         except StopIteration:
             if self.index == len(self.dataset.chunks):  # epoch is down
