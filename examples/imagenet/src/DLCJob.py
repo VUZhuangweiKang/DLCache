@@ -154,22 +154,27 @@ class DLCJobDataset(Dataset):
             loc = chunk['Location']
             nfs_path = '/{}/{}'.format(loc, etag)
             tmpfs_path = '/runtime{}'.format(nfs_path)
-            try:
-                # while not os.path.exists(tmpfs_path): pass
-                with open(tmpfs_path, 'rb') as f:
-                    val = f.read()
-                threading.Thread(target=lambda: os.remove(tmpfs_path), daemon=True).start()  # 在后台删除
-            except FileNotFoundError:
-                print("miss file {}".format(tmpfs_path))
-                with open(nfs_path, 'rb') as f:
-                    val = f.read()
-            else:
-                print("miss file {}".format(nfs_path))
-                with open(dataMissChannel, 'w') as f:
-                    f.writelines(etag)
-                while not os.path.exists(etag): pass
-                with open(nfs_path, 'rb') as f:
-                    val = f.read()
+            while True:
+                try:
+                    try:
+                        with open(tmpfs_path, 'rb') as f:
+                            val = f.read()
+                        threading.Thread(target=lambda: os.remove(tmpfs_path), daemon=True).start()  # 在后台删除
+                    except FileNotFoundError:
+                        print("miss tmpfs file {}".format(tmpfs_path))
+                        with open(nfs_path, 'rb') as f:
+                            val = f.read()
+                    break
+                except FileNotFoundError:
+                    print("miss file {}".format(nfs_path))
+                    with open(dataMissChannel, 'w') as f:
+                        f.writelines(etag)
+                except EOFError:
+                    if os.path.exists(nfs_path):
+                        os.remove(nfs_path) 
+                    while not os.path.exists(nfs_path): continue
+                finally:
+                    return val
         else:
             val = self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
         return val
@@ -326,7 +331,6 @@ class DLCJobDataLoader(object):
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
         self.init_loader()
-        while not os.path.exists(dataReqChannel): continue
         self.index = 1
         
         # prefetch size depends on the chunk size when LazyLoading is disabled
@@ -355,6 +359,7 @@ class DLCJobDataLoader(object):
         else:
             with open(dataReqChannel, 'w') as f:
                 f.write(str(time.time()))
+        while not os.path.exists(dataReqChannel): continue
         
     def __iter__(self):
         return self

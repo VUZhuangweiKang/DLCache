@@ -99,7 +99,7 @@ class Manager():
 
         bucket_objs = []
         for info in page['Contents']:
-            print(info['LastModified'], existing_etags[info['ETag']]['LastModified'])
+            info['ETag'] = info['ETag'].strip('"')  # ETag value from S3 contains " sometimes
             lastModified = bson.timestamp.Timestamp(int(info['LastModified'].timestamp()), inc=1)
             if info['ETag'] not in existing_etags or lastModified > existing_etags[info['ETag']]['LastModified']:
                 info['Exist'] = False
@@ -128,10 +128,14 @@ class Manager():
             shutil.rmtree('/{}/{}'.format(obj['Location'], obj['ChunkETag']), ignore_errors=True)
         self.job_col.delete_many({"ChunkETag": [obj['ChunkETag'] for obj in rmobjs]})
 
-    def clone_s3obj(self, s3obj: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None):
+    def clone_s3obj(self, s3obj: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None, miss=False):
         key = s3obj['Key']
-        s3obj['LastModified'] = bson.timestamp.Timestamp(int(s3obj['LastModified'].timestamp()), inc=1)
-        s3obj['TotalAccessTime'] = 0
+        s3obj["Bucket"] = bucket_name
+        if not miss:
+            s3obj['LastModified'] = bson.timestamp.Timestamp(int(s3obj['LastModified'].timestamp()), inc=1)
+            s3obj['TotalAccessTime'] = 0
+        else:
+            s3obj['TotalAccessTime'] += 1
         now = datetime.utcnow().timestamp()
         s3obj['LastAccessTime'] = bson.timestamp.Timestamp(int(now), inc=1)
         file_type = key.split('.')[-1].lower()
@@ -152,10 +156,11 @@ class Manager():
                 etag = s3obj['ETag'].strip("\"")
             else:
                 etag = hashing(value)
-
+            s3obj["Part"] = 0
             s3obj['ChunkETag'] = etag
             s3obj['ChunkSize'] = s3obj['Size']
-            s3obj = assignLocation(s3obj)
+            if not miss:
+                s3obj = assignLocation(s3obj)
             path = "/%s/%s" % (s3obj['Location'], etag)
             with open(path, 'wb') as f:
                 f.write(value)
@@ -383,7 +388,7 @@ class DataMissService(pb_grpc.DataMissServicer):
         rc = self.manager.auth_client(cred, conn_check=True)
         if rc != pb.RC.CONNECTED:
             return
-        chunk = self.manager.dataset_col.find_one({"ETag": request.etag})
+        chunk = self.manager.dataset_col.find_one({"ChunkETag": request.etag.strip('"')})
         s3_client = self.manager.get_s3_client(cred)
 
         # evict data until the key can be accommodated
@@ -393,9 +398,10 @@ class DataMissService(pb_grpc.DataMissServicer):
                 self.manager.evict_data(node=chunk['Location'])
             else:
                 break
-
+        
         # copy data
-        self.manager.clone_s3obj(s3obj=chunk, bucket_name=request.bucket, s3_client=s3_client, chunk_size=chunk['ChunkSize'], part=chunk['Part'])
+        self.manager.clone_s3obj(s3obj=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], 
+                                 chunk_size=chunk['ChunkSize'], node_sequence=[chunk['Location']], part=chunk['Part'], miss=True)
         return pb.DataMissResponse(response=True)
 
 
