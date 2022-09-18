@@ -1,12 +1,9 @@
 from collections import defaultdict
 import pickle
-import time
-import sys
 from typing import Callable, Optional
 from DLCJob import DLCJobDataset
 
 
-summary = []
 class ImageNetDataset(DLCJobDataset):
     def __init__(self, keys, 
                  transform: Optional[Callable] = None,
@@ -39,16 +36,8 @@ class ImageNetDataset(DLCJobDataset):
         return samples, targets
     
     def __getitem__(self, index: int):
-        global summary
-        t = time.time()
         img, target = self.get_data(index), self.get_target(index)
-        img_size = sys.getsizeof(img)
         img = pickle.loads(img)
-        e = time.time()
-        with open('summary.csv', 'a+') as f:
-            f.write(str(e-t)+'\n')
-        with open('throughput.csv', 'a+') as f:
-            f.write(str(img_size/(e-t))+'\n')
         return img, target
 
     def __len__(self) -> int:

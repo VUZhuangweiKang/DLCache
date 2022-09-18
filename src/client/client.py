@@ -78,19 +78,6 @@ class Client(pyinotify.ProcessEvent):
             self.register_job()
         
         # ------------------------ Coordinated Data Prefetching ------------------------
-        # runtimeBuffer is used to track which file is consumed in tmpfs
-        self.runtimeBuffer = OrderedDict() # {batch_index: [tmpfs_path]}
-        
-        # record data requesting and loading time for dynamically tuning the cache capacity
-        self.req_time = []
-        self.load_time = []
-        
-        # runtime tmpfs waterline: n*num_workers*batch_size, n=2 initially
-        self.waterline = 2
-        self.prefetchIndex = 0
-        self.runtimeConf = None
-        self.prefetchPaths = None
-        
         # create inotify
         wm = pyinotify.WatchManager()
         mask = pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CLOSE_NOWRITE
@@ -105,16 +92,24 @@ class Client(pyinotify.ProcessEvent):
         self.notifier = pyinotify.Notifier(wm, self)
         notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
         notifierThread.start()
-        
-        # prefetch the first 2 batches
-        while not self.prefetchPaths: continue
-        for _ in range(self.waterline):
-            with open(dataReqChannel, 'w') as f:  # push signal into the dataReqChannel for initial data loading
-                f.write(str(time.time()))
-        
+
         signal.signal(signal.SIGINT, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
-            
+    
+    def reset(self):        
+        # runtimeBuffer is used to track which file is consumed in tmpfs
+        self.runtimeBuffer = OrderedDict() # {batch_index: [tmpfs_path]}
+        self.waterline = 2
+        
+        # record data requesting and loading time for dynamically tuning the cache capacity
+        self.req_time = []
+        self.load_time = []
+        
+        # runtime tmpfs waterline: n*num_workers, n=2 initially
+        self.prefetchIndex = 0
+        self.runtimeConf = None
+        self.prefetchPaths = None
+        
     def exit_gracefully(self):
         self.channel.close()
         self.notifier.stop()
@@ -165,36 +160,29 @@ class Client(pyinotify.ProcessEvent):
                 logger.warning('failed to request missing etag {}'.format(etag))
 
     def prefetch(self):
-        def docopy(path):
+        def docopy(nfs_path):
             if self.prefetchIndex not in self.runtimeBuffer:
                 self.runtimeBuffer[self.prefetchIndex] = []
-            if path not in self.runtimeBuffer[self.prefetchIndex]:
+
+            tmpfs_path = '/runtime{}'.format(nfs_path)
+            if nfs_path not in self.runtimeBuffer[self.prefetchIndex]:
                 t = time.time()
-                tmpfs_path = '/runtime{}'.format(path)
-                copyfile(path, tmpfs_path)  # NFS --> tmpfs
+                copyfile(nfs_path, tmpfs_path)  # NFS --> tmpfs
                 self.load_time.append(time.time()-t)
-                self.runtimeBuffer[self.prefetchIndex].append(tmpfs_path)
-                            
-        if self.runtimeConf['LazyLoading']:
-            for _ in range(self.runtimeConf['num_workers']):
-                if self.prefetchIndex < len(self.prefetchPaths):
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-                        futures = []
-                        for path in self.prefetchPaths[self.prefetchIndex]:
-                            futures.append(executor.submit(docopy, path))
-                        concurrent.futures.wait(futures)
-                    self.prefetchIndex += 1
-                    if self.prefetchIndex >= len(self.prefetchPaths):
-                        self.prefetchIndex = 0
-                        break
-        else:
-            path = self.prefetchPaths[self.prefetchIndex]
-            t = time.time()
-            copyfile(path, '/runtime/{}'.format(path))  # NFS --> tmpfs
-            self.load_time.append(time.time()-t)
-            self.prefetchIndex += 1
-            if self.prefetchIndex == len(self.prefetchPaths):
-                self.prefetchIndex = 0
+                self.runtimeBuffer[self.prefetchIndex].append(nfs_path)
+
+        for _ in range(self.runtimeConf['num_workers']):
+            print(self.prefetchIndex, len(self.prefetchPaths))
+            if self.prefetchIndex < len(self.prefetchPaths):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                    futures = []
+                    for nfs_path in self.prefetchPaths[self.prefetchIndex]:
+                        futures.append(executor.submit(docopy, nfs_path))
+                    concurrent.futures.wait(futures)
+                self.prefetchIndex += 1
+                if self.prefetchIndex >= len(self.prefetchPaths):
+                    self.prefetchIndex = 0
+                    break
 
     def process_IN_CLOSE_WRITE(self, event):
         path = event.pathname
@@ -204,10 +192,21 @@ class Client(pyinotify.ProcessEvent):
             self.prefetch()
             self.req_time.append(time.time())
         elif path == prefetchChannel:
+            self.reset()
             with open(prefetchChannel, 'r') as f:
                 tmp = json.load(f)
                 self.runtimeConf = tmp['meta']
                 self.prefetchPaths = tmp['paths']
+                
+            # DLCJob is responsible for setting up the prefetchChannel
+            # Client then set up the dataReqChannel, 
+            # DLCJob is blocked until the dataReqChannel is created
+            if not os.path.exists(dataReqChannel):
+                for _ in range(self.waterline):
+                    self.prefetch()
+                    self.req_time.append(time.time())
+                with open(dataReqChannel, 'w') as f:  # push signal into the dataReqChannel for initial data loading
+                    f.write(str(time.time()))
 
     # TODO: bug: prefetch copy 文件的速度跟不上DLCJob请求数据的速度，所以要么出现data miss，要么碎片化的数据被load，造成读取失败
     def process_IN_CLOSE_NOWRITE(self, event):
@@ -259,7 +258,7 @@ if __name__ == '__main__':
     try:
         Client()
         while True:
-            pass
+            continue
     except KeyboardInterrupt:
         pass
         

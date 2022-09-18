@@ -46,6 +46,13 @@ class DLCJobDataset(Dataset):
             keys (List, optional): a list of bucket keys. Defaults to None, meaning loading all keys in the bucket.
             shuffle (Bool, optional): default False
         """
+        
+        # delete the old prefetchKeys
+        if os.path.exists(prefetchChannel):
+            os.remove(prefetchChannel)
+        if os.path.exists(dataReqChannel):
+            os.remove(dataReqChannel)
+            
         self.shuffle = shuffle
         jobname = os.environ.get('JOBNAME')
         self.keys = keys
@@ -101,7 +108,7 @@ class DLCJobDataset(Dataset):
         chunks = [chunk for chunk in self.dataset_col.find({"ChunkETag": {"$in": etags}})]
         
         if self.shuffle:
-            np.random.shuffle(etags)
+            np.random.shuffle(chunks)
                     
         if maxmem == 0 or self.qos['LazyLoading']:
             self.chunks.append(chunks)
@@ -159,7 +166,9 @@ class DLCJobDataset(Dataset):
                     try:
                         with open(tmpfs_path, 'rb') as f:
                             val = f.read()
+                        print('read tmpfs file {}'.format(tmpfs_path))
                         threading.Thread(target=lambda: os.remove(tmpfs_path), daemon=True).start()  # 在后台删除
+                        print('remove tmpfs file {}'.format(tmpfs_path))
                     except FileNotFoundError:
                         print("miss tmpfs file {}".format(tmpfs_path))
                         with open(nfs_path, 'rb') as f:
@@ -170,14 +179,11 @@ class DLCJobDataset(Dataset):
                     with open(dataMissChannel, 'w') as f:
                         f.writelines(etag)
                 except EOFError:
-                    if os.path.exists(nfs_path):
-                        os.remove(nfs_path) 
-                    while not os.path.exists(nfs_path): continue
+                    continue
                 finally:
                     return val
         else:
-            val = self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
-        return val
+            return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
 
     def load_data(self, index):
         self.data = {}
@@ -330,43 +336,30 @@ class DLCJobDataLoader(object):
         self.persistent_workers = persistent_workers
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
+        self.index = 1        
         self.init_loader()
-        self.index = 1
-        
-        # prefetch size depends on the chunk size when LazyLoading is disabled
-        if not self.lazy:
-            with open(prefetchChannel, 'w') as f:
-                json.dump(f, {
-                    "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                    "paths": self.dataset.nfsFilePaths})
+        while not os.path.exists(dataReqChannel): continue
     
     def init_loader(self):
         # shuffle if disabled under the LazyLoading mode
-        loader = DataLoader(self.dataset, self.batch_size, not self.lazy, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
-                            self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
-                            prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
-        self.loader = loader._get_iterator()
-        file_paths = np.array(self.dataset.nfsFilePaths)
-        
-        if self.lazy:
-            prefetchPaths = [file_paths[indices].tolist() for indices in loader._index_sampler]
-            with open(prefetchChannel, 'w') as f:
-                json.dump(
-                    {
-                        "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                        "paths": prefetchPaths
-                    }, f)
-        else:
-            with open(dataReqChannel, 'w') as f:
-                f.write(str(time.time()))
-        while not os.path.exists(dataReqChannel): continue
+        self.loader = DataLoader(self.dataset, self.batch_size, not self.lazy, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
+                                 self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
+                                 prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
+        file_paths = np.array(self.dataset.nfsFilePaths)            
+        nfsPaths = [file_paths[indices].tolist() for indices in self.loader._index_sampler]
+        with open(prefetchChannel, 'w') as f:
+            json.dump(
+                {
+                    "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
+                    "paths": nfsPaths
+                }, f)
         
     def __iter__(self):
         return self
     
     def __next__(self):
         try:
-            data = self.loader.next()
+            data = next(iter(self.loader))
             if self.lazy:
                 with open(dataReqChannel, 'w') as f:
                     f.write(str(time.time()))
@@ -377,6 +370,6 @@ class DLCJobDataLoader(object):
             else:
                 self.dataset.load_data(self.index)
                 self.init_loader()
-                data = self.loader.next()
+                data = next(iter(self.loader))
                 self.index += 1
         return data

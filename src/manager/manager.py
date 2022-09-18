@@ -79,6 +79,8 @@ class Manager():
 
     def filter_objs(self, page):
         try:
+            # ETag value from S3 contains " sometimes
+            page['Contents']['ETag'] = page["Contents"]["ETag"].strip('"')
             # if prefix is invalid, `Contents` field is not in page, raising error
             etags = {info['ETag']: info['LastModified'] for info in page['Contents']}
         except:
@@ -99,7 +101,6 @@ class Manager():
 
         bucket_objs = []
         for info in page['Contents']:
-            info['ETag'] = info['ETag'].strip('"')  # ETag value from S3 contains " sometimes
             lastModified = bson.timestamp.Timestamp(int(info['LastModified'].timestamp()), inc=1)
             if info['ETag'] not in existing_etags or lastModified > existing_etags[info['ETag']]['LastModified']:
                 info['Exist'] = False
