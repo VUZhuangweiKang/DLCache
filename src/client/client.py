@@ -9,6 +9,7 @@ import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import pyinotify
 import threading
+import multiprocessing
 from collections import OrderedDict
 import numpy as np
 from pymongo import MongoClient
@@ -80,18 +81,19 @@ class Client(pyinotify.ProcessEvent):
         # ------------------------ Coordinated Data Prefetching ------------------------
         # create inotify
         wm = pyinotify.WatchManager()
-        mask = pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CLOSE_NOWRITE
-        wm.add_watch("/share", pyinotify.IN_CLOSE_WRITE, auto_add=True, rec=True)
-        wm.add_watch('/runtime', pyinotify.IN_CLOSE_NOWRITE, auto_add=True, rec=True)
+        wm.add_watch("/share", pyinotify.IN_CLOSE_WRITE, auto_add=False, rec=False)
+        wm.add_watch('/runtime', pyinotify.IN_CLOSE_NOWRITE, auto_add=False, rec=False)
         
         # watch NFS data access events, which will be used for data eviction
         self.nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
         for svr in self.nfs_servers:
-            wm.add_watch(svr, mask, auto_add=True, rec=True)
+            wm.add_watch(svr, pyinotify.IN_CLOSE_NOWRITE, auto_add=True, rec=True)
 
         self.notifier = pyinotify.Notifier(wm, self)
-        notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
-        notifierThread.start()
+        # notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
+        # notifierThread.start()
+        notifierProcess = multiprocessing.Process(target=self.notifier.loop, daemon=True)
+        notifierProcess.start()
 
         signal.signal(signal.SIGINT, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
@@ -172,7 +174,6 @@ class Client(pyinotify.ProcessEvent):
                 self.runtimeBuffer[self.prefetchIndex].append(nfs_path)
 
         for _ in range(self.runtimeConf['num_workers']):
-            print(self.prefetchIndex, len(self.prefetchPaths))
             if self.prefetchIndex < len(self.prefetchPaths):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                     futures = []
@@ -186,11 +187,13 @@ class Client(pyinotify.ProcessEvent):
 
     def process_IN_CLOSE_WRITE(self, event):
         path = event.pathname
+        print(path)
         if path == dataMissChannel:
             return self.handle_datamiss()
         elif path == dataReqChannel:
             self.prefetch()
             self.req_time.append(time.time())
+            # TODO: delete the previous used batch
         elif path == prefetchChannel:
             self.reset()
             with open(prefetchChannel, 'r') as f:
@@ -202,7 +205,8 @@ class Client(pyinotify.ProcessEvent):
             # Client then set up the dataReqChannel, 
             # DLCJob is blocked until the dataReqChannel is created
             if not os.path.exists(dataReqChannel):
-                for _ in range(self.waterline):
+                # (waterline-1) because the line 212 will trigger the process_IN_CLOSE_WRITE
+                for _ in range(self.waterline)-1:
                     self.prefetch()
                     self.req_time.append(time.time())
                 with open(dataReqChannel, 'w') as f:  # push signal into the dataReqChannel for initial data loading

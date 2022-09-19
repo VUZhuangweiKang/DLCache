@@ -24,7 +24,7 @@ class dotdict(dict):
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
-        
+
 class DLCJobDataset(Dataset):
     def __init__(self, keys: List[str] = None, shuffle=False):
         """An abstract class subclassing the torch.utils.data.Dataset class
@@ -167,21 +167,20 @@ class DLCJobDataset(Dataset):
                         with open(tmpfs_path, 'rb') as f:
                             val = f.read()
                         print('read tmpfs file {}'.format(tmpfs_path))
-                        threading.Thread(target=lambda: os.remove(tmpfs_path), daemon=True).start()  # 在后台删除
-                        print('remove tmpfs file {}'.format(tmpfs_path))
+                        # threading.Thread(target=lambda: os.remove(tmpfs_path), daemon=True).start()
+                        return val
                     except FileNotFoundError:
                         print("miss tmpfs file {}".format(tmpfs_path))
                         with open(nfs_path, 'rb') as f:
                             val = f.read()
-                    break
+                        return val
+                    except EOFError as er:
+                        print(er)
+                        continue
                 except FileNotFoundError:
                     print("miss file {}".format(nfs_path))
                     with open(dataMissChannel, 'w') as f:
                         f.writelines(etag)
-                except EOFError:
-                    continue
-                finally:
-                    return val
         else:
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
 
@@ -353,6 +352,11 @@ class DLCJobDataLoader(object):
                     "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
                     "paths": nfsPaths
                 }, f)
+        
+        # DLCJob is responsible for setting up the prefetchChannel
+        # Client then set up the dataReqChannel, 
+        # DLCJob is blocked until the dataReqChannel is created
+        while not os.path.exists(dataReqChannel): continue
         
     def __iter__(self):
         return self
