@@ -9,8 +9,8 @@ import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import pyinotify
 import threading
-import multiprocessing
-from collections import OrderedDict
+import boto3
+from collections import OrderedDict, defaultdict
 import numpy as np
 from pymongo import MongoClient
 import concurrent
@@ -35,7 +35,13 @@ def read_secret(arg):
         data = f.read().strip()
     return data
 
+cloudSecret = {
+    "aws_access_key_id": read_secret('aws_access_key_id'),
+    "aws_secret_access_key": read_secret('aws_secret_access_key'),
+    "region_name": read_secret('region_name')   
+}
 
+        
 class Client(pyinotify.ProcessEvent):
     def __init__(self):
         self.jobsmeta = []
@@ -59,11 +65,7 @@ class Client(pyinotify.ProcessEvent):
             
             req = pb.ConnectRequest(
                 cred=self.cred, 
-                s3auth=pb.S3Auth(
-                    aws_access_key_id=read_secret('aws_access_key_id'),
-                    aws_secret_access_key=read_secret('aws_secret_access_key'),
-                    region_name=read_secret('region_name')
-                ),
+                s3auth=pb.S3Auth(**cloudSecret),
                 createUser=True
             )
             resp = self.conn_stub.connect(req)
@@ -81,26 +83,24 @@ class Client(pyinotify.ProcessEvent):
         # ------------------------ Coordinated Data Prefetching ------------------------
         # create inotify
         wm = pyinotify.WatchManager()
-        wm.add_watch("/share", pyinotify.IN_CLOSE_WRITE, auto_add=False, rec=False)
-        wm.add_watch('/runtime', pyinotify.IN_CLOSE_NOWRITE, auto_add=False, rec=False)
+        wm.add_watch("/share", pyinotify.IN_CLOSE_WRITE)
         
         # watch NFS data access events, which will be used for data eviction
         self.nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
         for svr in self.nfs_servers:
-            wm.add_watch(svr, pyinotify.IN_CLOSE_NOWRITE, auto_add=True, rec=True)
+            if os.path.exists('/runtime{}'.format(svr)):
+                wm.add_watch('/runtime{}'.format(svr), pyinotify.IN_CLOSE_NOWRITE)
 
         self.notifier = pyinotify.Notifier(wm, self)
-        # notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
-        # notifierThread.start()
-        notifierProcess = multiprocessing.Process(target=self.notifier.loop, daemon=True)
-        notifierProcess.start()
+        notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
+        notifierThread.start()
 
         signal.signal(signal.SIGINT, self.exit_gracefully)
-        signal.signal(signal.SIGTERM, self.exit_gracefully)
-    
+        signal.signal(signal.SIGTERM, self.exit_gracefully)      
+                    
     def reset(self):        
-        # runtimeBuffer is used to track which file is consumed in tmpfs
-        self.runtimeBuffer = OrderedDict() # {batch_index: [tmpfs_path]}
+        # cache is used to track which file is in tmpfs
+        self.cache = defaultdict(set) # {batch_index: [tmpfs_path]}
         self.waterline = 2
         
         # record data requesting and loading time for dynamically tuning the cache capacity
@@ -155,7 +155,7 @@ class Client(pyinotify.ProcessEvent):
         with open(dataMissChannel, 'r') as f:
             etags = f.readlines()
         for etag in etags:
-            resp = self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
+            resp = self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag.strip('\n')))
             if resp.response:
                 logger.info('request missing etag {}'.format(etag))
             else:
@@ -163,15 +163,12 @@ class Client(pyinotify.ProcessEvent):
 
     def prefetch(self):
         def docopy(nfs_path):
-            if self.prefetchIndex not in self.runtimeBuffer:
-                self.runtimeBuffer[self.prefetchIndex] = []
-
             tmpfs_path = '/runtime{}'.format(nfs_path)
-            if nfs_path not in self.runtimeBuffer[self.prefetchIndex]:
+            if nfs_path not in self.cache[self.prefetchIndex]:
                 t = time.time()
                 copyfile(nfs_path, tmpfs_path)  # NFS --> tmpfs
                 self.load_time.append(time.time()-t)
-                self.runtimeBuffer[self.prefetchIndex].append(nfs_path)
+                self.cache[self.prefetchIndex].add(tmpfs_path)
 
         for _ in range(self.runtimeConf['num_workers']):
             if self.prefetchIndex < len(self.prefetchPaths):
@@ -185,15 +182,22 @@ class Client(pyinotify.ProcessEvent):
                     self.prefetchIndex = 0
                     break
 
+    def releaseCache(self, prefetchIndex):
+        if prefetchIndex not in self.cache:
+            return
+        for tmpfspath in self.cache[prefetchIndex]:
+            if os.path.exists(tmpfspath):
+                os.remove(tmpfspath)
+        del self.cache[prefetchIndex]
+    
     def process_IN_CLOSE_WRITE(self, event):
         path = event.pathname
         print(path)
         if path == dataMissChannel:
-            return self.handle_datamiss()
+            self.handle_datamiss()
         elif path == dataReqChannel:
             self.prefetch()
             self.req_time.append(time.time())
-            # TODO: delete the previous used batch
         elif path == prefetchChannel:
             self.reset()
             with open(prefetchChannel, 'r') as f:
@@ -205,57 +209,55 @@ class Client(pyinotify.ProcessEvent):
             # Client then set up the dataReqChannel, 
             # DLCJob is blocked until the dataReqChannel is created
             if not os.path.exists(dataReqChannel):
-                # (waterline-1) because the line 212 will trigger the process_IN_CLOSE_WRITE
-                for _ in range(self.waterline)-1:
+                # (waterline-1) because the below writting operation triggers the process_IN_CLOSE_WRITE
+                for _ in range(self.waterline-1):
                     self.prefetch()
                     self.req_time.append(time.time())
                 with open(dataReqChannel, 'w') as f:  # push signal into the dataReqChannel for initial data loading
                     f.write(str(time.time()))
 
-    # TODO: bug: prefetch copy 文件的速度跟不上DLCJob请求数据的速度，所以要么出现data miss，要么碎片化的数据被load，造成读取失败
     def process_IN_CLOSE_NOWRITE(self, event):
-        path = event.pathname.strip().split('/')[1:]
-        if 'runtime' in path and len(path) > 2:
-            if len(self.runtimeBuffer) > 1:
-                # LRU Eviction
-                prefetchIndex = list(self.runtimeBuffer.keys())[0]
-                if len(self.runtimeBuffer[prefetchIndex]) > 0:
-                    self.runtimeBuffer[prefetchIndex].pop(0)
-                    if len(self.runtimeBuffer[prefetchIndex]) == 0:
-                        self.runtimeBuffer.popitem(last=False)
-            
-                # tune buffer size
-                if len(self.req_time) > 2:
-                    """
-                    To ensure the data is always available for DataLoader, the length of buffer should be:
-                    s >= 2*B, if alpha >= beta; otherwise,
-                    s >= (N-k)*(1-alpha/beta) 
-                    """
-                    alpha = np.mean(np.diff(self.req_time)[1:])
-                    beta = np.mean(np.array(self.load_time))
-                    N = len(self.prefetchPaths) - len(self.req_time)
-                    s = max(2, (1-alpha/beta)*N)
+        # print(event.pathname)
+        if len(self.cache) > 1:
+            for index in list(self.cache.keys()):
+                # update data access history
+                for tmpfspath in self.cache[index]:
+                    etag = tmpfspath.split('/')[-1]
+                    # now = datetime.utcnow().timestamp()
+                    now = datetime.datetime.now().timestamp()
+                    self.dataset_col.update_one(
+                        {"ETag": etag}, 
+                        {
+                            "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
+                            "$inc": {"TotalAccessTime": 1}
+                        })
                     
-                    # update waterline according to load/consume speed
-                    if self.waterline == s:
-                        return
-                    else:
-                        self.waterline = s
-                        while len(self.runtimeBuffer) > s:
-                            self.runtimeBuffer.popitem(last=True)
-                            self.prefetchIndex -= 1
-                        while len(self.runtimeBuffer) < s:
-                            self.prefetch()
-        elif path[0] in self.nfs_servers:
-            assert self.dataset_col is not None
-            etag = path[1]
-            now = datetime.utcnow().timestamp()
-            self.dataset_col.update_one(
-                {"ETag": etag}, 
-                {
-                    "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
-                    "$inc": {"TotalAccessTime": 1}
-                })
+                # release tmpfs cache
+                if index < self.prefetchIndex-self.waterline:
+                    self.releaseCache(index)
+
+            # tune buffer size
+            if len(self.req_time) > 2:
+                """
+                To ensure the data is always available for DataLoader, the length of buffer should be:
+                s >= 2*B, if alpha >= beta; otherwise,
+                s >= (N-k)*(1-alpha/beta) 
+                """
+                alpha = np.mean(np.diff(self.req_time)[1:])
+                beta = np.mean(np.array(self.load_time))
+                N = len(self.prefetchPaths) - len(self.req_time)
+                s = max(self.waterline, (1-alpha/beta)*N)
+                
+                # update waterline according to load/consume speed
+                if self.waterline == s:
+                    return
+                else:
+                    self.waterline = s
+                    while len(self.cache) > s:
+                        self.releaseCache(self.prefetchIndex)
+                        self.prefetchIndex -= 1
+                    while len(self.cache) < s:
+                        self.prefetch()
 
 
 if __name__ == '__main__':

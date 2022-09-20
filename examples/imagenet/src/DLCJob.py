@@ -166,8 +166,7 @@ class DLCJobDataset(Dataset):
                     try:
                         with open(tmpfs_path, 'rb') as f:
                             val = f.read()
-                        print('read tmpfs file {}'.format(tmpfs_path))
-                        # threading.Thread(target=lambda: os.remove(tmpfs_path), daemon=True).start()
+                        print("read tmpfs file {}".format(tmpfs_path))
                         return val
                     except FileNotFoundError:
                         print("miss tmpfs file {}".format(tmpfs_path))
@@ -180,7 +179,8 @@ class DLCJobDataset(Dataset):
                 except FileNotFoundError:
                     print("miss file {}".format(nfs_path))
                     with open(dataMissChannel, 'w') as f:
-                        f.writelines(etag)
+                        f.write('\n'.format(etag))
+                    while not os.path.exists(nfs_path): continue
         else:
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
 
@@ -337,7 +337,6 @@ class DLCJobDataLoader(object):
         self.lazy = self.dataset.qos['LazyLoading']
         self.index = 1        
         self.init_loader()
-        while not os.path.exists(dataReqChannel): continue
     
     def init_loader(self):
         # shuffle if disabled under the LazyLoading mode

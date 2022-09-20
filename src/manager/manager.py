@@ -135,8 +135,6 @@ class Manager():
         if not miss:
             s3obj['LastModified'] = bson.timestamp.Timestamp(int(s3obj['LastModified'].timestamp()), inc=1)
             s3obj['TotalAccessTime'] = 0
-        else:
-            s3obj['TotalAccessTime'] += 1
         now = datetime.utcnow().timestamp()
         s3obj['LastAccessTime'] = bson.timestamp.Timestamp(int(now), inc=1)
         file_type = key.split('.')[-1].lower()
@@ -152,6 +150,8 @@ class Manager():
 
         chunk_size *= 1e6 # Mill bytes --> bytes
         if s3obj['Size'] <= chunk_size:
+            if miss:
+                print(bucket_name, key)
             value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
             if 'ETag' in s3obj:
                 etag = s3obj['ETag'].strip("\"")
@@ -389,18 +389,10 @@ class DataMissService(pb_grpc.DataMissServicer):
         rc = self.manager.auth_client(cred, conn_check=True)
         if rc != pb.RC.CONNECTED:
             return
-        chunk = self.manager.dataset_col.find_one({"ChunkETag": request.etag.strip('"')})
+        chunk = self.manager.dataset_col.find_one({"ChunkETag": request.etag})
         s3_client = self.manager.get_s3_client(cred)
-
-        # evict data until the key can be accommodated
-        while True:
-            _, _, free = shutil.disk_usage("/{}".format(chunk['Location']))
-            if free < chunk['ChunkSize']:
-                self.manager.evict_data(node=chunk['Location'])
-            else:
-                break
         
-        # copy data
+        # download data
         self.manager.clone_s3obj(s3obj=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], 
                                  chunk_size=chunk['ChunkSize'], node_sequence=[chunk['Location']], part=chunk['Part'], miss=True)
         return pb.DataMissResponse(response=True)
