@@ -36,6 +36,7 @@ def read_secret(arg):
         data = f.read().strip()
     return data
 
+
 cloudSecret = {
     "aws_access_key_id": read_secret('aws_access_key_id'),
     "aws_secret_access_key": read_secret('aws_secret_access_key'),
@@ -80,11 +81,10 @@ class Client(pyinotify.ProcessEvent):
                 mongoUri = self.register_job(stub)
                 mongo_client = MongoClient(mongoUri, connect=False)
                 self.dataset_col = mongo_client.Cacher.Datasets
-                    
+                
     def reset(self):        
         # cache is used to track which file is in tmpfs
-        self.cache = defaultdict(set) # {batch_index: [tmpfs_path]}
-        self.waterline = 2
+        self.cache = OrderedDict() # {batch_index: [tmpfs_path]}
         
         # record data requesting and loading time for dynamically tuning the cache capacity
         self.req_time = []
@@ -142,6 +142,8 @@ class Client(pyinotify.ProcessEvent):
     def prefetch(self):
         def docopy(nfs_path):
             tmpfs_path = '/runtime{}'.format(nfs_path)
+            if self.prefetchIndex not in self.cache:
+                self.cache[self.prefetchIndex] = set()
             if nfs_path not in self.cache[self.prefetchIndex]:
                 t = time.time()
                 copyfile(nfs_path, tmpfs_path)  # NFS --> tmpfs
@@ -156,17 +158,6 @@ class Client(pyinotify.ProcessEvent):
                         futures.append(executor.submit(docopy, nfs_path))
                     concurrent.futures.wait(futures)
                 self.prefetchIndex += 1
-                if self.prefetchIndex >= len(self.prefetchPaths):
-                    self.prefetchIndex = 0
-                    break
-
-    def releaseCache(self, prefetchIndex):
-        if prefetchIndex not in self.cache:
-            return
-        for tmpfspath in self.cache[prefetchIndex]:
-            if os.path.exists(tmpfspath):
-                os.remove(tmpfspath)
-        del self.cache[prefetchIndex]
     
     def process_IN_CLOSE_WRITE(self, event):
         path = event.pathname
@@ -181,60 +172,52 @@ class Client(pyinotify.ProcessEvent):
                 tmp = json.load(f)
                 self.runtimeConf = tmp['meta']
                 self.prefetchPaths = tmp['paths']
+                self.minCacheCapacity = 2 * self.runtimeConf['num_workers']
                 
             # DLCJob is responsible for setting up the prefetchChannel
             # Client then set up the dataReqChannel, 
             # DLCJob is blocked until the dataReqChannel is created
-            if not os.path.exists(dataReqChannel):
-                # (waterline-1) because the below writting operation triggers the process_IN_CLOSE_WRITE
-                for _ in range(self.waterline-1):
-                    self.prefetch()
-                    self.req_time.append(time.time())
-                with open(dataReqChannel, 'w') as f:  # push signal into the dataReqChannel for initial data loading
-                    f.write(str(time.time()))
+            for _ in range(self.minCacheCapacity):
+                self.prefetch()
+                self.req_time.append(time.time())
+            with open(dataReqChannel, 'w') as f:  # push signal into the dataReqChannel for initial data loading
+                f.write(str(time.time()))
 
     def process_IN_CLOSE_NOWRITE(self, event):
-        # print(event.pathname)
-        if len(self.cache) > 1:
-            for index in list(self.cache.keys()):
-                # update data access history
-                for tmpfspath in self.cache[index]:
-                    etag = tmpfspath.split('/')[-1]
-                    # now = datetime.utcnow().timestamp()
-                    now = datetime.datetime.now().timestamp()
-                    self.dataset_col.update_one(
-                        {"ETag": etag}, 
-                        {
-                            "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
-                            "$inc": {"TotalAccessTime": 1}
-                        })
-                    
-                # release tmpfs cache
-                if index < self.prefetchIndex-self.waterline:
-                    self.releaseCache(index)
+        if len(self.cache) < self.minCacheCapacity or len(event.pathname.split('/')) < 4:
+            return
+        
+        print(self.prefetchIndex, len(self.prefetchPaths), len(self.cache), self.minCacheCapacity)
+        # update data access history
+        while len(self.cache) > self.minCacheCapacity:
+            _, value = self.cache.popitem(last=False)
+            for tmpfspath in value:
+                etag = tmpfspath.split('/')[-1]
+                now = datetime.datetime.now().timestamp()
+                self.dataset_col.update_one(
+                    {"ETag": etag}, 
+                    {
+                        "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
+                        "$inc": {"TotalAccessTime": 1}
+                    })
+                if os.path.exists(tmpfspath):
+                    os.remove(tmpfspath)
 
-            # tune buffer size
-            if len(self.req_time) > 2:
-                """
-                To ensure the data is always available for DataLoader, the length of buffer should be:
-                s >= 2*B, if alpha >= beta; otherwise,
-                s >= (N-k)*(1-alpha/beta) 
-                """
-                alpha = np.mean(np.diff(self.req_time)[1:])
-                beta = np.mean(np.array(self.load_time))
-                N = len(self.prefetchPaths) - len(self.req_time)
-                s = max(self.waterline, (1-alpha/beta)*N)
-                
-                # update waterline according to load/consume speed
-                if self.waterline == s:
-                    return
-                else:
-                    self.waterline = s
-                    while len(self.cache) > s:
-                        self.releaseCache(self.prefetchIndex)
-                        self.prefetchIndex -= 1
-                    while len(self.cache) < s:
-                        self.prefetch()
+        # tune cache capacity
+        if len(self.req_time) > 3:
+            """
+            To ensure the data is always available for DataLoader, the length of buffer should be:
+            s >= 2*B, if alpha >= beta; otherwise,
+            s >= (N-k)*(1-alpha/beta) 
+            """
+            reqIntervals = np.mean(np.diff(self.req_time)[1:])  # data consumption intervals
+            loadIntervals = np.mean(np.array(self.load_time))  # data loading intervals
+            remainingBatches = len(self.prefetchPaths) - len(self.req_time)  # remaining batches
+            self.minCacheCapacity = max(self.minCacheCapacity, (1-reqIntervals/loadIntervals) * remainingBatches)
+            
+            # expand the cache capacity
+            while len(self.cache) < self.minCacheCapacity:
+                self.prefetch()
 
 
 if __name__ == '__main__':
@@ -245,10 +228,10 @@ if __name__ == '__main__':
     wm.add_watch("/share", pyinotify.IN_CLOSE_WRITE)
     
     # watch NFS data access events, which will be used for data eviction
-    # nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
-    # for svr in nfs_servers:
-    #     if os.path.exists('/runtime{}'.format(svr)):
-    #         wm.add_watch('/runtime{}'.format(svr), pyinotify.IN_CLOSE_NOWRITE)  
+    nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
+    for svr in nfs_servers:
+        if os.path.exists('/runtime{}'.format(svr)):
+            wm.add_watch('/runtime{}'.format(svr), pyinotify.IN_CLOSE_NOWRITE)
     notifier = pyinotify.AsyncNotifier(wm, client)
     import asyncore
     asyncore.loop()

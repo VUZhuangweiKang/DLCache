@@ -52,6 +52,8 @@ class DLCJobDataset(Dataset):
             os.remove(prefetchChannel)
         if os.path.exists(dataReqChannel):
             os.remove(dataReqChannel)
+        if os.path.exists(dataMissChannel):
+            os.remove(dataMissChannel)
             
         self.shuffle = shuffle
         jobname = os.environ.get('JOBNAME')

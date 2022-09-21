@@ -80,7 +80,8 @@ class Manager():
     def filter_objs(self, page):
         try:
             # ETag value from S3 contains " sometimes
-            page['Contents']['ETag'] = page["Contents"]["ETag"].strip('"')
+            for i in range(len(page["Contents"])):
+                page["Contents"][i]["ETag"] = page["Contents"][i]["ETag"].strip('"')
             # if prefix is invalid, `Contents` field is not in page, raising error
             etags = {info['ETag']: info['LastModified'] for info in page['Contents']}
         except:
