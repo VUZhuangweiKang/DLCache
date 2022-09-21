@@ -179,7 +179,7 @@ class DLCJobDataset(Dataset):
                 except FileNotFoundError:
                     print("miss file {}".format(nfs_path))
                     with open(dataMissChannel, 'w') as f:
-                        f.write('\n'.format(etag))
+                        f.write('{}\n'.format(etag))
                     while not os.path.exists(nfs_path): continue
         else:
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()

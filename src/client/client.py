@@ -9,7 +9,6 @@ import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import pyinotify
 import threading
-import boto3
 from collections import OrderedDict, defaultdict
 import numpy as np
 from pymongo import MongoClient
@@ -21,6 +20,8 @@ from utils import *
 
 
 logger = get_logger(__name__, level='Debug')
+
+managerUri = "dlcpod-manager:50051"
 
 # data sharing channels between DLJob and Client
 prefetchChannel = "/share/prefetchKeys.json"
@@ -60,43 +61,25 @@ class Client(pyinotify.ProcessEvent):
         # register the job to Manager
         if len(self.jobsmeta) > 0:
             self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
-            self.channel = grpc.insecure_channel("dlcpod-manager:50051")
-            self.conn_stub = pb_grpc.ConnectionStub(self.channel)
+            with grpc.insecure_channel(managerUri) as channel:
+                conn_stub = pb_grpc.ConnectionStub(channel)
+                req = pb.ConnectRequest(
+                    cred=self.cred, 
+                    s3auth=pb.S3Auth(**cloudSecret),
+                    createUser=True
+                )
+                resp = conn_stub.connect(req)
+                if resp.rc == pb.RC.FAILED:
+                    logger.error("failed to connect to server with: {}".format(resp.resp))
+                    raise Exception
+                else:
+                    logger.info("connect to server")
             
-            req = pb.ConnectRequest(
-                cred=self.cred, 
-                s3auth=pb.S3Auth(**cloudSecret),
-                createUser=True
-            )
-            resp = self.conn_stub.connect(req)
-            if resp.rc == pb.RC.FAILED:
-                logger.error("failed to connect to server with: {}".format(resp.resp))
-                raise Exception
-            else:
-                logger.info("connect to server")
-            
-            self.register_stub = pb_grpc.RegistrationStub(self.channel)
-            self.datamiss_stub = pb_grpc.DataMissStub(self.channel)
-            self.dataset_col = None
-            self.register_job()
-        
-        # ------------------------ Coordinated Data Prefetching ------------------------
-        # create inotify
-        wm = pyinotify.WatchManager()
-        wm.add_watch("/share", pyinotify.IN_CLOSE_WRITE)
-        
-        # watch NFS data access events, which will be used for data eviction
-        self.nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
-        for svr in self.nfs_servers:
-            if os.path.exists('/runtime{}'.format(svr)):
-                wm.add_watch('/runtime{}'.format(svr), pyinotify.IN_CLOSE_NOWRITE)
-
-        self.notifier = pyinotify.Notifier(wm, self)
-        notifierThread = threading.Thread(target=self.notifier.loop, daemon=True)
-        notifierThread.start()
-
-        signal.signal(signal.SIGINT, self.exit_gracefully)
-        signal.signal(signal.SIGTERM, self.exit_gracefully)      
+            with grpc.insecure_channel(managerUri) as channel:
+                stub = pb_grpc.RegistrationStub(channel)
+                mongoUri = self.register_job(stub)
+                mongo_client = MongoClient(mongoUri, connect=False)
+                self.dataset_col = mongo_client.Cacher.Datasets
                     
     def reset(self):        
         # cache is used to track which file is in tmpfs
@@ -111,12 +94,8 @@ class Client(pyinotify.ProcessEvent):
         self.prefetchIndex = 0
         self.runtimeConf = None
         self.prefetchPaths = None
-        
-    def exit_gracefully(self):
-        self.channel.close()
-        self.notifier.stop()
             
-    def register_job(self):
+    def register_job(self, stub):
         """Register a list of jobs to the GM
 
         Args:
@@ -134,7 +113,7 @@ class Client(pyinotify.ProcessEvent):
                 resource=pb.ResourceInfo(CPUMemoryFree=get_cpu_free_mem(), GPUMemoryFree=get_gpu_free_mem())
             )
             logger.info('waiting for data preparation')
-            resp = self.register_stub.register(request)
+            resp = stub.register(request)
             logger.info('receiving registration response stream')
             if resp.rc == pb.RC.REGISTERED:
                 resp = resp.regsucc
@@ -146,20 +125,19 @@ class Client(pyinotify.ProcessEvent):
 
             with open('/share/{}.json'.format(job['name']), 'w') as f:  # marshelled registration response
                 json.dump(MessageToDict(resp), f)
-            
-            if not self.dataset_col:
-                mongo_client = MongoClient(resp.mongoUri)
-                self.dataset_col = mongo_client.Cacher.Datasets
+        return resp.mongoUri
 
     def handle_datamiss(self):
-        with open(dataMissChannel, 'r') as f:
-            etags = f.readlines()
-        for etag in etags:
-            resp = self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag.strip('\n')))
-            if resp.response:
-                logger.info('request missing etag {}'.format(etag))
-            else:
-                logger.warning('failed to request missing etag {}'.format(etag))
+        with grpc.insecure_channel(managerUri) as channel:
+            datamiss_stub = pb_grpc.DataMissStub(channel)
+            with open(dataMissChannel, 'r') as f:
+                etags = f.readlines()
+            for etag in etags:
+                resp = datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag.strip('\n')))
+                if resp.response:
+                    logger.info('request missing etag {}'.format(etag))
+                else:
+                    logger.warning('failed to request missing etag {}'.format(etag))
 
     def prefetch(self):
         def docopy(nfs_path):
@@ -192,7 +170,6 @@ class Client(pyinotify.ProcessEvent):
     
     def process_IN_CLOSE_WRITE(self, event):
         path = event.pathname
-        print(path)
         if path == dataMissChannel:
             self.handle_datamiss()
         elif path == dataReqChannel:
@@ -261,10 +238,17 @@ class Client(pyinotify.ProcessEvent):
 
 
 if __name__ == '__main__':
-    try:
-        Client()
-        while True:
-            continue
-    except KeyboardInterrupt:
-        pass
-        
+    client = Client()
+    
+    # Coordinated Data Prefetching
+    wm = pyinotify.WatchManager()
+    wm.add_watch("/share", pyinotify.IN_CLOSE_WRITE)
+    
+    # watch NFS data access events, which will be used for data eviction
+    # nfs_servers = os.popen(cmd="df -h | grep nfs | awk '{ print $6 }'").read().strip().split('\n')
+    # for svr in nfs_servers:
+    #     if os.path.exists('/runtime{}'.format(svr)):
+    #         wm.add_watch('/runtime{}'.format(svr), pyinotify.IN_CLOSE_NOWRITE)  
+    notifier = pyinotify.AsyncNotifier(wm, client)
+    import asyncore
+    asyncore.loop()
