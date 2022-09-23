@@ -4,19 +4,17 @@ import concurrent.futures
 import multiprocessing
 from math import inf
 import math
+from socket import socket
 import threading
 import numpy as np
+import zmq
 import time
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 
 
-# data sharing channels between DLJob and Client
-prefetchChannel = "/share/prefetchKeys.json"
-dataReqChannel = "/share/next"
-dataMissChannel = '/share/datamiss'
-
+initChannel = "/share/prefetchKeys.json"
 
 class dotdict(dict):
     """dot.notation access to dictionary attributes"""
@@ -47,13 +45,8 @@ class DLCJobDataset(Dataset):
             shuffle (Bool, optional): default False
         """
         
-        # delete the old prefetchKeys
-        if os.path.exists(prefetchChannel):
-            os.remove(prefetchChannel)
-        if os.path.exists(dataReqChannel):
-            os.remove(dataReqChannel)
-        if os.path.exists(dataMissChannel):
-            os.remove(dataMissChannel)
+        if os.path.exists(initChannel):
+            os.remove(initChannel)
             
         self.shuffle = shuffle
         jobname = os.environ.get('JOBNAME')
@@ -91,6 +84,10 @@ class DLCJobDataset(Dataset):
             self.client = s3_session.client('s3')
             self.load_s3_keys()
 
+        context = zmq.Context()
+        self.socket = context.socket(zmq.PUB)
+        self.socket.bind("tcp://*:5555")
+        
         self.nfsFilePaths = []
         self.targets = None
         self.load_data(0)
@@ -164,6 +161,7 @@ class DLCJobDataset(Dataset):
             nfs_path = '/{}/{}'.format(loc, etag)
             tmpfs_path = '/runtime{}'.format(nfs_path)
             while True:
+                while not os.path.exists(tmpfs_path): continue
                 try:
                     try:
                         with open(tmpfs_path, 'rb') as f:
@@ -180,8 +178,7 @@ class DLCJobDataset(Dataset):
                         continue
                 except FileNotFoundError:
                     print("miss file {}".format(nfs_path))
-                    with open(dataMissChannel, 'w') as f:
-                        f.write('{}\n'.format(etag))
+                    self.socket.send(b"{} {}".format("dataMiss", etag))
                     while not os.path.exists(nfs_path): continue
         else:
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
@@ -337,7 +334,8 @@ class DLCJobDataLoader(object):
         self.persistent_workers = persistent_workers
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
-        self.index = 1        
+        self.index = 1
+        self.currentBatch = 0
         self.init_loader()
     
     def init_loader(self):
@@ -345,29 +343,27 @@ class DLCJobDataLoader(object):
         self.loader = DataLoader(self.dataset, self.batch_size, not self.lazy, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
                                  self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
                                  prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
-        file_paths = np.array(self.dataset.nfsFilePaths)            
-        nfsPaths = [file_paths[indices].tolist() for indices in self.loader._index_sampler]
-        with open(prefetchChannel, 'w') as f:
+        file_paths = np.array(self.dataset.nfsFilePaths)
+        self.batchedNfsPaths = [file_paths[indices].tolist() for indices in self.loader._index_sampler]
+        with open(initChannel, 'w') as f:
             json.dump(
                 {
                     "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                    "paths": nfsPaths
+                    "paths": self.batchedNfsPaths
                 }, f)
-        
-        # DLCJob is responsible for setting up the prefetchChannel
-        # Client then set up the dataReqChannel, 
-        # DLCJob is blocked until the dataReqChannel is created
-        while not os.path.exists(dataReqChannel): continue
+        self.dataset.socket.send(b'init {}'.format(self.currentBatch))
+        for _ in range(2):
+            self.dataset.socket.send(b'prefetch {}'.format(self.currentBatch))
+            self.currentBatch += 1
         
     def __iter__(self):
         return self
     
     def __next__(self):
         try:
+            self.dataset.socket.send(b'prefetch {}'.format(self.currentBatch))
+            self.currentBatch += 1
             data = next(iter(self.loader))
-            if self.lazy:
-                with open(dataReqChannel, 'w') as f:
-                    f.write(str(time.time()))
         except StopIteration:
             if self.index == len(self.dataset.chunks):  # epoch is down
                 self.index = 1
