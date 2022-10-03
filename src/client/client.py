@@ -3,13 +3,12 @@ import grpc
 import signal
 import json
 import time
+import math
 import glob
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
-import pyinotify
-import threading
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 import numpy as np
 from pymongo import MongoClient
 import concurrent
@@ -35,10 +34,9 @@ cloudSecret = {
     "aws_secret_access_key": read_secret('aws_secret_access_key'),
     "region_name": read_secret('region_name')   
 }
-managerUri = "dlcpod-manager:50051"
-initChannel = "/share/prefetchKeys.json"
+manager_uri = "dlcpod-manager:50051"
 
-        
+
 class Client(object):
     def __init__(self):
         self.jobsmeta = []
@@ -48,40 +46,35 @@ class Client(object):
             if job['qos']['UseCache']:
                 self.jobsmeta.append(job)
         
-        # delete the old prefetchKeys
-        if os.path.exists(initChannel):
-            os.remove(initChannel)
-            
+        channel = grpc.insecure_channel(manager_uri)
         # register the job to Manager
         if len(self.jobsmeta) > 0:
             self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
-            with grpc.insecure_channel(managerUri) as channel:
-                conn_stub = pb_grpc.ConnectionStub(channel)
-                req = pb.ConnectRequest(
-                    cred=self.cred, 
-                    s3auth=pb.S3Auth(**cloudSecret),
-                    createUser=True
-                )
-                resp = conn_stub.connect(req)
-                if resp.rc == pb.RC.FAILED:
-                    logger.error("failed to connect to server with: {}".format(resp.resp))
-                    raise Exception
-                else:
-                    logger.info("connect to server")
             
-            with grpc.insecure_channel(managerUri) as channel:
-                stub = pb_grpc.RegistrationStub(channel)
-                mongoUri = self.registerJob(stub)
-                mongo_client = MongoClient(mongoUri, connect=False)
-                self.dataset_col = mongo_client.Cacher.Datasets
+            conn_stub = pb_grpc.ConnectionStub(channel)
+            req = pb.ConnectRequest(
+                cred=self.cred, 
+                s3auth=pb.S3Auth(**cloudSecret),
+                createUser=True
+            )
+            resp = conn_stub.connect(req)
+            if resp.rc == pb.RC.FAILED:
+                logger.error("failed to connect to server with: {}".format(resp.resp))
+                raise Exception
+            else:
+                logger.info("connect to server")
+            
+            stub = pb_grpc.RegistrationStub(channel)
+            mongoUri = self.registerJob(stub)
+            mongo_client = MongoClient(mongoUri, connect=False)
+            self.dataset_col = mongo_client.Cacher.Datasets
+            self.datamiss_stub = pb_grpc.DataMissStub(channel)
                 
         context = zmq.Context()
-        self.socket = context.Socket(zmq.SUB)
-        self.socket.connect('tcp://localhost:5555')
-        for topic in [b'init', b'prefetch', b'dataMiss', b'releaseCache']:
-            self.socket.setsockopt(zmq.SUBSCRIBE, topic)
+        self.socket = context.socket(zmq.REP)
+        self.socket.bind('ipc:///share/runtime.ipc')
         self.processEvents()
-                
+
     def reset(self):        
         # cache is used to track which file is in tmpfs
         self.cache = OrderedDict() # {batch_index: [tmpfs_path]}
@@ -90,8 +83,8 @@ class Client(object):
         self.req_time = []
         self.load_time = []
         
-        self.prefetchIndex = 0
-        self.prefetchPaths = None
+        self.prefetch_idx = 0
+        self.nfs_paths = None
             
     def registerJob(self, stub):
         """Register a list of jobs to the GM
@@ -125,16 +118,7 @@ class Client(object):
                 json.dump(MessageToDict(resp), f)
         return resp.mongoUri
 
-    def handleDataMiss(self, etag):
-        with grpc.insecure_channel(managerUri) as channel:
-            datamiss_stub = pb_grpc.DataMissStub(channel)
-            resp = datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag.strip('\n')))
-            if resp.response:
-                logger.info('request missing etag {}'.format(etag))
-            else:
-                logger.warning('failed to request missing etag {}'.format(etag))
-
-    def prefetch(self):
+    def prefetch(self, index):
         def docopy(nfs_path):
             tmpfs_path = '/runtime{}'.format(nfs_path)
             t = time.time()
@@ -143,27 +127,31 @@ class Client(object):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
             futures = []
-            for nfs_path in self.prefetchPaths[self.prefetchIndex]:
+            for nfs_path in self.nfs_paths[index]:
                 futures.append(executor.submit(docopy, nfs_path))
             concurrent.futures.wait(futures)
-        self.prefetchIndex += 1
 
     def processEvents(self):
         while True:
-            topic, data = self.socket.recv()
-            topic = topic.decode("utf-8")
-            data = data.decode("utf-8")
+            topic, data = self.socket.recv_multipart()
+            topic, data = topic.decode("utf-8"), data.decode("utf-8")
+            if topic != 'init':
+                logger.info('recv msg: {} {}'.format(topic, data))
             if topic == "init":
                 self.reset()
-                with open(initChannel, 'r') as f:
-                    tmp = json.load(f)
-                    self.prefetchPaths = tmp['paths']
-                    self.minCacheCapacity = 2
+                data = json.loads(data)
+                self.nfs_paths = data['paths']
+                self.cache_size = 1
+                for i in range(self.cache_size):
+                    self.prefetch(i)
+                self.socket.send(b"")
             elif topic == "prefetch":
-                batchIndex = int(data)
+                self.socket.send(b"")
+                batch_idx = int(data)
                 # catch up the next batch
-                while self.prefetchIndex <= batchIndex:
-                    self.prefetch()
+                for i in range(self.prefetch_idx, batch_idx+1):
+                    self.prefetch(i)
+                    self.prefetch_idx += 1
                     self.req_time.append(time.time())
                 
                 # tune cache capacity
@@ -175,18 +163,26 @@ class Client(object):
                     """
                     reqIntervals = np.mean(np.diff(self.req_time)[1:])  # data consumption intervals
                     loadIntervals = np.mean(np.array(self.load_time))  # data loading intervals
-                    remainingBatches = len(self.prefetchPaths) - len(self.req_time)  # remaining batches
-                    capacity = max(self.minCacheCapacity, (1-reqIntervals/loadIntervals) * remainingBatches)
+                    remainingBatches = len(self.nfs_paths) - len(self.req_time)  # remaining batches
+                    capacity = max(self.cache_size, math.ceil((1-reqIntervals/loadIntervals) * remainingBatches))
                     
                     # expand the cache capacity
-                    for _ in range(capacity-self.minCacheCapacity+1):
-                        self.prefetch()
-                    self.minCacheCapacity = capacity
+                    for _ in range(self.cache_size, capacity+1):
+                        self.prefetch(self.prefetch_idx)
+                        self.prefetch_idx += 1
+                    self.cache_size = capacity
             elif topic == "dataMiss":
-                self.handleDataMiss(etag=data)
+                resp = self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag.strip('\n')))
+                if resp.response:
+                    logger.info('request missing etag {}'.format(etag))
+                else:
+                    logger.warning('failed to request missing etag {}'.format(etag))
+                self.socket.send(b"")
             elif topic == "releaseCache":
-                files = data.split(",")
-                for tmpfspath in files:
+                self.socket.send(b"")
+                batch_idx = int(data)
+                for path in self.nfs_paths[batch_idx]:
+                    tmpfspath = '/runtime' + path
                     if not os.path.exists(tmpfspath): continue
                     etag = tmpfspath.split('/')[-1]
                     now = datetime.datetime.now().timestamp()

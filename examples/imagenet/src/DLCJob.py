@@ -5,7 +5,7 @@ import multiprocessing
 from math import inf
 import math
 from socket import socket
-import threading
+from multiprocessing import Lock
 import numpy as np
 import zmq
 import time
@@ -13,8 +13,6 @@ from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 
-
-initChannel = "/share/prefetchKeys.json"
 
 class dotdict(dict):
     """dot.notation access to dictionary attributes"""
@@ -44,9 +42,6 @@ class DLCJobDataset(Dataset):
             keys (List, optional): a list of bucket keys. Defaults to None, meaning loading all keys in the bucket.
             shuffle (Bool, optional): default False
         """
-        
-        if os.path.exists(initChannel):
-            os.remove(initChannel)
             
         self.shuffle = shuffle
         jobname = os.environ.get('JOBNAME')
@@ -84,9 +79,10 @@ class DLCJobDataset(Dataset):
             self.client = s3_session.client('s3')
             self.load_s3_keys()
 
+        self.lock = Lock()
         context = zmq.Context()
-        self.socket = context.socket(zmq.PUB)
-        self.socket.bind("tcp://*:5555")
+        self.socket = context.socket(zmq.REQ)
+        self.socket.connect("ipc:///share/runtime.ipc")
         
         self.nfsFilePaths = []
         self.targets = None
@@ -161,7 +157,6 @@ class DLCJobDataset(Dataset):
             nfs_path = '/{}/{}'.format(loc, etag)
             tmpfs_path = '/runtime{}'.format(nfs_path)
             while True:
-                while not os.path.exists(tmpfs_path): continue
                 try:
                     try:
                         with open(tmpfs_path, 'rb') as f:
@@ -175,11 +170,11 @@ class DLCJobDataset(Dataset):
                         return val
                     except EOFError as er:
                         print(er)
-                        continue
                 except FileNotFoundError:
                     print("miss file {}".format(nfs_path))
-                    self.socket.send(b"{} {}".format("dataMiss", etag))
-                    while not os.path.exists(nfs_path): continue
+                    with self.lock:
+                        self.socket.send_multipart([b'dataMiss', etag.encode("utf-8")])
+                        self.socket.recv()
         else:
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
 
@@ -334,8 +329,8 @@ class DLCJobDataLoader(object):
         self.persistent_workers = persistent_workers
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
-        self.index = 1
-        self.currentBatch = 0
+        self.chunk_idx = 0
+        self.batch_idx = 2
         self.init_loader()
     
     def init_loader(self):
@@ -345,32 +340,30 @@ class DLCJobDataLoader(object):
                                  prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
         file_paths = np.array(self.dataset.nfsFilePaths)
         self.batchedNfsPaths = [file_paths[indices].tolist() for indices in self.loader._index_sampler]
-        with open(initChannel, 'w') as f:
-            json.dump(
-                {
-                    "meta": {'num_workers': self.num_workers, 'batch_size': self.batch_size, 'LazyLoading': self.lazy}, 
-                    "paths": self.batchedNfsPaths
-                }, f)
-        self.dataset.socket.send(b'init {}'.format(self.currentBatch))
-        for _ in range(2):
-            self.dataset.socket.send(b'prefetch {}'.format(self.currentBatch))
-            self.currentBatch += 1
+        self.dataset.socket.send_multipart([b'init', json.dumps({"paths": self.batchedNfsPaths}).encode('utf-8')])
+        self.dataset.socket.recv()
+        self.batch_idx = 1
         
     def __iter__(self):
         return self
     
     def __next__(self):
         try:
-            self.dataset.socket.send(b'prefetch {}'.format(self.currentBatch))
-            self.currentBatch += 1
+            if self.batch_idx < len(self.batchedNfsPaths):
+                self.dataset.socket.send_multipart([b'prefetch', str(self.batch_idx).encode('utf-8')])
+                self.dataset.socket.recv()
+            if self.batch_idx > 1:
+                self.dataset.socket.send_multipart([b'releaseCache', str(self.batch_idx-2).encode('utf-8')])
+                self.dataset.socket.recv()
+            self.batch_idx += 1
             data = next(iter(self.loader))
         except StopIteration:
-            if self.index == len(self.dataset.chunks):  # epoch is down
-                self.index = 1
+            if self.chunk_idx == len(self.dataset.chunks):  # epoch is down
+                self.chunk_idx = 0
                 raise StopIteration
-            else:
-                self.dataset.load_data(self.index)
+            else:  # data in the current chunk have been consumed
+                self.dataset.load_data(self.chunk_idx)
                 self.init_loader()
                 data = next(iter(self.loader))
-                self.index += 1
+                self.chunk_idx += 1
         return data
