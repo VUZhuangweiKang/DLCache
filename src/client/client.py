@@ -174,11 +174,7 @@ class Client(object):
                     self.cache_size = capacity
             elif topic == "dataMiss":
                 etags = data.split(',')
-                resp = self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etags=etags))
-                if resp.response:
-                    logger.info('request missing etag {}'.format(etag))
-                else:
-                    logger.warning('failed to request missing etag {}'.format(etag))
+                self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etags=etags))
                 self.socket.send(b"")
             elif topic == "releaseCache":
                 self.socket.send(b"")

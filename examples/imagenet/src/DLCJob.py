@@ -325,7 +325,8 @@ class DLCJobDataLoader(object):
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
         self.chunk_idx = 0
-        self.batch_idx = 2
+        self.batch_idx = 0
+        
         context = zmq.Context()
         self.socket = context.socket(zmq.REQ)
         self.socket.connect("ipc:///share/runtime.ipc")
@@ -333,27 +334,33 @@ class DLCJobDataLoader(object):
     
     def init_loader(self):
         # shuffle if disabled under the LazyLoading mode
-        self.loader = DataLoader(self.dataset, self.batch_size, not self.lazy, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
+        data_loader = DataLoader(self.dataset, self.batch_size, not self.lazy, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
                                  self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
                                  prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
         file_paths = np.array(self.dataset.nfsFilePaths)
-        self.batchedNfsPaths = [file_paths[indices].tolist() for indices in self.loader._index_sampler]
+        self.batchedNfsPaths = [file_paths[indices].tolist() for indices in data_loader._index_sampler]
+        self.loader = iter(data_loader)
         # client will copy the first batch when receive init msg
         self.socket.send_multipart([b'init', json.dumps({"paths": self.batchedNfsPaths}).encode('utf-8')])
         self.socket.recv()
-        self.batch_idx = 1
-        
+        self.batch_idx = 0
+    
     def __iter__(self):
         return self
     
     def __next__(self):
         try:
-            if self.batch_idx < len(self.batchedNfsPaths):
-                self.socket.send_multipart([b'prefetch', str(self.batch_idx).encode('utf-8')])
+            # prefetch the next batch
+            if self.batch_idx < len(self.batchedNfsPaths)-1:
+                self.socket.send_multipart([b'prefetch', str(self.batch_idx+1).encode('utf-8')])
                 self.socket.recv()
-            if self.batch_idx > 1:
-                self.socket.send_multipart([b'releaseCache', str(self.batch_idx-2).encode('utf-8')])
+            
+            # release the last batch
+            if 0 < self.batch_idx < len(self.batchedNfsPaths):
+                self.socket.send_multipart([b'releaseCache', str(self.batch_idx-1).encode('utf-8')])
                 self.socket.recv()
+            
+            # download missing data
             if self.dataset.missing_data:
                 miss = ','.join(self.dataset.missing_data)
                 self.socket.send_multipart([b'dataMiss', miss.encode("utf-8")])
@@ -361,14 +368,15 @@ class DLCJobDataLoader(object):
             self.dataset.missing_data.clear()
             
             self.batch_idx += 1
-            data = next(iter(self.loader))
+            data = self.loader.next()
         except StopIteration:
-            if self.chunk_idx == len(self.dataset.chunks):  # epoch is down
+            if self.chunk_idx == len(self.dataset.chunks)-1:  # epoch is down
                 self.chunk_idx = 0
+                self.batch_idx = 0
                 raise StopIteration
             else:  # data in the current chunk have been consumed
                 self.dataset.load_data(self.chunk_idx)
                 self.init_loader()
-                data = next(iter(self.loader))
+                data = self.loader.next()
                 self.chunk_idx += 1
         return data
