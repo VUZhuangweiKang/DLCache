@@ -118,18 +118,19 @@ class Client(object):
                 json.dump(MessageToDict(resp), f)
         return resp.mongoUri
 
-    def prefetch(self, index):
+    def prefetch(self, idx):
         def docopy(nfs_path):
             tmpfs_path = '/runtime{}'.format(nfs_path)
             t = time.time()
             copyfile(nfs_path, tmpfs_path)  # NFS --> tmpfs
             self.load_time.append(time.time()-t)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-            futures = []
-            for nfs_path in self.nfs_paths[index]:
-                futures.append(executor.submit(docopy, nfs_path))
-            concurrent.futures.wait(futures)
+        if idx < len(self.nfs_paths):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                futures = []
+                for nfs_path in self.nfs_paths[idx]:
+                    futures.append(executor.submit(docopy, nfs_path))
+                concurrent.futures.wait(futures)
 
     def processEvents(self):
         while True:
@@ -172,7 +173,8 @@ class Client(object):
                         self.prefetch_idx += 1
                     self.cache_size = capacity
             elif topic == "dataMiss":
-                resp = self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag.strip('\n')))
+                etags = data.split(',')
+                resp = self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etags=etags))
                 if resp.response:
                     logger.info('request missing etag {}'.format(etag))
                 else:
@@ -181,19 +183,20 @@ class Client(object):
             elif topic == "releaseCache":
                 self.socket.send(b"")
                 batch_idx = int(data)
-                for path in self.nfs_paths[batch_idx]:
-                    tmpfspath = '/runtime' + path
-                    if not os.path.exists(tmpfspath): continue
-                    etag = tmpfspath.split('/')[-1]
-                    now = datetime.datetime.now().timestamp()
-                    self.dataset_col.update_one(
-                        {"ETag": etag}, 
-                        {
-                            "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
-                            "$inc": {"TotalAccessTime": 1}
-                        })
-                    if os.path.exists(tmpfspath):
-                        os.remove(tmpfspath)
+                if batch_idx < len(self.nfs_paths):
+                    for path in self.nfs_paths[batch_idx]:
+                        tmpfspath = '/runtime' + path
+                        if not os.path.exists(tmpfspath): continue
+                        etag = tmpfspath.split('/')[-1]
+                        now = datetime.datetime.now().timestamp()
+                        self.dataset_col.update_one(
+                            {"ETag": etag}, 
+                            {
+                                "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
+                                "$inc": {"TotalAccessTime": 1}
+                            })
+                        if os.path.exists(tmpfspath):
+                            os.remove(tmpfspath)
 
 
 if __name__ == '__main__':

@@ -94,7 +94,7 @@ service DataMiss {
 }
 message DataMissRequest {
     required Credential cred = 1;
-    required string etag = 2;
+    repeated string etags = 2;
 }
 message DataMissResponse {
     optional bool response = 1;
