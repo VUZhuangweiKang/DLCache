@@ -397,12 +397,7 @@ class DataMissService(pb_grpc.DataMissServicer):
             s3_client = self.manager.get_s3_client(cred)
             self.manager.clone_s3obj(s3obj=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], 
                                     chunk_size=chunk['ChunkSize'], node_sequence=[chunk['Location']], part=chunk['Part'], miss=True)
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-            futures = []
-            for etag in request.etags:
-                futures.append(executor.submit(download, etag))
-            concurrent.futures.wait(futures)
+        download(request.etag)
         return pb.DataMissResponse(response=True)
 
 

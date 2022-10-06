@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import deque
 import os
 import json
 import concurrent.futures
@@ -7,7 +7,10 @@ from math import inf
 import math
 import random
 import numpy as np
+import pickle
 import zmq
+from itertools import tee
+from multiprocessing import Process, Condition, Lock
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
@@ -78,9 +81,11 @@ class DLCJobDataset(Dataset):
             self.client = s3_session.client('s3')
             self.load_s3_keys()
         
-        self.missing_data = []
+        self.lock = Lock()
+        self.missing_data = deque()
         self.nfsFilePaths = []
         self.targets = None
+        self.condition = Condition()
         self.load_data(0)
                     
     def get_data(self, idx):
@@ -153,7 +158,7 @@ class DLCJobDataset(Dataset):
             try:
                 with open(tmpfs_path, 'rb') as f:
                     val = f.read()
-                print("read tmpfs file {}".format(tmpfs_path))
+                # print("read tmpfs file {}".format(tmpfs_path))
                 return val
             except FileNotFoundError:
                 print("miss tmpfs file {}".format(tmpfs_path))
@@ -162,14 +167,26 @@ class DLCJobDataset(Dataset):
                         val = f.read()
                     return val
                 except FileNotFoundError:
-                    # TODO: substitutable cache hit
+                    # substitutable cache hit
+                    # 1. randomly select an unused data point
+                    # 2. replace the idx with sub_idx
+                    # 3. socket in data loader notify client to update data access sequence
                     print('miss nfs file {}'.format(nfs_path))
-                    self.missing_data.append(etag)
-                    sub_idx = random.randint(0, len(self.data)-1)
-                    etag, loc = self.data[sub_idx]['ChunkETag'], self.data[sub_idx]['Location']
+                    
+                    while True:
+                        sub_idx = random.randint(0, len(self.data)-1)
+                        sub_etag, sub_loc = self.data[sub_idx]['ChunkETag'], self.data[sub_idx]['Location']
+                        p =  '/{}/{}'.format(sub_loc, sub_etag)
+                        if os.path.exists(p):
+                            break
+                        else:
+                            self.missing_data.append([[idx, etag], [sub_idx, sub_etag]])
+                            with self.condition:
+                                self.condition.notify()
+
                     return self.read(self.data[sub_idx], sub_idx)
             except EOFError as er:
-                print(er)
+                print(nfs_path, er)
                 return self.read(chunk, idx)
         else:
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
@@ -260,9 +277,7 @@ class DLCJobDataLoader(object):
             pin_memory (bool, optional): If ``True``, the data loader will copy Tensors
                 into CUDA pinned memory before returning them.  If your data elements
                 are a custom type, or your :attr:`collate_fn` returns a batch that is a custom type,
-                see the example below.
-            drop_last (bool, optional): set to ``True`` to drop the last incomplete batch,
-                if the dataset size is not divisible by the batch size. If ``False`` and
+                see the example below.ie by the batch size. If ``False`` and
                 the size of dataset is not divisible by the batch size, then the last batch
                 will be smaller. (default: ``False``)
             timeout (numeric, optional): if positive, the timeout value for collecting a batch
@@ -325,54 +340,70 @@ class DLCJobDataLoader(object):
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
         self.chunk_idx = 0
-        self.batch_idx = 0
         
         context = zmq.Context()
         self.socket = context.socket(zmq.REQ)
         self.socket.connect("ipc:///share/runtime.ipc")
+        
         self.init_loader()
+        Process(target=self.handle_miss, args=(self.dataset.condition,), daemon=True).start()
+    
+    def handle_miss(self, condition):
+        context = zmq.Context()
+        socket = context.socket(zmq.REQ)
+        socket.connect("ipc:///share/runtime.ipc")
+        while True:
+            with condition:
+                condition.wait()
+                while self.dataset.missing_data:
+                    missinfo, subinfo = self.dataset.missing_data.popleft()
+                    msg = "{}:{} {}:{}".format(missinfo[0], missinfo[1], subinfo[0], subinfo[1])
+                    socket.send_multipart([b'dataMiss', msg.encode("utf-8")])
+                    socket.recv()
     
     def init_loader(self):
         # shuffle if disabled under the LazyLoading mode
         data_loader = DataLoader(self.dataset, self.batch_size, not self.lazy, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
                                  self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
                                  prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
+
         file_paths = np.array(self.dataset.nfsFilePaths)
-        self.batchedNfsPaths = [file_paths[indices].tolist() for indices in data_loader._index_sampler]
+        self.batchedNfsPaths = [file_paths[idx].tolist() for idx in iter(data_loader._index_sampler)]
         self.loader = iter(data_loader)
+        
         # client will copy the first batch when receive init msg
-        self.socket.send_multipart([b'init', json.dumps({"paths": self.batchedNfsPaths}).encode('utf-8')])
+        self.socket.send_multipart([b'init', json.dumps({
+            "paths": self.batchedNfsPaths,
+            "batch_size": self.batch_size,
+            "num_workers": self.num_workers,
+            "prefetch_factor": self.prefetch_factor}).encode('utf-8')])
         self.socket.recv()
-        self.batch_idx = 0
     
     def __iter__(self):
         return self
     
     def __next__(self):
+        print('--------->', self.loader._send_idx, self.loader._rcvd_idx)
         try:
+            # for task_id in self.loader._task_info:
+            #     if len(self.loader._task_info[task_id]) == 1:
+            #         print("task_id: {}, worker_id: {}, data: None".format(task_id, self.loader._task_info[task_id][0]))
+            #     elif len(self.loader._task_info[task_id]) == 2:
+            #         print("task_id: {}, worker_id: {}, data: {}".format(task_id, self.loader._task_info[task_id][0], self.loader._task_info[task_id][1] is None))
+            
             # prefetch the next batch
-            if self.batch_idx < len(self.batchedNfsPaths)-1:
-                self.socket.send_multipart([b'prefetch', str(self.batch_idx+1).encode('utf-8')])
-                self.socket.recv()
+            self.socket.send_multipart([b'prefetch', str(self.loader._send_idx).encode('utf-8')])
+            self.socket.recv()
             
             # release the last batch
-            if 0 < self.batch_idx < len(self.batchedNfsPaths):
-                self.socket.send_multipart([b'releaseCache', str(self.batch_idx-1).encode('utf-8')])
+            if self.loader._rcvd_idx >= 1:
+                self.socket.send_multipart([b'releaseCache', str(self.loader._rcvd_idx-1).encode('utf-8')])
                 self.socket.recv()
-            
-            # download missing data
-            if self.dataset.missing_data:
-                miss = ','.join(self.dataset.missing_data)
-                self.socket.send_multipart([b'dataMiss', miss.encode("utf-8")])
-                self.socket.recv()
-            self.dataset.missing_data.clear()
-            
-            self.batch_idx += 1
+                
             data = self.loader.next()
         except StopIteration:
-            if self.chunk_idx == len(self.dataset.chunks)-1:  # epoch is down
+            if self.chunk_idx == len(self.dataset.chunks):  # epoch is down
                 self.chunk_idx = 0
-                self.batch_idx = 0
                 raise StopIteration
             else:  # data in the current chunk have been consumed
                 self.dataset.load_data(self.chunk_idx)

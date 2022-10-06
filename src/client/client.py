@@ -1,9 +1,9 @@
-from __future__ import print_function
 import grpc
 import signal
 import json
 import time
 import math
+import pickle
 import glob
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
@@ -72,7 +72,9 @@ class Client(object):
                 
         context = zmq.Context()
         self.socket = context.socket(zmq.REP)
-        self.socket.bind('ipc:///share/runtime.ipc')
+        # for topic in [b'init', b'prefetch', b'releaseCache', b'dataMiss']:
+        #     self.socket.setsockopt(zmq.SUBSCRIBE, topic)
+        self.socket.bind("ipc:///share/runtime.ipc")
         self.processEvents()
 
     def reset(self):        
@@ -120,36 +122,58 @@ class Client(object):
 
     def prefetch(self, idx):
         def docopy(nfs_path):
-            tmpfs_path = '/runtime{}'.format(nfs_path)
-            t = time.time()
-            copyfile(nfs_path, tmpfs_path)  # NFS --> tmpfs
-            self.load_time.append(time.time()-t)
+            if os.path.exists(nfs_path):
+                tmpfs_path = '/runtime{}'.format(nfs_path)
+                t = time.time()
+                shutil.copyfile(nfs_path, tmpfs_path, follow_symlinks=True)  # NFS --> tmpfs
+                while os.stat(nfs_path).st_size != os.stat(tmpfs_path).st_size: pass
+                self.load_time.append(time.time()-t)
+                return True
+            return False
 
+        start = time.time()
         if idx < len(self.nfs_paths):
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
                 for nfs_path in self.nfs_paths[idx]:
                     futures.append(executor.submit(docopy, nfs_path))
-                concurrent.futures.wait(futures)
+            
+            for task in futures:
+                assert task.result()
+        print('prefetch time:', time.time()-start)
 
     def processEvents(self):
+        batch_size = None
         while True:
             topic, data = self.socket.recv_multipart()
             topic, data = topic.decode("utf-8"), data.decode("utf-8")
-            if topic != 'init':
+            if topic != "init":
                 logger.info('recv msg: {} {}'.format(topic, data))
             if topic == "init":
                 self.reset()
                 data = json.loads(data)
+                batch_size = data["batch_size"]
                 self.nfs_paths = data['paths']
-                self.cache_size = 1
+                self.cache_size = data["num_workers"] * data["prefetch_factor"]
                 for i in range(self.cache_size):
                     self.prefetch(i)
-                self.socket.send(b"")
+                while len(os.listdir('/runtime/129.59.234.238/')) < self.cache_size:
+                    pass
+                else:
+                    for idx in range(self.cache_size):
+                        for nfs_path in self.nfs_paths[idx]:
+                            try:
+                                tmpfspath = '/runtime' + nfs_path
+                                with open(tmpfspath, 'rb') as f:
+                                    pickle.load(f)
+                            except EOFError:
+                                print(nfs_path)
+                                
+                    self.socket.send(b'')
             elif topic == "prefetch":
-                self.socket.send(b"")
-                batch_idx = int(data)
+                self.socket.send(b'')
                 # catch up the next batch
+                batch_idx = int(data)
                 for i in range(self.prefetch_idx, batch_idx+1):
                     self.prefetch(i)
                     self.prefetch_idx += 1
@@ -173,11 +197,14 @@ class Client(object):
                         self.prefetch_idx += 1
                     self.cache_size = capacity
             elif topic == "dataMiss":
-                etags = data.split(',')
-                self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etags=etags))
-                self.socket.send(b"")
+                self.socket.send(b'')
+                miss_info, sub_info = data.split(' ')
+                miss_idx, miss_etag = miss_info.split(":")
+                sub_idx, sub_etag = sub_info.split(':')
+                self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size], self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size] = self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size], self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size]
+                self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
             elif topic == "releaseCache":
-                self.socket.send(b"")
+                self.socket.send(b'')
                 batch_idx = int(data)
                 if batch_idx < len(self.nfs_paths):
                     for path in self.nfs_paths[batch_idx]:
