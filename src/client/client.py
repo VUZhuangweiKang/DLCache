@@ -72,8 +72,6 @@ class Client(object):
                 
         context = zmq.Context()
         self.socket = context.socket(zmq.REP)
-        # for topic in [b'init', b'prefetch', b'releaseCache', b'dataMiss']:
-        #     self.socket.setsockopt(zmq.SUBSCRIBE, topic)
         self.socket.bind("ipc:///share/runtime.ipc")
         self.processEvents()
 
@@ -126,58 +124,66 @@ class Client(object):
                 tmpfs_path = '/runtime{}'.format(nfs_path)
                 t = time.time()
                 shutil.copyfile(nfs_path, tmpfs_path, follow_symlinks=True)  # NFS --> tmpfs
-                while os.stat(nfs_path).st_size != os.stat(tmpfs_path).st_size: pass
-                self.load_time.append(time.time()-t)
-                return True
-            return False
+                if os.stat(nfs_path).st_size == os.stat(tmpfs_path).st_size:
+                    self.load_time.append(time.time()-t)
+                    # print('copy file {}'.format(nfs_path))
+                    assert os.path.exists(tmpfs_path)
+                    while os.stat(nfs_path).st_size != os.stat(tmpfs_path).st_size: pass
+                    return True, nfs_path
+            # print('failed to copy {}'.format(nfs_path))
+            return False, nfs_path
 
-        start = time.time()
         if idx < len(self.nfs_paths):
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
                 for nfs_path in self.nfs_paths[idx]:
                     futures.append(executor.submit(docopy, nfs_path))
-            
+
             for task in futures:
-                assert task.result()
-        print('prefetch time:', time.time()-start)
+                rc, miss_file = task.result()
+                etag = miss_file.split('/')[-1]
+                if not rc:
+                    self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
 
     def processEvents(self):
         batch_size = None
         while True:
             topic, data = self.socket.recv_multipart()
             topic, data = topic.decode("utf-8"), data.decode("utf-8")
-            if topic != "init":
-                logger.info('recv msg: {} {}'.format(topic, data))
+            # if topic != "init":
+            logger.info('recv msg: {} {}'.format(topic, data))
             if topic == "init":
                 self.reset()
-                data = json.loads(data)
+                data = json.loads(data)                
                 batch_size = data["batch_size"]
                 self.nfs_paths = data['paths']
-                self.cache_size = data["num_workers"] * data["prefetch_factor"]
+                self.cache_size = data["num_workers"] * data["prefetch_factor"]                
                 for i in range(self.cache_size):
                     self.prefetch(i)
-                while len(os.listdir('/runtime/129.59.234.238/')) < self.cache_size:
-                    pass
-                else:
-                    for idx in range(self.cache_size):
-                        for nfs_path in self.nfs_paths[idx]:
-                            try:
-                                tmpfspath = '/runtime' + nfs_path
-                                with open(tmpfspath, 'rb') as f:
-                                    pickle.load(f)
-                            except EOFError:
-                                print(nfs_path)
-                                
-                    self.socket.send(b'')
+                
+                # # double check files
+                # for idx in range(self.cache_size):
+                #     for nfs_path in self.nfs_paths[idx]:
+                #         try:
+                #             tmpfspath = '/runtime' + nfs_path
+                #             with open(tmpfspath, 'rb') as f:
+                #                 pickle.load(f)
+                #         except EOFError:
+                #             print('EOFError:', nfs_path)
+                #         except FileNotFoundError:
+                #             print('FileNotFoundError:', nfs_path)
+                self.socket.send(b'')
             elif topic == "prefetch":
                 self.socket.send(b'')
                 # catch up the next batch
-                batch_idx = int(data)
-                for i in range(self.prefetch_idx, batch_idx+1):
-                    self.prefetch(i)
-                    self.prefetch_idx += 1
-                    self.req_time.append(time.time())
+                batch_idx = [int(idx) for idx in data.split(',') if len(idx) > 0]
+                for idx in batch_idx:
+                    if idx >= self.prefetch_idx:
+                        self.prefetch(idx)
+                        self.prefetch_idx += 1
+                        self.req_time.append(time.time())
+                    else:
+                        break
                 
                 # tune cache capacity
                 if len(self.req_time) > 3:
@@ -196,6 +202,7 @@ class Client(object):
                         self.prefetch(self.prefetch_idx)
                         self.prefetch_idx += 1
                     self.cache_size = capacity
+                    
             elif topic == "dataMiss":
                 self.socket.send(b'')
                 miss_info, sub_info = data.split(' ')

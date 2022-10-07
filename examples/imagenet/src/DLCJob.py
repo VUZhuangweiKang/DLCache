@@ -1,4 +1,3 @@
-from collections import deque
 import os
 import json
 import concurrent.futures
@@ -7,10 +6,9 @@ from math import inf
 import math
 import random
 import numpy as np
-import pickle
 import zmq
-from itertools import tee
-from multiprocessing import Process, Condition, Lock
+from collections import deque
+from multiprocessing import Process, Condition
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
@@ -24,7 +22,7 @@ class dotdict(dict):
 
 
 class DLCJobDataset(Dataset):
-    def __init__(self, keys: List[str] = None, shuffle=False):
+    def __init__(self, keys: List[str] = None):
         """An abstract class subclassing the torch.utils.data.Dataset class
         
         All datasets that represent a map from keys to data samples should subclass
@@ -44,8 +42,6 @@ class DLCJobDataset(Dataset):
             keys (List, optional): a list of bucket keys. Defaults to None, meaning loading all keys in the bucket.
             shuffle (Bool, optional): default False
         """
-            
-        self.shuffle = shuffle
         jobname = os.environ.get('JOBNAME')
         self.keys = keys
         with open('/jobsmeta/{}.json'.format(jobname), 'r') as f:
@@ -81,7 +77,6 @@ class DLCJobDataset(Dataset):
             self.client = s3_session.client('s3')
             self.load_s3_keys()
         
-        self.lock = Lock()
         self.missing_data = deque()
         self.nfsFilePaths = []
         self.targets = None
@@ -101,9 +96,6 @@ class DLCJobDataset(Dataset):
         maxmem = self.qos['MaxMemoryMill']*1e6  
         etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags']
         chunks = [chunk for chunk in self.dataset_col.find({"ChunkETag": {"$in": etags}})]
-        
-        if self.shuffle:
-            np.random.shuffle(chunks)
                     
         if maxmem == 0 or self.qos['LazyLoading']:
             self.chunks.append(chunks)
@@ -135,8 +127,6 @@ class DLCJobDataset(Dataset):
         maxmem = inf if maxmem==0 else maxmem
         total_size = 0
         self.chunks.append([])
-        if self.shuffle:
-            np.random.shuffle(pages)
         for page in pages:
             for item in page['Contents']:
                 s = int(item['Size'])
@@ -158,7 +148,7 @@ class DLCJobDataset(Dataset):
             try:
                 with open(tmpfs_path, 'rb') as f:
                     val = f.read()
-                # print("read tmpfs file {}".format(tmpfs_path))
+                print("read tmpfs file {}".format(tmpfs_path))
                 return val
             except FileNotFoundError:
                 print("miss tmpfs file {}".format(tmpfs_path))
@@ -185,9 +175,6 @@ class DLCJobDataset(Dataset):
                                 self.condition.notify()
 
                     return self.read(self.data[sub_idx], sub_idx)
-            except EOFError as er:
-                print(nfs_path, er)
-                return self.read(chunk, idx)
         else:
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
 
@@ -233,14 +220,13 @@ class DLCJobDataset(Dataset):
         """
         raise NotImplementedError
 
-
     def __len__(self) -> int:
         raise NotImplementedError
     
     
 class DLCJobDataLoader(object):
     def __init__(self, dataset: DLCJobDataset, 
-                 batch_size: Optional[int] = 1, sampler: Union[Sampler, Iterable, None] = None,
+                 batch_size: Optional[int] = 1, shuffle: bool = False, sampler: Union[Sampler, Iterable, None] = None,
                  batch_sampler: Union[Sampler[Sequence], Iterable[Sequence], None] = None,
                  num_workers: int = 0, collate_fn: Optional[_collate_fn_t] = None,
                  pin_memory: bool = False, drop_last: bool = False,
@@ -258,9 +244,11 @@ class DLCJobDataLoader(object):
         See :py:mod:`torch.utils.data` documentation page for more details.
 
         Args:
-            dataset (DLCJobDataset): dataset from which to load the data.
+            dataset (Dataset): dataset from which to load the data.
             batch_size (int, optional): how many samples per batch to load
                 (default: ``1``).
+            shuffle (bool, optional): set to ``True`` to have the data reshuffled
+                at every epoch (default: ``False``).
             sampler (Sampler or Iterable, optional): defines the strategy to draw
                 samples from the dataset. Can be any ``Iterable`` with ``__len__``
                 implemented. If specified, :attr:`shuffle` must not be specified.
@@ -277,7 +265,9 @@ class DLCJobDataLoader(object):
             pin_memory (bool, optional): If ``True``, the data loader will copy Tensors
                 into CUDA pinned memory before returning them.  If your data elements
                 are a custom type, or your :attr:`collate_fn` returns a batch that is a custom type,
-                see the example below.ie by the batch size. If ``False`` and
+                see the example below.
+            drop_last (bool, optional): set to ``True`` to drop the last incomplete batch,
+                if the dataset size is not divisible by the batch size. If ``False`` and
                 the size of dataset is not divisible by the batch size, then the last batch
                 will be smaller. (default: ``False``)
             timeout (numeric, optional): if positive, the timeout value for collecting a batch
@@ -286,7 +276,7 @@ class DLCJobDataLoader(object):
                 worker subprocess with the worker id (an int in ``[0, num_workers - 1]``) as
                 input, after seeding and before data loading. (default: ``None``)
             generator (torch.Generator, optional): If not ``None``, this RNG will be used
-                by RandomSampler to generate random self.indexes and multiprocessing to generate
+                by RandomSampler to generate random indexes and multiprocessing to generate
                 `base_seed` for workers. (default: ``None``)
             prefetch_factor (int, optional, keyword-only arg): Number of samples loaded
                 in advance by each worker. ``2`` means there will be a total of
@@ -322,9 +312,10 @@ class DLCJobDataLoader(object):
         .. warning:: See :ref:`reproducibility`, and :ref:`dataloader-workers-random-seed`, and
                     :ref:`data-loading-randomness` notes for random seed related questions.
         """
-    
+        
         self.dataset = dataset
         self.batch_size = batch_size
+        self.shuffle = shuffle
         self.sampler = sampler
         self.batch_sampler = batch_sampler
         self.num_workers = num_workers
@@ -339,7 +330,7 @@ class DLCJobDataLoader(object):
         self.persistent_workers = persistent_workers
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
-        self.chunk_idx = 0
+        self.reset()
         
         context = zmq.Context()
         self.socket = context.socket(zmq.REQ)
@@ -348,6 +339,12 @@ class DLCJobDataLoader(object):
         self.init_loader()
         Process(target=self.handle_miss, args=(self.dataset.condition,), daemon=True).start()
     
+    def reset(self):
+        for svr in os.listdir('/runtime/'):
+            os.system('rm -r /runtime/{}/*'.format(svr))
+        self.chunk_idx = 0
+        self.dataset.load_data(self.chunk_idx)
+        
     def handle_miss(self, condition):
         context = zmq.Context()
         socket = context.socket(zmq.REQ)
@@ -362,14 +359,12 @@ class DLCJobDataLoader(object):
                     socket.recv()
     
     def init_loader(self):
-        # shuffle if disabled under the LazyLoading mode
-        data_loader = DataLoader(self.dataset, self.batch_size, not self.lazy, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
+        data_loader = DataLoader(self.dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
                                  self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
                                  prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
 
         file_paths = np.array(self.dataset.nfsFilePaths)
         self.batchedNfsPaths = [file_paths[idx].tolist() for idx in iter(data_loader._index_sampler)]
-        self.loader = iter(data_loader)
         
         # client will copy the first batch when receive init msg
         self.socket.send_multipart([b'init', json.dumps({
@@ -378,36 +373,40 @@ class DLCJobDataLoader(object):
             "num_workers": self.num_workers,
             "prefetch_factor": self.prefetch_factor}).encode('utf-8')])
         self.socket.recv()
+        
+        # when creating the loader iterator, pytorch data loader will be iterated
+        # some data might be missed in tmpfs, but it's only for initializing the iterator
+        # it doesn't influence the actuall loading performance that is decided by the __next__ function
+        self.loader = iter(data_loader)
     
     def __iter__(self):
         return self
     
     def __next__(self):
-        print('--------->', self.loader._send_idx, self.loader._rcvd_idx)
         try:
-            # for task_id in self.loader._task_info:
-            #     if len(self.loader._task_info[task_id]) == 1:
-            #         print("task_id: {}, worker_id: {}, data: None".format(task_id, self.loader._task_info[task_id][0]))
-            #     elif len(self.loader._task_info[task_id]) == 2:
-            #         print("task_id: {}, worker_id: {}, data: {}".format(task_id, self.loader._task_info[task_id][0], self.loader._task_info[task_id][1] is None))
-            
+            # print("send_idx: {}, rcvd_idx: {}, copy range: {}-{}".format(self.loader._send_idx, self.loader._rcvd_idx, self.loader._send_idx, min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
             # prefetch the next batch
-            self.socket.send_multipart([b'prefetch', str(self.loader._send_idx).encode('utf-8')])
-            self.socket.recv()
+            pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))    
+            pre_idx = [str(idx) for idx in pre_idx]
+            if len(pre_idx) > 0:
+                self.socket.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])
+                self.socket.recv()
             
             # release the last batch
-            if self.loader._rcvd_idx >= 1:
+            if self.loader._rcvd_idx > 0:
                 self.socket.send_multipart([b'releaseCache', str(self.loader._rcvd_idx-1).encode('utf-8')])
                 self.socket.recv()
-                
-            data = self.loader.next()
+            
+            data = next(self.loader)
         except StopIteration:
-            if self.chunk_idx == len(self.dataset.chunks):  # epoch is down
-                self.chunk_idx = 0
+             # epoch is down
+            if self.chunk_idx == len(self.dataset.chunks)-1:
+                self.reset()
                 raise StopIteration
-            else:  # data in the current chunk have been consumed
+            else:  
+                # data in the current chunk have been consumed
                 self.dataset.load_data(self.chunk_idx)
                 self.init_loader()
-                data = self.loader.next()
+                data = next(self.loader)
                 self.chunk_idx += 1
         return data
