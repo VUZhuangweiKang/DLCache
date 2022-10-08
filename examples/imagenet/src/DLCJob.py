@@ -1,24 +1,20 @@
 import os
 import json
-import concurrent.futures
-import multiprocessing
-from math import inf
+import concurrent
 import math
 import random
 import numpy as np
 import zmq
 from collections import deque
+import multiprocessing
 from multiprocessing import Process, Condition
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 
 
-class dotdict(dict):
-    """dot.notation access to dictionary attributes"""
-    __getattr__ = dict.get
-    __setattr__ = dict.__setitem__
-    __delattr__ = dict.__delitem__
+jobinfo = "/share/{}.json".format(os.environ.get('JOBNAME'))
+ipc_channel = 'ipc:///share/runtime.ipc'
 
 
 class DLCJobDataset(Dataset):
@@ -42,28 +38,21 @@ class DLCJobDataset(Dataset):
             keys (List, optional): a list of bucket keys. Defaults to None, meaning loading all keys in the bucket.
             shuffle (Bool, optional): default False
         """
-        jobname = os.environ.get('JOBNAME')
         self.keys = keys
-        with open('/jobsmeta/{}.json'.format(jobname), 'r') as f:
-            self.job = json.load(f)
-        self.qos = self.job['qos']
-        self.bucket = self.job['dataSource']['bucket']
+        while not os.path.exists(jobinfo): pass
+        with open(jobinfo, 'rb') as f:
+            job_meta = json.load(f)
+        self.qos = job_meta['qos']
+        self.bucket = job_meta['dataSource']['bucket']
         self.chunks = []
         
         if self.qos['UseCache']:
             from pymongo.mongo_client import MongoClient
-            while True:
-                try:
-                    with open("/share/{}.json".format(jobname), 'rb') as f:
-                        resp = dotdict(json.load(f))
-                        break
-                except (FileNotFoundError, json.decoder.JSONDecodeError):
-                    pass
-            mongo_client = MongoClient(resp.mongoUri)
-            self.jobId = resp.jobId
+            mongo_client = MongoClient(job_meta['mongoUri'])
+            self.jobId = job_meta['jobId']
             self.job_col = mongo_client.Cacher.Job
             self.dataset_col = mongo_client.Cacher.Datasets
-            self.load_cache_keys()
+            self.loadKeysFromDLCache()
         else:
             import configparser, boto3
             parser = configparser.ConfigParser()
@@ -75,13 +64,13 @@ class DLCJobDataset(Dataset):
                 region_name=s3auth['region_name']
             )
             self.client = s3_session.client('s3')
-            self.load_s3_keys()
+            self.loadKeysFromCloud()
         
-        self.missing_data = deque()
+        self.miss_queue = deque()
         self.nfsFilePaths = []
         self.targets = None
         self.condition = Condition()
-        self.load_data(0)
+        self.load_data(chunk_idx=0)
                     
     def get_data(self, idx):
         if self.qos['LazyLoading']:
@@ -92,7 +81,7 @@ class DLCJobDataset(Dataset):
     def get_target(self, index):
         return self.targets[index]
 
-    def load_cache_keys(self):
+    def loadKeysFromDLCache(self):
         maxmem = self.qos['MaxMemoryMill']*1e6  
         etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags']
         chunks = [chunk for chunk in self.dataset_col.find({"ChunkETag": {"$in": etags}})]
@@ -114,7 +103,7 @@ class DLCJobDataset(Dataset):
                 else:
                     self.chunks[-1].append(chunk)
         
-    def load_s3_keys(self):
+    def loadKeysFromCloud(self):
         paginator = self.client.get_paginator('list_objects_v2')
         if self.keys is not None:
             pages = []
@@ -124,7 +113,7 @@ class DLCJobDataset(Dataset):
             pages = paginator.paginate(Bucket=self.bucket)
         
         maxmem = self.qos['MaxMemoryMill']*1e6
-        maxmem = inf if maxmem==0 else maxmem
+        maxmem = math.inf if maxmem==0 else maxmem
         total_size = 0
         self.chunks.append([])
         for page in pages:
@@ -145,36 +134,35 @@ class DLCJobDataset(Dataset):
             etag, loc = chunk['ChunkETag'], chunk['Location']
             nfs_path = '/{}/{}'.format(loc, etag)
             tmpfs_path = '/runtime{}'.format(nfs_path)
-            try:
+            
+            # 3-level data hit
+            if os.path.exists(tmpfs_path):
                 with open(tmpfs_path, 'rb') as f:
                     val = f.read()
                 print("read tmpfs file {}".format(tmpfs_path))
                 return val
-            except FileNotFoundError:
+            elif os.path.exists(nfs_path):
                 print("miss tmpfs file {}".format(tmpfs_path))
-                try:
-                    with open(nfs_path, 'rb') as f:
-                        val = f.read()
-                    return val
-                except FileNotFoundError:
-                    # substitutable cache hit
-                    # 1. randomly select an unused data point
-                    # 2. replace the idx with sub_idx
-                    # 3. socket in data loader notify client to update data access sequence
-                    print('miss nfs file {}'.format(nfs_path))
-                    
-                    while True:
-                        sub_idx = random.randint(0, len(self.data)-1)
-                        sub_etag, sub_loc = self.data[sub_idx]['ChunkETag'], self.data[sub_idx]['Location']
-                        p =  '/{}/{}'.format(sub_loc, sub_etag)
-                        if os.path.exists(p):
-                            break
-                        else:
-                            self.missing_data.append([[idx, etag], [sub_idx, sub_etag]])
-                            with self.condition:
-                                self.condition.notify()
-
-                    return self.read(self.data[sub_idx], sub_idx)
+                with open(nfs_path, 'rb') as f:
+                    val = f.read()
+                return val
+            else:
+                # substitutable cache hit
+                # 1. randomly select an unused data point
+                # 2. replace the idx with sub_idx
+                # 3. socket in data loader notify client to update data access sequence
+                print('miss nfs file {}'.format(nfs_path))
+                while True:
+                    sub_idx = random.randint(0, len(self.data)-1)
+                    sub_etag, sub_loc = self.data[sub_idx]['ChunkETag'], self.data[sub_idx]['Location']
+                    p =  '/{}/{}'.format(sub_loc, sub_etag)
+                    if os.path.exists(p):
+                        break
+                    else:
+                        self.miss_queue.append([[idx, etag], [sub_idx, sub_etag]])
+                        with self.condition:
+                            self.condition.notify()
+                return self.read(self.data[sub_idx], sub_idx)
         else:
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
 
@@ -314,58 +302,19 @@ class DLCJobDataLoader(object):
         """
         
         self.dataset = dataset
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.sampler = sampler
-        self.batch_sampler = batch_sampler
-        self.num_workers = num_workers
-        self.collate_fn = collate_fn
-        self.pin_memory = pin_memory
-        self.drop_last = drop_last
-        self.timeout = timeout
-        self.worker_init_fn = worker_init_fn
-        self.multiprocessing_context = multiprocessing_context
-        self.generator = generator
-        self.prefetch_factor = prefetch_factor
-        self.persistent_workers = persistent_workers
         self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
         self.reset()
         
         context = zmq.Context()
         self.socket = context.socket(zmq.REQ)
-        self.socket.connect("ipc:///share/runtime.ipc")
+        self.socket.connect(ipc_channel)
         
-        self.init_loader()
-        Process(target=self.handle_miss, args=(self.dataset.condition,), daemon=True).start()
-    
-    def reset(self):
-        for svr in os.listdir('/runtime/'):
-            os.system('rm -r /runtime/{}/*'.format(svr))
-        self.chunk_idx = 0
-        self.dataset.load_data(self.chunk_idx)
-        
-    def handle_miss(self, condition):
-        context = zmq.Context()
-        socket = context.socket(zmq.REQ)
-        socket.connect("ipc:///share/runtime.ipc")
-        while True:
-            with condition:
-                condition.wait()
-                while self.dataset.missing_data:
-                    missinfo, subinfo = self.dataset.missing_data.popleft()
-                    msg = "{}:{} {}:{}".format(missinfo[0], missinfo[1], subinfo[0], subinfo[1])
-                    socket.send_multipart([b'dataMiss', msg.encode("utf-8")])
-                    socket.recv()
-    
-    def init_loader(self):
-        data_loader = DataLoader(self.dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
-                                 self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
-                                 prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
-
+        self.torch_loader = DataLoader(self.dataset, batch_size, shuffle, sampler, batch_sampler, num_workers, collate_fn, 
+                                       pin_memory, drop_last, timeout, worker_init_fn, multiprocessing_context, generator, 
+                                       prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
         file_paths = np.array(self.dataset.nfsFilePaths)
-        self.batchedNfsPaths = [file_paths[idx].tolist() for idx in iter(data_loader._index_sampler)]
-        
+        self.batchedNfsPaths = [file_paths[idx].tolist() for idx in iter(self.torch_loader._index_sampler)]
         # client will copy the first batch when receive init msg
         self.socket.send_multipart([b'init', json.dumps({
             "paths": self.batchedNfsPaths,
@@ -373,11 +322,30 @@ class DLCJobDataLoader(object):
             "num_workers": self.num_workers,
             "prefetch_factor": self.prefetch_factor}).encode('utf-8')])
         self.socket.recv()
+        self.loader = iter(self.torch_loader)
         
-        # when creating the loader iterator, pytorch data loader will be iterated
-        # some data might be missed in tmpfs, but it's only for initializing the iterator
-        # it doesn't influence the actuall loading performance that is decided by the __next__ function
-        self.loader = iter(data_loader)
+        Process(target=self.handle_miss, args=(self.dataset.condition,), daemon=True).start()
+    
+    def reset(self):
+        for svr in os.listdir('/runtime/'):
+            p = '/runtime/{}'.format(svr)
+            if os.path.exists(p) and len(os.listdir(p)) > 0:
+                os.system('rm -r {}/*'.format(p))
+        self.chunk_idx = 0
+        self.dataset.load_data(self.chunk_idx)
+        
+    def handle_miss(self, condition):
+        context = zmq.Context()
+        socket = context.socket(zmq.REQ)
+        socket.connect(ipc_channel)
+        while True:
+            with condition:
+                condition.wait()
+                while self.dataset.miss_queue:
+                    miss_idx, miss_etag, sub_idx, sub_etag = self.dataset.miss_queue.popleft()
+                    msg = b"{}:{} {}:{}".format(miss_idx, miss_etag, sub_idx, sub_etag)
+                    socket.send_multipart([b'dataMiss', msg])
+                    socket.recv()
     
     def __iter__(self):
         return self
@@ -402,11 +370,13 @@ class DLCJobDataLoader(object):
              # epoch is down
             if self.chunk_idx == len(self.dataset.chunks)-1:
                 self.reset()
+                # TODO: check if the index of torch loader changed
+                self.loader = iter(self.torch_loader)
                 raise StopIteration
             else:  
                 # data in the current chunk have been consumed
                 self.dataset.load_data(self.chunk_idx)
-                self.init_loader()
+                self.loader = iter(self.torch_loader)
                 data = next(self.loader)
                 self.chunk_idx += 1
         return data

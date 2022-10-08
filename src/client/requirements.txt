@@ -7,3 +7,4 @@ scikit-learn
 numpy
 pyinotify
 pymongo
+zmq

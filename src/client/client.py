@@ -3,12 +3,10 @@ import signal
 import json
 import time
 import math
-import pickle
 import glob
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
-from collections import OrderedDict
 import numpy as np
 from pymongo import MongoClient
 import concurrent
@@ -20,21 +18,13 @@ from utils import *
 
 
 logger = get_logger(__name__, level='Debug')
-
-def read_secret(arg):
-    path = '/secret/{}'.format(arg)
-    assert os.path.exists(path)
-    with open(path, 'r') as f:
-        data = f.read().strip()
-    return data
-
-
 cloudSecret = {
     "aws_access_key_id": read_secret('aws_access_key_id'),
     "aws_secret_access_key": read_secret('aws_secret_access_key'),
     "region_name": read_secret('region_name')   
 }
 manager_uri = "dlcpod-manager:50051"
+ipc_channel = 'ipc:///share/runtime.ipc'
 
 
 class Client(object):
@@ -72,13 +62,10 @@ class Client(object):
                 
         context = zmq.Context()
         self.socket = context.socket(zmq.REP)
-        self.socket.bind("ipc:///share/runtime.ipc")
+        self.socket.bind(ipc_channel)
         self.processEvents()
 
-    def reset(self):        
-        # cache is used to track which file is in tmpfs
-        self.cache = OrderedDict() # {batch_index: [tmpfs_path]}
-        
+    def reset(self):                
         # record data requesting and loading time for dynamically tuning the cache capacity
         self.req_time = []
         self.load_time = []
@@ -96,6 +83,10 @@ class Client(object):
             qos = job['qos']
             ds = job['dataSource']
             if 'keys' not in ds: ds['keys'] = []
+            for node in job['nodeSequence']:
+                p = '/runtime/{}'.format(node)
+                if not os.path.exists(p):
+                    os.mkdir(p)
             request = pb.RegisterRequest(
                 cred=self.cred,
                 datasource=pb.DataSource(name=ds['name'], bucket=ds['bucket'], keys=ds['keys']),
@@ -108,14 +99,15 @@ class Client(object):
             logger.info('receiving registration response stream')
             if resp.rc == pb.RC.REGISTERED:
                 resp = resp.regsucc
+                job['jobId'] = resp.jobId
+                job['mongoUri'] = resp.mongoUri
+                with open('/share/{}.json'.format(job['name']), 'w') as f:
+                    json.dump(job, f)
             else:
                 resp = resp.regerr
                 logger.error("failed to register job {}: {}".format(job['name'], resp.error))
                 os.kill(os.getpid(), signal.SIGINT)
             logger.info('registered job {}, assigned jobId is {}'.format(job['name'], resp.jobId))
-
-            with open('/share/{}.json'.format(job['name']), 'w') as f:  # marshelled registration response
-                json.dump(MessageToDict(resp), f)
         return resp.mongoUri
 
     def prefetch(self, idx):
@@ -175,7 +167,6 @@ class Client(object):
                 self.socket.send(b'')
             elif topic == "prefetch":
                 self.socket.send(b'')
-                # catch up the next batch
                 batch_idx = [int(idx) for idx in data.split(',') if len(idx) > 0]
                 for idx in batch_idx:
                     if idx >= self.prefetch_idx:

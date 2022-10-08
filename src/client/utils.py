@@ -103,3 +103,11 @@ def copyfile(src, dst):
     if not os.path.exists(base_dir):
         os.system('mkdir -p {}'.format(base_dir))
     shutil.copy2(src, dst)
+
+
+def read_secret(arg):
+    path = '/secret/{}'.format(arg)
+    assert os.path.exists(path)
+    with open(path, 'r') as f:
+        data = f.read().strip()
+    return data
