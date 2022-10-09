@@ -139,10 +139,10 @@ class DLCJobDataset(Dataset):
             if os.path.exists(tmpfs_path):
                 with open(tmpfs_path, 'rb') as f:
                     val = f.read()
-                print("read tmpfs file {}".format(tmpfs_path))
+                # print("read tmpfs file {}".format(tmpfs_path))
                 return val
             elif os.path.exists(nfs_path):
-                print("miss tmpfs file {}".format(tmpfs_path))
+                # print("miss tmpfs file {}".format(tmpfs_path))
                 with open(nfs_path, 'rb') as f:
                     val = f.read()
                 return val
@@ -302,38 +302,55 @@ class DLCJobDataLoader(object):
         """
         
         self.dataset = dataset
-        self.num_batches = math.ceil(len(self.dataset.data)/self.batch_size)
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.sampler = sampler
+        self.batch_sampler = batch_sampler 
+        self.num_workers = num_workers
+        self.collate_fn = collate_fn
+        self.pin_memory = pin_memory
+        self.drop_last = drop_last
+        self.timeout = timeout
+        self.worker_init_fn = worker_init_fn
+        self.multiprocessing_context = multiprocessing_context
+        self.generator = generator
+        self.prefetch_factor = prefetch_factor
+        self.persistent_workers = persistent_workers
+        self.num_batches = math.ceil(len(self.dataset.data)/batch_size)
         self.lazy = self.dataset.qos['LazyLoading']
-        self.reset()
+        self.chunk_idx = 0
+        self.clear()
         
         context = zmq.Context()
         self.socket = context.socket(zmq.REQ)
         self.socket.connect(ipc_channel)
         
-        self.torch_loader = DataLoader(self.dataset, batch_size, shuffle, sampler, batch_sampler, num_workers, collate_fn, 
-                                       pin_memory, drop_last, timeout, worker_init_fn, multiprocessing_context, generator, 
-                                       prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
-        file_paths = np.array(self.dataset.nfsFilePaths)
-        self.batchedNfsPaths = [file_paths[idx].tolist() for idx in iter(self.torch_loader._index_sampler)]
-        # client will copy the first batch when receive init msg
-        self.socket.send_multipart([b'init', json.dumps({
-            "paths": self.batchedNfsPaths,
-            "batch_size": self.batch_size,
-            "num_workers": self.num_workers,
-            "prefetch_factor": self.prefetch_factor}).encode('utf-8')])
-        self.socket.recv()
-        self.loader = iter(self.torch_loader)
-        
+        self._init_loader(first_iter=True)
         Process(target=self.handle_miss, args=(self.dataset.condition,), daemon=True).start()
     
-    def reset(self):
+    def _init_loader(self, first_iter=False):      
+        if first_iter or self.shuffle:
+            self.torch_loader = DataLoader(self.dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
+                                  self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
+                                  prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
+            file_paths = np.array(self.dataset.nfsFilePaths)
+            self.batchedNfsPaths = [file_paths[idx].tolist() for idx in iter(self.torch_loader._index_sampler)]
+            # client will copy the first batch when receive init msg
+            self.socket.send_multipart([b'init', json.dumps({
+                "paths": self.batchedNfsPaths,
+                "batch_size": self.batch_size,
+                "num_workers": self.num_workers,
+                "prefetch_factor": self.prefetch_factor}).encode('utf-8')])
+            self.socket.recv()
+        self.loader = iter(self.torch_loader)
+    
+    @staticmethod
+    def clear():
         for svr in os.listdir('/runtime/'):
             p = '/runtime/{}'.format(svr)
             if os.path.exists(p) and len(os.listdir(p)) > 0:
                 os.system('rm -r {}/*'.format(p))
-        self.chunk_idx = 0
-        self.dataset.load_data(self.chunk_idx)
-        
+    
     def handle_miss(self, condition):
         context = zmq.Context()
         socket = context.socket(zmq.REQ)
@@ -350,9 +367,13 @@ class DLCJobDataLoader(object):
     def __iter__(self):
         return self
     
+    def __len__(self):
+        return self.loader.__len__()
+    
     def __next__(self):
         try:
             # print("send_idx: {}, rcvd_idx: {}, copy range: {}-{}".format(self.loader._send_idx, self.loader._rcvd_idx, self.loader._send_idx, min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
+            
             # prefetch the next batch
             pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))    
             pre_idx = [str(idx) for idx in pre_idx]
@@ -367,16 +388,17 @@ class DLCJobDataLoader(object):
             
             data = next(self.loader)
         except StopIteration:
+            print('raise StopIteration Exception....')
              # epoch is down
             if self.chunk_idx == len(self.dataset.chunks)-1:
-                self.reset()
-                # TODO: check if the index of torch loader changed
-                self.loader = iter(self.torch_loader)
+                self.chunk_idx = 0
+                self._init_loader(first_iter=False)
                 raise StopIteration
-            else:  
+            else:
                 # data in the current chunk have been consumed
-                self.dataset.load_data(self.chunk_idx)
-                self.loader = iter(self.torch_loader)
-                data = next(self.loader)
                 self.chunk_idx += 1
+                self.clear()
+                self.dataset.load_data(self.chunk_idx)
+                self._init_loader(first_iter=True)
+                data = next(self.loader)
         return data

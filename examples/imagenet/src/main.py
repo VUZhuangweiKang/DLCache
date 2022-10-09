@@ -241,7 +241,8 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
     else:
-        train_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/val'], transform=transform)
+        # train_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/train'], transform=transform)
+        train_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/val'], transform=transform)  # for test only
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         else:
@@ -250,17 +251,12 @@ def main_worker(gpu, ngpus_per_node, args):
             train_dataset, batch_size=args.batch_size,
             num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
-    train_time_hist = []
-    eval_time_hist = []
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train_start = time.time()
         train(train_loader, model, criterion, optimizer, epoch, args)
-        train_time_hist.append(time.time()-train_start)
-        print('train time of epoch {}: {}s'.format(epoch, train_time_hist[-1]))
 
         # evaluate on validation set
         acc1 = validate(val_loader, model, criterion, args)
@@ -280,9 +276,6 @@ def main_worker(gpu, ngpus_per_node, args):
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
             }, is_best)
-    
-    print('train summary: \n \t mean: {}s, \t std: {}'.format(mean(train_time_hist), stdev(train_time_hist)))
-    print('eval summary: \n \t mean: {}s, \t std: {}'.format(mean(eval_time_hist), stdev(eval_time_hist)))
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -330,16 +323,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         if i % args.print_freq == 0:
             progress.display(i + 1)
-
-
-# def validate(val_loader, model, criterion, args):
-#     with torch.no_grad():
-#         t = time.time()
-#         for i, item in enumerate(val_loader):
-#             e = time.time()
-#             print(e-t)
-#             t = e
-#     return 1
 
 
 def validate(val_loader, model, criterion, args):
