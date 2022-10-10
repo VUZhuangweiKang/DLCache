@@ -5,9 +5,8 @@ import math
 import random
 import numpy as np
 import zmq
-from collections import deque
 import multiprocessing
-from multiprocessing import Process, Condition
+from multiprocessing import Process, Queue, Condition, Lock
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
@@ -66,14 +65,18 @@ class DLCJobDataset(Dataset):
             self.client = s3_session.client('s3')
             self.loadKeysFromCloud()
         
-        self.miss_queue = deque()
         self.nfsFilePaths = []
         self.targets = None
-        self.condition = Condition()
         self.load_data(chunk_idx=0)
+        
+        self.miss_queue = Queue()
+        self.lock = Lock()
+        self.unused_idx = set(list(range(self.__len__())))
                     
     def get_data(self, idx):
         if self.qos['LazyLoading']:
+            if len(self.unused_idx) == 0:
+                self.unused_idx = set(list(range(self.__len__())))
             return self.read(self.data[idx], idx)
         else:
             return self.data[idx]
@@ -135,17 +138,18 @@ class DLCJobDataset(Dataset):
             nfs_path = '/{}/{}'.format(loc, etag)
             tmpfs_path = '/runtime{}'.format(nfs_path)
             
+            read_idx = idx
+            read_val = None
+            
             # 3-level data hit
             if os.path.exists(tmpfs_path):
                 with open(tmpfs_path, 'rb') as f:
-                    val = f.read()
+                    read_val = f.read()
                 # print("read tmpfs file {}".format(tmpfs_path))
-                return val
             elif os.path.exists(nfs_path):
-                # print("miss tmpfs file {}".format(tmpfs_path))
                 with open(nfs_path, 'rb') as f:
-                    val = f.read()
-                return val
+                    read_val = f.read()
+                # print("miss tmpfs file {}".format(tmpfs_path))
             else:
                 # substitutable cache hit
                 # 1. randomly select an unused data point
@@ -153,16 +157,24 @@ class DLCJobDataset(Dataset):
                 # 3. socket in data loader notify client to update data access sequence
                 print('miss nfs file {}'.format(nfs_path))
                 while True:
-                    sub_idx = random.randint(0, len(self.data)-1)
+                    # TODO： 当有多个worker同时load数据时，sub_idx可能重复， 但是如果上锁，会让并行worker串行，影响速度
+                    if len(self.unused_idx) == 0:
+                        sub_idx = random.randint(0, self.__len__()-1)
+                    else:
+                        sub_idx = random.choice(list(self.unused_idx))
                     sub_etag, sub_loc = self.data[sub_idx]['ChunkETag'], self.data[sub_idx]['Location']
                     p =  '/{}/{}'.format(sub_loc, sub_etag)
                     if os.path.exists(p):
+                        self.miss_queue.put([[idx, etag], [sub_idx, sub_etag]])
+                        read_idx = sub_idx
                         break
                     else:
-                        self.miss_queue.append([[idx, etag], [sub_idx, sub_etag]])
-                        with self.condition:
-                            self.condition.notify()
-                return self.read(self.data[sub_idx], sub_idx)
+                        self.miss_queue.put([[sub_idx, sub_etag], [sub_idx, sub_etag]])
+                read_val = self.read(self.data[sub_idx], sub_idx)
+            
+            if read_idx is not None and read_idx in self.unused_idx:
+                self.unused_idx.remove(read_idx)
+            return read_val
         else:
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
 
@@ -287,15 +299,7 @@ class DLCJobDataLoader(object):
                     trusts user :attr:`dataset` code in correctly handling multi-process
                     loading to avoid duplicate data.
 
-                    However, if sharding results in multiple workers having incomplete last batches,
-                    this estimate can still be inaccurate, because (1) an otherwise complete batch can
-                    be broken into multiple ones and (2) more than one batch worth of samples can be
-                    dropped when :attr:`drop_last` is set. Unfortunately, PyTorch can not detect such
-                    cases in general.
-
-                    See `Dataset Types`_ for more details on these two types of datasets and how
-                    :class:`~torch.utils.data.IterableDataset` interacts with
-                    `Multi-process data loading`_.
+                    However, if sharding results in from threading import Thread
 
         .. warning:: See :ref:`reproducibility`, and :ref:`dataloader-workers-random-seed`, and
                     :ref:`data-loading-randomness` notes for random seed related questions.
@@ -326,7 +330,7 @@ class DLCJobDataLoader(object):
         self.socket.connect(ipc_channel)
         
         self._init_loader(first_iter=True)
-        Process(target=self.handle_miss, args=(self.dataset.condition,), daemon=True).start()
+        Process(target=self.handle_miss, daemon=True).start()
     
     def _init_loader(self, first_iter=False):      
         if first_iter or self.shuffle:
@@ -351,18 +355,19 @@ class DLCJobDataLoader(object):
             if os.path.exists(p) and len(os.listdir(p)) > 0:
                 os.system('rm -r {}/*'.format(p))
     
-    def handle_miss(self, condition):
+    # def handle_miss(self):
+    def handle_miss(self):
         context = zmq.Context()
         socket = context.socket(zmq.REQ)
         socket.connect(ipc_channel)
         while True:
-            with condition:
-                condition.wait()
-                while self.dataset.miss_queue:
-                    miss_idx, miss_etag, sub_idx, sub_etag = self.dataset.miss_queue.popleft()
-                    msg = b"{}:{} {}:{}".format(miss_idx, miss_etag, sub_idx, sub_etag)
-                    socket.send_multipart([b'dataMiss', msg])
-                    socket.recv()
+            info = self.torch_loader.dataset.miss_queue.get()
+            if info is not None:
+                miss_idx, miss_etag = info[0]
+                sub_idx, sub_etag = info[1]
+                msg = "{}:{} {}:{}".format(miss_idx, miss_etag, sub_idx, sub_etag)
+                socket.send_multipart([b'dataMiss', msg.encode('utf-8')])
+                socket.recv()
     
     def __iter__(self):
         return self

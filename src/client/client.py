@@ -131,19 +131,19 @@ class Client(object):
                 for nfs_path in self.nfs_paths[idx]:
                     futures.append(executor.submit(docopy, nfs_path))
 
-            for task in futures:
-                rc, miss_file = task.result()
-                etag = miss_file.split('/')[-1]
-                if not rc:
-                    self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
+            # for task in futures:
+            #     rc, miss_file = task.result()
+            #     etag = miss_file.split('/')[-1]
+            #     if not rc:
+            #         self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
 
     def processEvents(self):
         batch_size = None
         while True:
             topic, data = self.socket.recv_multipart()
             topic, data = topic.decode("utf-8"), data.decode("utf-8")
-            # if topic != "init":
-            logger.info('recv msg: {} {}'.format(topic, data))
+            if topic != "init":
+                logger.info('recv msg: {} {}'.format(topic, data))
             if topic == "init":
                 self.reset()
                 data = json.loads(data)                
@@ -193,12 +193,12 @@ class Client(object):
                         self.prefetch(self.prefetch_idx)
                         self.prefetch_idx += 1
                     self.cache_size = capacity
-                    
             elif topic == "dataMiss":
                 self.socket.send(b'')
                 miss_info, sub_info = data.split(' ')
                 miss_idx, miss_etag = miss_info.split(":")
                 sub_idx, sub_etag = sub_info.split(':')
+                miss_idx, sub_idx = int(miss_idx), int(sub_idx)
                 self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size], self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size] = self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size], self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size]
                 self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
             elif topic == "releaseCache":

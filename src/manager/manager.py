@@ -151,8 +151,6 @@ class Manager():
 
         chunk_size *= 1e6 # Mill bytes --> bytes
         if s3obj['Size'] <= chunk_size:
-            if miss:
-                print(bucket_name, key)
             value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
             if 'ETag' in s3obj:
                 etag = s3obj['ETag'].strip("\"")
@@ -318,16 +316,20 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             # TODO: Data Eviction if necessary
             
             # TODO: if (partial) dataset is on the NFS, rebalance dataset across the cluster
-            # copy data from S3 to NFS, init the `ChunkSize`, `Location`, and `ChunkTag` fields
+            # copy data from cloud to NFS, init the `ChunkSize`, `Location`, and `ChunkTag` fields
             obj_chunks = []
             key_lookup = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
                 for obj in bucket_objs:
-                    if not obj['Exist']:
-                        futures.append(executor.submit(self.manager.clone_s3obj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, request.nodeSequence))
-                    else:
-                        obj_chunks.append(obj)
+                    # DEBUG:
+                    # download missing data before training
+                    # if not obj['Exist']:
+                    #     futures.append(executor.submit(self.manager.clone_s3obj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, request.nodeSequence))
+                    # else:
+                    #     obj_chunks.append(obj)
+                    obj_chunks.append(obj)
+
 
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
                     rlt = future.result()
@@ -391,6 +393,7 @@ class DataMissService(pb_grpc.DataMissServicer):
         if rc != pb.RC.CONNECTED:
             return
         
+        print('DataMissService Log: ', request.etag)
         # download data
         def download(etag):
             chunk = self.manager.dataset_col.find_one({"ChunkETag": etag})
