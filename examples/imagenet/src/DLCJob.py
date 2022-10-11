@@ -13,6 +13,7 @@ from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 
 
 jobinfo = "/share/{}.json".format(os.environ.get('JOBNAME'))
+init_channel = 'ipc:///share/init.ipc'
 ipc_channel = 'ipc:///share/runtime.ipc'
 
 
@@ -326,8 +327,10 @@ class DLCJobDataLoader(object):
         self.clear()
         
         context = zmq.Context()
-        self.socket = context.socket(zmq.REQ)
-        self.socket.connect(ipc_channel)
+        self.socket_req = context.socket(zmq.REQ)
+        self.socket_req.connect(init_channel)
+        self.socket_pub = context.socket(zmq.PUB)
+        self.socket_pub.connect(ipc_channel)
         
         self._init_loader(first_iter=True)
         Process(target=self.handle_miss, daemon=True).start()
@@ -340,12 +343,12 @@ class DLCJobDataLoader(object):
             file_paths = np.array(self.dataset.nfsFilePaths)
             self.batchedNfsPaths = [file_paths[idx].tolist() for idx in iter(self.torch_loader._index_sampler)]
             # client will copy the first batch when receive init msg
-            self.socket.send_multipart([b'init', json.dumps({
+            self.socket_req.send_multipart([b'init', json.dumps({
                 "paths": self.batchedNfsPaths,
                 "batch_size": self.batch_size,
                 "num_workers": self.num_workers,
                 "prefetch_factor": self.prefetch_factor}).encode('utf-8')])
-            self.socket.recv()
+            self.socket_req.recv()
         self.loader = iter(self.torch_loader)
     
     @staticmethod
@@ -355,10 +358,9 @@ class DLCJobDataLoader(object):
             if os.path.exists(p) and len(os.listdir(p)) > 0:
                 os.system('rm -r {}/*'.format(p))
     
-    # def handle_miss(self):
     def handle_miss(self):
         context = zmq.Context()
-        socket = context.socket(zmq.REQ)
+        socket = context.socket(zmq.PUB)
         socket.connect(ipc_channel)
         while True:
             info = self.torch_loader.dataset.miss_queue.get()
@@ -367,7 +369,6 @@ class DLCJobDataLoader(object):
                 sub_idx, sub_etag = info[1]
                 msg = "{}:{} {}:{}".format(miss_idx, miss_etag, sub_idx, sub_etag)
                 socket.send_multipart([b'dataMiss', msg.encode('utf-8')])
-                socket.recv()
     
     def __iter__(self):
         return self
@@ -377,19 +378,15 @@ class DLCJobDataLoader(object):
     
     def __next__(self):
         try:
-            # print("send_idx: {}, rcvd_idx: {}, copy range: {}-{}".format(self.loader._send_idx, self.loader._rcvd_idx, self.loader._send_idx, min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
-            
             # prefetch the next batch
             pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))    
             pre_idx = [str(idx) for idx in pre_idx]
             if len(pre_idx) > 0:
-                self.socket.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])
-                self.socket.recv()
+                self.socket_pub.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])
             
             # release the last batch
             if self.loader._rcvd_idx > 0:
-                self.socket.send_multipart([b'releaseCache', str(self.loader._rcvd_idx-1).encode('utf-8')])
-                self.socket.recv()
+                self.socket_pub.send_multipart([b'releaseCache', str(self.loader._rcvd_idx-1).encode('utf-8')])
             
             data = next(self.loader)
         except StopIteration:

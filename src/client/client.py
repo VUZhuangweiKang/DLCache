@@ -24,6 +24,7 @@ cloudSecret = {
     "region_name": read_secret('region_name')   
 }
 manager_uri = "dlcpod-manager:50051"
+init_channel = 'ipc:///share/init.ipc'
 ipc_channel = 'ipc:///share/runtime.ipc'
 
 
@@ -61,8 +62,16 @@ class Client(object):
             self.datamiss_stub = pb_grpc.DataMissStub(channel)
                 
         context = zmq.Context()
-        self.socket = context.socket(zmq.REP)
-        self.socket.bind(ipc_channel)
+        self.socket_rep = context.socket(zmq.REP)
+        self.socket_rep.bind(init_channel)
+        self.socket_sub = context.socket(zmq.SUB)
+        self.socket_sub.bind(ipc_channel)
+        for topic in [b'prefetch', b'dataMiss', b'releaseCache']:
+            self.socket_sub.setsockopt(zmq.SUBSCRIBE, topic)
+        
+        self.poller = zmq.Poller()
+        self.poller.register(self.socket_rep, zmq.POLLIN)
+        self.poller.register(self.socket_sub, zmq.POLLIN)
         self.processEvents()
 
     def reset(self):                
@@ -131,93 +140,96 @@ class Client(object):
                 for nfs_path in self.nfs_paths[idx]:
                     futures.append(executor.submit(docopy, nfs_path))
 
-            # for task in futures:
-            #     rc, miss_file = task.result()
-            #     etag = miss_file.split('/')[-1]
-            #     if not rc:
-            #         self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
+            for task in futures:
+                rc, miss_file = task.result()
+                etag = miss_file.split('/')[-1]
+                if not rc:
+                    self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
 
     def processEvents(self):
         batch_size = None
         while True:
-            topic, data = self.socket.recv_multipart()
-            topic, data = topic.decode("utf-8"), data.decode("utf-8")
-            if topic != "init":
-                logger.info('recv msg: {} {}'.format(topic, data))
-            if topic == "init":
-                self.reset()
-                data = json.loads(data)                
-                batch_size = data["batch_size"]
-                self.nfs_paths = data['paths']
-                self.cache_size = data["num_workers"] * data["prefetch_factor"]                
-                for i in range(self.cache_size):
-                    self.prefetch(i)
-                
-                # # double check files
-                # for idx in range(self.cache_size):
-                #     for nfs_path in self.nfs_paths[idx]:
-                #         try:
-                #             tmpfspath = '/runtime' + nfs_path
-                #             with open(tmpfspath, 'rb') as f:
-                #                 pickle.load(f)
-                #         except EOFError:
-                #             print('EOFError:', nfs_path)
-                #         except FileNotFoundError:
-                #             print('FileNotFoundError:', nfs_path)
-                self.socket.send(b'')
-            elif topic == "prefetch":
-                self.socket.send(b'')
-                batch_idx = [int(idx) for idx in data.split(',') if len(idx) > 0]
-                for idx in batch_idx:
-                    if idx >= self.prefetch_idx:
-                        self.prefetch(idx)
-                        self.prefetch_idx += 1
-                        self.req_time.append(time.time())
-                    else:
-                        break
-                
-                # tune cache capacity
-                if len(self.req_time) > 3:
-                    """
-                    To ensure the data is always available for DataLoader, the length of buffer should be:
-                    s >= 2*B, if alpha >= beta; otherwise,
-                    s >= (N-k)*(1-alpha/beta) 
-                    """
-                    reqIntervals = np.mean(np.diff(self.req_time)[1:])  # data consumption intervals
-                    loadIntervals = np.mean(np.array(self.load_time))  # data loading intervals
-                    remainingBatches = len(self.nfs_paths) - len(self.req_time)  # remaining batches
-                    capacity = max(self.cache_size, math.ceil((1-reqIntervals/loadIntervals) * remainingBatches))
+            socks = dict(self.poller.poll())
+            if self.socket_rep in socks and socks[self.socket_rep] == zmq.POLLIN:
+                topic, data = self.socket_rep.recv_multipart()
+                topic, data = topic.decode("utf-8"), data.decode("utf-8")
+                if topic == "init":
+                    self.reset()
+                    data = json.loads(data)                
+                    batch_size = data["batch_size"]
+                    self.nfs_paths = data['paths']
+                    self.cache_size = data["num_workers"] * data["prefetch_factor"]                
+                    for i in range(self.cache_size):
+                        self.prefetch(i)
                     
-                    # expand the cache capacity
-                    for _ in range(self.cache_size, capacity+1):
-                        self.prefetch(self.prefetch_idx)
-                        self.prefetch_idx += 1
-                    self.cache_size = capacity
-            elif topic == "dataMiss":
-                self.socket.send(b'')
-                miss_info, sub_info = data.split(' ')
-                miss_idx, miss_etag = miss_info.split(":")
-                sub_idx, sub_etag = sub_info.split(':')
-                miss_idx, sub_idx = int(miss_idx), int(sub_idx)
-                self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size], self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size] = self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size], self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size]
-                self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
-            elif topic == "releaseCache":
-                self.socket.send(b'')
-                batch_idx = int(data)
-                if batch_idx < len(self.nfs_paths):
-                    for path in self.nfs_paths[batch_idx]:
-                        tmpfspath = '/runtime' + path
-                        if not os.path.exists(tmpfspath): continue
-                        etag = tmpfspath.split('/')[-1]
-                        now = datetime.datetime.now().timestamp()
-                        self.dataset_col.update_one(
-                            {"ETag": etag}, 
-                            {
-                                "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
-                                "$inc": {"TotalAccessTime": 1}
-                            })
-                        if os.path.exists(tmpfspath):
-                            os.remove(tmpfspath)
+                    # # double check files
+                    # for idx in range(self.cache_size):
+                    #     for nfs_path in self.nfs_paths[idx]:
+                    #         try:
+                    #             tmpfspath = '/runtime' + nfs_path
+                    #             with open(tmpfspath, 'rb') as f:
+                    #                 pickle.load(f)
+                    #         except EOFError:
+                    #             print('EOFError:', nfs_path)
+                    #         except FileNotFoundError:
+                    #             print('FileNotFoundError:', nfs_path)
+                    self.socket_rep.send(b'')
+
+            if self.socket_sub in socks and socks[self.socket_sub] == zmq.POLLIN:
+                topic, data = self.socket_sub.recv_multipart()
+                topic, data = topic.decode("utf-8"), data.decode("utf-8")
+                logger.info('recv msg: {} {}'.format(topic, data))
+                if topic == "prefetch":
+                    # self.socket.send(b'')
+                    batch_idx = [int(idx) for idx in data.split(',') if len(idx) > 0]
+                    for idx in batch_idx:
+                        if idx >= self.prefetch_idx:
+                            self.prefetch(idx)
+                            self.prefetch_idx += 1
+                            self.req_time.append(time.time())
+                        else:
+                            break
+                    
+                    # tune cache capacity
+                    if len(self.req_time) > 3:
+                        """
+                        To ensure the data is always available for DataLoader, the length of buffer should be:
+                        s >= 2*B, if alpha >= beta; otherwise,
+                        s >= (N-k)*(1-alpha/beta) 
+                        """
+                        reqIntervals = np.mean(np.diff(self.req_time)[1:])  # data consumption intervals
+                        loadIntervals = np.mean(np.array(self.load_time))  # data loading intervals
+                        remainingBatches = len(self.nfs_paths) - len(self.req_time)  # remaining batches
+                        capacity = max(self.cache_size, math.ceil((1-reqIntervals/loadIntervals) * remainingBatches))
+                        
+                        # expand the cache capacity
+                        for _ in range(self.cache_size, capacity+1):
+                            self.prefetch(self.prefetch_idx)
+                            self.prefetch_idx += 1
+                        self.cache_size = capacity
+                elif topic == "dataMiss":
+                    miss_info, sub_info = data.split(' ')
+                    miss_idx, miss_etag = miss_info.split(":")
+                    sub_idx, sub_etag = sub_info.split(':')
+                    miss_idx, sub_idx = int(miss_idx), int(sub_idx)
+                    self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size], self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size] = self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size], self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size]
+                    self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
+                elif topic == "releaseCache":
+                    batch_idx = int(data)
+                    if batch_idx < len(self.nfs_paths):
+                        for path in self.nfs_paths[batch_idx]:
+                            tmpfspath = '/runtime' + path
+                            if not os.path.exists(tmpfspath): continue
+                            etag = tmpfspath.split('/')[-1]
+                            now = datetime.datetime.now().timestamp()
+                            self.dataset_col.update_one(
+                                {"ETag": etag}, 
+                                {
+                                    "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
+                                    "$inc": {"TotalAccessTime": 1}
+                                })
+                            if os.path.exists(tmpfspath):
+                                os.remove(tmpfspath)
 
 
 if __name__ == '__main__':
