@@ -322,12 +322,11 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
                 for obj in bucket_objs:
-                    # DEBUG:
                     # download missing data before training
-                    # if not obj['Exist']:
-                    #     futures.append(executor.submit(self.manager.clone_s3obj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, request.nodeSequence))
-                    # else:
-                    #     obj_chunks.append(obj)
+                    if not obj['Exist']:
+                        futures.append(executor.submit(self.manager.clone_s3obj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, request.nodeSequence))
+                    else:
+                        obj_chunks.append(obj)
                     obj_chunks.append(obj)
 
 

@@ -180,29 +180,39 @@ class DLCJobDataset(Dataset):
             return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
 
     def load_data(self, chunk_idx):
+        """Load file paths or actual data in the given chunk 
+        initialize the self.data and self.keys, where self.data is a dict with format {key: dataobj}
+        user performs data (X and y) pre-processing in the __convert__ function, that convert self.data from
+        dict to iteratable X, y
+        
+        Args:
+            chunk_idx (int): file-based (LazyLoading) dataset only has one chunk, so the chunk_idx = 0
+                             tabular dataset split file to multiple chunks
+        """
         self.data = {}
         self.keys = []
         if self.qos['LazyLoading']:
-            # LazyLoading mode fits dataset which data items are individual files, such as image dataset
-            for chunk in self.chunks[chunk_idx]:
-                self.keys.append(chunk['Key'])
-                self.nfsFilePaths.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
-                self.data[chunk['Key']] = chunk
+            # file-based dataset only has one chunk, so the chunk_idx = 0
+            for dataobj in self.chunks[chunk_idx]:
+                self.keys.append(dataobj['Key'])
+                self.nfsFilePaths.append('/{}/{}'.format(dataobj['Location'], dataobj['ChunkETag']))
+                self.data[dataobj['Key']] = dataobj
         else:
             # Normal mode fits tabular or block datasets, so we load a subset of the original dataset here
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
-                for chunk in self.chunks[chunk_idx]:
-                    futures.append(executor.submit(self.read, chunk))
+                for dataobj in self.chunks[chunk_idx]:
+                    futures.append(executor.submit(self.read, dataobj))
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                    chunk = self.chunks[chunk_idx][i]
-                    self.keys.append(chunk['Key'])
-                    self.nfsFilePaths.append('/{}/{}'.format(chunk['Location'], chunk['ChunkETag']))
-                    self.data[chunk['Key']] = future.result()
+                    dataobj = self.chunks[chunk_idx][i]
+                    self.keys.append(dataobj['Key'])
+                    self.nfsFilePaths.append('/{}/{}'.format(dataobj['Location'], dataobj['ChunkETag']))
+                    self.data[dataobj['Key']] = future.result()
+        
         self.data, self.targets = self.__convert__()
     
     def __convert__(self) -> Tuple[List, List]:
-        """convert self.data
+        """convert self.data ans self.target
 
         Return iteratable X, y that can be indexed by __get_item__
         
