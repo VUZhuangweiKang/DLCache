@@ -155,13 +155,13 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
         :param labels: List containing all the possible characters to map to
         :param normalize: Apply standard mean and deviation normalization to audio tensor
         :param augmentation_conf(Optional): Config containing the augmentation parameters
-        """        
+        """
         DLCJobDataset.__init__(self, keys=[input_path])
         self.labels_map = dict([(labels[i], i) for i in range(len(labels))])
         SpectrogramDataset.__init__(self, audio_conf, normalize, aug_cfg)
 
     def __getitem__(self, index):
-        audio_path, transcript_path = self.data[index], self.targets[index]
+        audio_path, transcript_path = self.get_data(index), self.get_target(index)
         spect = self.parse_audio(audio_path)
         transcript = self.parse_transcript(transcript_path)
         return spect, transcript

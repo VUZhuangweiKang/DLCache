@@ -88,7 +88,7 @@ class DLCJobDataset(Dataset):
     def loadKeysFromDLCache(self):
         maxmem = self.qos['MaxMemoryMill']*1e6  
         etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags']
-        chunks = [chunk for chunk in self.dataset_col.find({"ChunkETag": {"$in": etags}})]
+        chunks = [chunk for chunk in self.dataset_col.find({"ETag": {"$in": etags}})]
                     
         if maxmem == 0 or self.qos['LazyLoading']:
             self.chunks.append(chunks)
@@ -132,10 +132,10 @@ class DLCJobDataset(Dataset):
                 else:
                     self.chunks[-1].append(item)
     
-    def read(self, chunk, idx=None):
-        key = chunk['Key']
+    def read(self, dataobj, idx=None):
+        key = dataobj['Key']
         if self.qos['UseCache']:
-            etag, loc = chunk['ChunkETag'], chunk['Location']
+            etag, loc = dataobj['ChunkETag'], dataobj['Location']
             nfs_path = '/{}/{}'.format(loc, etag)
             tmpfs_path = '/runtime{}'.format(nfs_path)
             
@@ -332,6 +332,7 @@ class DLCJobDataLoader(object):
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
         self.num_batches = math.ceil(len(self.dataset.data)/batch_size)
+        
         self.lazy = self.dataset.qos['LazyLoading']
         self.chunk_idx = 0
         self.clear()

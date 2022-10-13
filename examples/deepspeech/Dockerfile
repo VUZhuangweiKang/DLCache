@@ -6,5 +6,5 @@ COPY src ./
 RUN pip install -r requirements.txt
 RUN pip install -e .
 RUN chmod +x *
-# CMD [ "python3", "main.py", "-j", "8", "--pretrained", "-e"]
-CMD ["bash"]
+# CMD [ "python3", "train.py", "+configs", "librispeech"]
+CMD [ "bash" ]
