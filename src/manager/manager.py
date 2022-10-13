@@ -4,7 +4,6 @@ import sys
 import shutil
 import grpc
 import boto3
-import threading
 import json, bson
 import configparser
 import multiprocessing
@@ -111,60 +110,80 @@ class Manager():
             bucket_objs.append(info)
         return bucket_objs
     
-    # evict keys from a specific NFS server
-    # Todo: substituable hit
-    def evict_data(self, node):        
-        if self.managerconf['eviction-policy'] == 'lru':
-            pipeline = [
-                {"$match": {"Location": node}},
-                {"$sort": {"LastAccessTime": 1}},
-                {"$limit": self.managerconf.getint('eviction-size')}]
-        elif self.managerconf['eviction-policy'] == 'lru':
-            pipeline = [
-                {"$match": {"Location": node}},
-                {"$sort": {"TotalAccessTime": 1}},
-                {"$limit": self.managerconf.getint('eviction-size')}
-            ]
-        rmobjs = self.job_col.aggregate(pipeline)
-        for obj in rmobjs:
-            shutil.rmtree('/{}/{}'.format(obj['Location'], obj['ChunkETag']), ignore_errors=True)
-        self.job_col.delete_many({"ChunkETag": [obj['ChunkETag'] for obj in rmobjs]})
+    # Hybrid Data Eviction: evict dataobj from a specific NFS server
+    # 1. data objs without any binding running jobs are first removed based on the LFU policy.
+    # 2. regarding the datasets being used, we adopt the LRU policy
+    def data_eviction(self, node=None, require=None):
+        def helper(pipeline):
+            nonlocal require
+            if node:
+                pipeline.append({"$match": {"Location": node}})
+            rmobjs = self.job_col.aggregate(pipeline)
+            for obj in rmobjs:
+                if require <= 0: break
+                os.remove('/{}/{}'.format(obj['Location'], obj['ChunkETag']), ignore_errors=True)
+                require -= obj['ChunkSize']
+            self.job_col.delete_many({"ChunkETag": [obj['ChunkETag'] for obj in rmobjs]})
+            
+        lfu_pipeline = [{"$project": {'Location': 1, 'ChunkETag': 1, 'TotalAccessTime': 1, 'ChunkSize': 1, 'Jobs': 1, 'num_jobs': {'$size': '$Jobs'}}},
+                        {"$match": {"num_jobs": {"$eq": 0}}},
+                        {"$sort": {"TotalAccessTime": 1}}]
+        helper(lfu_pipeline)
+        
+        if require > 0:
+            lru_pipline = [{"$project": {'Location': 1, 'ChunkETag': 1, 'LastAccessTime': 1, 'ChunkSize': 1, 'Jobs': 1, 'num_jobs': {'$size': '$Jobs'}}}, 
+                           {"$match": {"num_jobs": {"$gt": 0}}},
+                           {"$sort": {"LastAccessTime": 1}}]
+            helper(lru_pipline)
 
-    def clone_s3obj(self, s3obj: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None, miss=False):
-        key = s3obj['Key']
-        s3obj["Bucket"] = bucket_name
+    # Dataset Rebalance: if some data objects from a dataset is already existing
+    def move_data(self, dataobj, node_sequence):
+        while True:
+            for node in node_sequence:
+                if shutil.disk_usage("/{}".format(node))[-1] >= dataobj['ChunkSize']:
+                    if node != dataobj['Location']:
+                        shutil.move(src='/{}/{}'.format(dataobj['Location'], dataobj['ChunkETag']), dst='/{}/{}'.format(node, dataobj['ChunkETag']))
+                        self.dataset_col.update_one(filter={"ChunkETag": dataobj['ChunkETag']}, update={"Location": {"$set": node}})
+                    break
+            self.data_eviction(node=node_sequence[0], require=dataobj['ChunkSize'])
+    
+    def clone_dataobj(self, dataobj: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None, miss=False):
+        key = dataobj['Key']
+        dataobj["Bucket"] = bucket_name
         if not miss:
-            s3obj['LastModified'] = bson.timestamp.Timestamp(int(s3obj['LastModified'].timestamp()), inc=1)
-            s3obj['TotalAccessTime'] = 0
+            dataobj['LastModified'] = bson.timestamp.Timestamp(int(dataobj['LastModified'].timestamp()), inc=1)
+            dataobj['TotalAccessTime'] = 0
         now = datetime.utcnow().timestamp()
-        s3obj['LastAccessTime'] = bson.timestamp.Timestamp(int(now), inc=1)
+        dataobj['LastAccessTime'] = bson.timestamp.Timestamp(int(now), inc=1)
         file_type = key.split('.')[-1].lower()
 
         def assignLocation(obj):
+            # try to assign the object follow the node sequence
+            # if failed, evict data
             while True:
                 for node in node_sequence:
                     free_space = shutil.disk_usage("/{}".format(node))[-1]
                     if free_space >= obj['ChunkSize']:
                         obj['Location'] = node
                         return obj
-                self.evict_data(node=node_sequence[0])
+                self.data_eviction(node=node_sequence[0], require=obj['ChunkSize'])
 
         chunk_size *= 1e6 # Mill bytes --> bytes
-        if s3obj['Size'] <= chunk_size:
+        if dataobj['Size'] <= chunk_size:
             value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
-            if 'ETag' in s3obj:
-                etag = s3obj['ETag'].strip("\"")
+            if 'ETag' in dataobj:
+                etag = dataobj['ETag'].strip("\"")
             else:
                 etag = hashing(value)
-            s3obj["Part"] = 0
-            s3obj['ChunkETag'] = etag
-            s3obj['ChunkSize'] = s3obj['Size']
+            dataobj["Part"] = 0
+            dataobj['ChunkETag'] = etag
+            dataobj['ChunkSize'] = dataobj['Size']
             if not miss:
-                s3obj = assignLocation(s3obj)
-            path = "/%s/%s" % (s3obj['Location'], etag)
+                dataobj = assignLocation(dataobj)
+            path = "/%s/%s" % (dataobj['Location'], etag)
             with open(path, 'wb') as f:
                 f.write(value)
-            obj_chunks = [s3obj]
+            obj_chunks = [dataobj]
         else:
             s3_client.download_file(Bucket=bucket_name, Key=key, Filename='/tmp/{}'.format(key))
             obj_chunks = []
@@ -180,16 +199,16 @@ class Manager():
                 for i, chunk in enumerate(chunks.partitions):
                     if part is None or part == i:
                         etag = hashing(chunk.compute())
-                        s3obj['ChunkSize'] = chunk.memory_usage_per_partition(deep=True).compute()
-                        s3obj = assignLocation(s3obj)
-                        path = "/%s/%s" % (s3obj['Location'], etag)
+                        dataobj['ChunkSize'] = chunk.memory_usage_per_partition(deep=True).compute()
+                        dataobj = assignLocation(dataobj)
+                        path = "/%s/%s" % (dataobj['Location'], etag)
                         if file_type == 'csv':
                             chunk.to_csv(path, index=False)
                         elif file_type == 'parquet':
                             chunk.to_parquet(path='/', write_metadata_file=False, name_function=lambda _: path)
-                        s3obj['ChunkETag'] = etag
-                        s3obj['Part'] = i
-                        obj_chunks.append(s3obj)
+                        dataobj['ChunkETag'] = etag
+                        dataobj['Part'] = i
+                        obj_chunks.append(dataobj)
             elif file_type == 'npy':
                 import numpy as np
                 with open(path, 'rb') as f:
@@ -211,13 +230,13 @@ class Manager():
                             value = np.fromfile(f, count=n_items, dtype=dtype)
                             value = value.reshape((-1,) + shape[1:])
                             etag = hashing(value)
-                            s3obj['ChunkSize'] = value.nbytes
-                            s3obj = assignLocation(s3obj)
-                            path = "/{}/{}".format(s3obj['Location'], etag)
+                            dataobj['ChunkSize'] = value.nbytes
+                            dataobj = assignLocation(dataobj)
+                            path = "/{}/{}".format(dataobj['Location'], etag)
                             np.save(path, value)
-                            s3obj['ChunkETag'] = etag
-                            s3obj['Part'] = p
-                            obj_chunks.append(s3obj)
+                            dataobj['ChunkETag'] = etag
+                            dataobj['Part'] = p
+                            obj_chunks.append(dataobj)
                         start_row += num_rows
                         p += 1
             else:
@@ -228,14 +247,14 @@ class Manager():
                     while value:
                         if part is None or part == p:
                             etag = hashing(value)
-                            s3obj['ChunkSize'] = sys.getsizeof(value)
-                            s3obj = assignLocation(s3obj)
-                            path = "/{}/{}".format(s3obj['Location'], etag)
+                            dataobj['ChunkSize'] = sys.getsizeof(value)
+                            dataobj = assignLocation(dataobj)
+                            path = "/{}/{}".format(dataobj['Location'], etag)
                             with open(path, 'wb') as f:
                                 f.write(value)
-                            s3obj['ChunkETag'] = etag
-                            s3obj['Part'] = p
-                            obj_chunks.append(s3obj)
+                            dataobj['ChunkETag'] = etag
+                            dataobj['Part'] = p
+                            obj_chunks.append(dataobj)
                         value = f.read(chunk_size)
                         p += 1
         return obj_chunks
@@ -301,7 +320,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             s3_client = self.manager.get_s3_client(cred)
             bucket_name = request.datasource.bucket
             
-            # check whther data objs are exists or out-of-date, init the `Exist` field
+            # check whther data objs are exists or out-of-date, create the `Exist` field
             bucket_objs = []
             for prefix in request.datasource.keys:
                 paginator = s3_client.get_paginator('list_objects_v2')
@@ -313,22 +332,28 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                 for future in concurrent.futures.as_completed(futures):
                     bucket_objs.extend(future.result())
             
-            # TODO: Data Eviction if necessary
+            # allocate space through data eviction
+            require_space = 0
+            for dataobj in bucket_objs:
+                if not dataobj['Exist']:
+                    require_space += dataobj['Size']
+            self.manager.data_eviction(require=require_space)
             
-            # TODO: if (partial) dataset is on the NFS, rebalance dataset across the cluster
             # copy data from cloud to NFS, init the `ChunkSize`, `Location`, and `ChunkTag` fields
             obj_chunks = []
             key_lookup = {}
+            node_seq = request.nodeSequence
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
                 for obj in bucket_objs:
                     # download missing data before training
                     if not obj['Exist']:
-                        futures.append(executor.submit(self.manager.clone_s3obj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, request.nodeSequence))
+                        # we also perform data eviction in the clone_dataobj function if pre-allocated space is occupied by other jobs
+                        futures.append(executor.submit(self.manager.clone_dataobj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, node_seq))
                     else:
-                        obj_chunks.append(obj)
+                        # move the data to a node in nodeSequence
+                        futures.append(executor.submit(self.manager.move_data, obj, node_seq))
                     obj_chunks.append(obj)
-
 
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
                     rlt = future.result()
@@ -397,7 +422,7 @@ class DataMissService(pb_grpc.DataMissServicer):
         def download(etag):
             chunk = self.manager.dataset_col.find_one({"ChunkETag": etag})
             s3_client = self.manager.get_s3_client(cred)
-            self.manager.clone_s3obj(s3obj=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], 
+            self.manager.clone_dataobj(dataobj=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], 
                                     chunk_size=chunk['ChunkSize'], node_sequence=[chunk['Location']], part=chunk['Part'], miss=True)
         download(request.etag)
         return pb.DataMissResponse(response=True)
