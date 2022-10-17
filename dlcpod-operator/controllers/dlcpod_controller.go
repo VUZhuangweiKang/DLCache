@@ -95,13 +95,19 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, req.NamespacedName, pod); err != nil && k8serrors.IsNotFound(err) {
 		schedule := r.scheduler(ctx, &dlcpod)
-		dlcpod.Spec.NodeSequence = schedule
+		addresses := []string{}
+		hostnames := []string{}
+		for i := 0; i < len(schedule); i++ {
+			addresses = append(addresses, schedule[i][0])
+			hostnames = append(hostnames, schedule[i][1])
+		}
+		dlcpod.Spec.NodeSequence = addresses
 
 		// create pod
 		pod, err := r.createPod(ctx, &dlcpod)
 		var selectNode string
 		if len(dlcpod.Spec.NodeSelector) == 0 {
-			selectNode = schedule[0]
+			selectNode = hostnames[0]
 		} else {
 			selectNode = pod.Spec.NodeName
 		}
@@ -149,7 +155,13 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if !reflect.DeepEqual(dlcpod.Spec, oldspec) {
 		// update configmap
 		schedule := r.scheduler(ctx, &dlcpod)
-		dlcpod.Spec.NodeSequence = schedule
+		addresses := []string{}
+		hostnames := []string{}
+		for i := 0; i < len(schedule); i++ {
+			addresses = append(addresses, schedule[i][0])
+			hostnames = append(hostnames, schedule[i][1])
+		}
+		dlcpod.Spec.NodeSequence = addresses
 		oldpod := corev1.Pod{}
 		if err := r.Get(ctx, req.NamespacedName, &oldpod); err != nil {
 			log.Error(err, fmt.Sprintf("error in getting pod %s", req.Name))
@@ -166,7 +178,7 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		newpod, _ := r.createPod(ctx, &dlcpod)
 		var selectNode string
 		if len(dlcpod.Spec.NodeSelector) == 0 {
-			selectNode = schedule[0]
+			selectNode = hostnames[0]
 		} else {
 			selectNode = newpod.Spec.NodeName
 		}
@@ -187,14 +199,18 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{}, nil
 }
 
-func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPod) []string {
+func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPod) [][]string {
 	spec := dlcpod.Spec
 	nodes := &corev1.NodeList{}
 	err := r.List(ctx, nodes, &client.ListOptions{})
 	checkErr(err)
 	nodeAddresses := []string{}
+	addressHostMap := map[string]string{}
 	for _, node := range nodes.Items {
-		nodeAddresses = append(nodeAddresses, node.Status.Addresses[0].Address)
+		addr := node.Status.Addresses[0].Address
+		hostname := node.Status.Addresses[1].Address
+		nodeAddresses = append(nodeAddresses, addr)
+		addressHostMap[addr] = hostname
 	}
 
 	// get dataset Etags (MD5 Hash) from S3
@@ -257,7 +273,6 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 			if info.IsDir() {
 				return nil
 			}
-			log.Log.Info(path)
 			existingPaths[path] = true
 			return nil
 		})
@@ -324,7 +339,6 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	/*
 		We assign the job to the node that has maximum free space and sufficien GPU.
 		Place dataset on other nodes sorted by free space.
-		TODO: how to rebalance data
 	*/
 	var requestGPU int64 = 0
 	for _, job := range spec.Jobs {
@@ -334,17 +348,19 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	sort.SliceStable(nodeAddresses, func(i, j int) bool {
 		return weights[nodeAddresses[i]] > weights[nodeAddresses[j]]
 	})
-	schedule := []string{}
+	schedule := [][]string{}
 	i := 0
 	for ; i < len(nodeAddresses); i++ {
-		node := nodeAddresses[i]
-		if allocatableResource[node]["nvidia.com/gpu"] >= requestGPU {
-			schedule = append(schedule, node)
-			break
+		address := nodeAddresses[i]
+		hostname := addressHostMap[address]
+		pair := []string{address, hostname}
+		if allocatableResource[address]["nvidia.com/gpu"] >= requestGPU {
+			schedule = append([][]string{pair}, schedule...)
+		} else {
+			schedule = append(schedule, pair)
 		}
 	}
-	nodeAddresses = append(nodeAddresses[:i], nodeAddresses[i+1:]...)
-	return append(schedule, nodeAddresses...)
+	return schedule
 }
 
 func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPod) (corev1.Pod, error) {

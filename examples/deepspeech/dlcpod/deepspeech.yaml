@@ -1,22 +1,21 @@
 apiVersion: docgroup.com/v1alpha1
 kind: DLCPod
 metadata:
-  name: imagenet-mini0
+  name: deepspeech
   namespace: default
 spec:
   secret:
     name: dlcpod-client-credentials
   jobs:
   - name: job
-    image: zhuangweikang/imagenet-dev:latest
-    # command: ["python3", "main.py"]
+    image: zhuangweikang/deepspeech-dev:latest
     command: ["bash"]
     datasource:
-      name: Imagenet-Mini-Obj
+      name: LibriSpeech
       bucket: vuzhuangwei
       keys:
-      # - Imagenet-Mini-Obj/train
-      - Imagenet-Mini-Obj/val
+      - LibriSpeech/train
+      - LibriSpeech/val
     qos:
       usecache: true
       maxmemorymill: 10000

@@ -85,19 +85,8 @@ class Manager():
             etags = {info['ETag']: info['LastModified'] for info in page['Contents']}
         except:
             return []
-        results = self.dataset_col.aggregate(pipeline=[
-            {"$match": {"ETag": {"$in": list(etags.keys())}}},
-            {"$project": {
-                "ETag": 1,
-                "ChunkETag": 1,
-                "LastModified": 1
-            }}
-        ])
-        existing_etags = {
-            item['ETag']: {
-                "LastModified": item['LastModified'],
-                "ChunkETag": item['ChunkETag']
-                } for item in results}
+        results = self.dataset_col.aggregate(pipeline=[{"$match": {"ETag": {"$in": list(etags.keys())}}}])
+        existing_etags = {item['ETag']: item for item in results}
 
         bucket_objs = []
         for info in page['Contents']:
@@ -105,6 +94,7 @@ class Manager():
             if info['ETag'] not in existing_etags or lastModified > existing_etags[info['ETag']]['LastModified']:
                 info['Exist'] = False
             else:
+                info = existing_etags[info['ETag']]
                 info['Exist'] = True
             info['ChunkETag'] = info['ETag']
             bucket_objs.append(info)
@@ -118,12 +108,14 @@ class Manager():
             nonlocal require
             if node:
                 pipeline.append({"$match": {"Location": node}})
-            rmobjs = self.job_col.aggregate(pipeline)
+            rmobjs = self.dataset_col.aggregate(pipeline)
             for obj in rmobjs:
                 if require <= 0: break
-                os.remove('/{}/{}'.format(obj['Location'], obj['ChunkETag']), ignore_errors=True)
-                require -= obj['ChunkSize']
-            self.job_col.delete_many({"ChunkETag": [obj['ChunkETag'] for obj in rmobjs]})
+                path = '/{}/{}'.format(obj['Location'], obj['ChunkETag'])
+                if os.path.exists(path):
+                    os.remove(path)
+                    require -= obj['ChunkSize']
+            self.dataset_col.delete_many({"ChunkETag": [obj['ChunkETag'] for obj in rmobjs]})
             
         lfu_pipeline = [{"$project": {'Location': 1, 'ChunkETag': 1, 'TotalAccessTime': 1, 'ChunkSize': 1, 'Jobs': 1, 'num_jobs': {'$size': '$Jobs'}}},
                         {"$match": {"num_jobs": {"$eq": 0}}},
@@ -144,7 +136,8 @@ class Manager():
                     if node != dataobj['Location']:
                         shutil.move(src='/{}/{}'.format(dataobj['Location'], dataobj['ChunkETag']), dst='/{}/{}'.format(node, dataobj['ChunkETag']))
                         self.dataset_col.update_one(filter={"ChunkETag": dataobj['ChunkETag']}, update={"Location": {"$set": node}})
-                    break
+                        dataobj['Location'] = node
+                    return [dataobj]
             self.data_eviction(node=node_sequence[0], require=dataobj['ChunkSize'])
     
     def clone_dataobj(self, dataobj: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None, miss=False):
@@ -170,10 +163,10 @@ class Manager():
 
         chunk_size *= 1e6 # Mill bytes --> bytes
         if dataobj['Size'] <= chunk_size:
-            value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
             if 'ETag' in dataobj:
                 etag = dataobj['ETag'].strip("\"")
             else:
+                value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
                 etag = hashing(value)
             dataobj["Part"] = 0
             dataobj['ChunkETag'] = etag
@@ -181,11 +174,10 @@ class Manager():
             if not miss:
                 dataobj = assignLocation(dataobj)
             path = "/%s/%s" % (dataobj['Location'], etag)
-            with open(path, 'wb') as f:
-                f.write(value)
+            s3_client.download_file(bucket_name, key, path)
             obj_chunks = [dataobj]
         else:
-            s3_client.download_file(Bucket=bucket_name, Key=key, Filename='/tmp/{}'.format(key))
+            s3_client.download_file(Bucket=bucket_name, Key=key, Filename=key)
             obj_chunks = []
             path = '/tmp/{}'.format(key)
             if file_type in ['csv', 'parquet']:
@@ -332,33 +324,30 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                 for future in concurrent.futures.as_completed(futures):
                     bucket_objs.extend(future.result())
             
-            # allocate space through data eviction
+            # release NFS space through data eviction
             require_space = 0
             for dataobj in bucket_objs:
                 if not dataobj['Exist']:
                     require_space += dataobj['Size']
-            self.manager.data_eviction(require=require_space)
+            if require_space > 0:
+                self.manager.data_eviction(require=require_space)
             
             # copy data from cloud to NFS, init the `ChunkSize`, `Location`, and `ChunkTag` fields
             obj_chunks = []
-            key_lookup = {}
             node_seq = request.nodeSequence
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
-                for obj in bucket_objs:
+                for dataobj in bucket_objs:
                     # download missing data before training
-                    if not obj['Exist']:
+                    if not dataobj['Exist']:
                         # we also perform data eviction in the clone_dataobj function if pre-allocated space is occupied by other jobs
-                        futures.append(executor.submit(self.manager.clone_dataobj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, node_seq))
+                        futures.append(executor.submit(self.manager.clone_dataobj, dataobj, s3_client, bucket_name, request.qos.MaxMemoryMill, node_seq))
                     else:
                         # move the data to a node in nodeSequence
-                        futures.append(executor.submit(self.manager.move_data, obj, node_seq))
-                    obj_chunks.append(obj)
+                        futures.append(executor.submit(self.manager.move_data, dataobj, node_seq))
 
-                for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                    rlt = future.result()
-                    key_lookup[bucket_objs[i]['Key']] = rlt
-                    obj_chunks.extend(rlt)
+                for future in concurrent.futures.as_completed(futures):
+                    obj_chunks.extend(future.result())
             
             # save jobinfo to database
             jobInfo = {
@@ -423,7 +412,7 @@ class DataMissService(pb_grpc.DataMissServicer):
             chunk = self.manager.dataset_col.find_one({"ChunkETag": etag})
             s3_client = self.manager.get_s3_client(cred)
             self.manager.clone_dataobj(dataobj=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], 
-                                    chunk_size=chunk['ChunkSize'], node_sequence=[chunk['Location']], part=chunk['Part'], miss=True)
+                                       chunk_size=chunk['ChunkSize'], node_sequence=[chunk['Location']], part=chunk['Part'], miss=True)
         download(request.etag)
         return pb.DataMissResponse(response=True)
 

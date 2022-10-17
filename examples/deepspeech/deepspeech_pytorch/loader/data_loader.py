@@ -3,7 +3,7 @@ import math
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from examples.imagenet.src.DLCJob import DLCJobDataset
+from DLCJob import *
 
 import librosa
 import numpy as np
@@ -156,29 +156,28 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
         :param normalize: Apply standard mean and deviation normalization to audio tensor
         :param augmentation_conf(Optional): Config containing the augmentation parameters
         """
-        DLCJobDataset.__init__(self, keys=[input_path])
+        DLCJobDataset.__init__(self, [input_path])
         self.labels_map = dict([(labels[i], i) for i in range(len(labels))])
-        SpectrogramDataset.__init__(self, audio_conf, normalize, aug_cfg)
+        SpectrogramParser.__init__(self, audio_conf, normalize, aug_cfg)
 
     def __getitem__(self, index):
-        audio_path, transcript_path = self.get_data(index), self.get_target(index)
-        spect = self.parse_audio(audio_path)
+        spect, transcript_path = self.get_data(index, self.parse_audio), self.get_target(index)
         transcript = self.parse_transcript(transcript_path)
         return spect, transcript
 
-    def __convert__(self):
+    def __process__(self):
         """convert keys of self.data from /path/to/audio.wav to /path/to/audio.txt
         
         Returns:
             list(str): corresponding .txt file paths
         """
-        audio_paths = []
+        audio_objs = []
         transcript_paths = []
         for wav_path in self.data:
             transcript_path = str(wav_path).replace('/wav/', '/txt/').replace('.wav', '.txt')
-            audio_paths.append(wav_path)
+            audio_objs.append(self.data[wav_path])
             transcript_paths.append(transcript_path)
-        return audio_paths, transcript_paths
+        return audio_objs, transcript_paths
     
     def parse_transcript(self, transcript_path):
         with open(transcript_path, 'r', encoding='utf8') as transcript_file:
