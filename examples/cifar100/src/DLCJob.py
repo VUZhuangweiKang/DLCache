@@ -145,11 +145,11 @@ class DLCJobDataset(Dataset):
             # 3-level data hit
             if os.path.exists(tmpfs_path):
                 with open(tmpfs_path, 'rb') as f:
-                    read_val = f.read()
+                    read_val = np.load(tmpfs_path)
                 # print("read tmpfs file {}".format(tmpfs_path))
             elif os.path.exists(nfs_path):
                 with open(nfs_path, 'rb') as f:
-                    read_val = f.read()
+                    read_val =np.load(nfs_path)
                 # print("miss tmpfs file {}".format(tmpfs_path))
             else:
                 # substitutable cache hit

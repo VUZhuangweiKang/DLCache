@@ -2,7 +2,7 @@ from collections import defaultdict
 import pickle
 from typing import Callable, Optional
 from DLCJob import DLCJobDataset
-
+import torch
 
 class cifar100Dataset(DLCJobDataset):
     def __init__(self, keys, 
@@ -32,12 +32,10 @@ class cifar100Dataset(DLCJobDataset):
             for key in cls_keys[class_name]:
                 samples.append(self.data[key])
                 targets.append(i)
-        return samples, targets
+        return torch.tensor(samples), torch.tensor(targets)
     
     def __getitem__(self, index: int):
-        img, target = self.get_data(index), self.get_target(index)
-        img = pickle.loads(img)
-        return img, target
+        return self.data[index], self.target[index]
 
     def __len__(self) -> int:
-        return len(self.data)
+        return len(self.data.size(0))
