@@ -74,11 +74,63 @@ class DLCJobDataset(Dataset):
         self.lock = Lock()
         self.unused_idx = set(list(range(self.__len__())))
                     
-    def get_data(self, idx):
+    def get_data(self, idx, func=None):
+        
+        if func is None:
+            def func(path):
+                with open(path, 'rb') as f:
+                    read_val = np.load(path)
+                    return read_val
+        
         if self.qos['LazyLoading']:
             if len(self.unused_idx) == 0:
                 self.unused_idx = set(list(range(self.__len__())))
-            return self.read(self.data[idx], idx)
+            
+            dataobj = self.data[idx]
+            key = dataobj['Key']
+            if self.qos['UseCache']:
+                etag, loc = dataobj['ChunkETag'], dataobj['Location']
+                nfs_path = '/{}/{}'.format(loc, etag)
+                tmpfs_path = '/runtime{}'.format(nfs_path)
+                
+                read_idx = idx
+                read_val = None
+                
+                # 3-level data hit
+                if os.path.exists(tmpfs_path):
+                    read_val = func(tmpfs_path)
+                    # print("read tmpfs file {}".format(tmpfs_path))
+                elif os.path.exists(nfs_path):
+                    read_val = func(nfs_path)
+                    # print("miss tmpfs file {}".format(tmpfs_path))
+                else:
+                    # substitutable cache hit
+                    # 1. randomly select an unused data point
+                    # 2. replace the idx with sub_idx
+                    # 3. socket in data loader notify client to update data access sequence
+                    print('miss nfs file {}'.format(nfs_path))
+                    while True:
+                        # TODO： 当有多个worker同时load数据时，sub_idx可能重复， 但是如果上锁，会让并行worker串行，影响速度
+                        if len(self.unused_idx) == 0:
+                            sub_idx = random.randint(0, self.__len__()-1)
+                        else:
+                            sub_idx = random.choice(list(self.unused_idx))
+                        sub_etag, sub_loc = self.data[sub_idx]['ChunkETag'], self.data[sub_idx]['Location']
+                        p =  '/{}/{}'.format(sub_loc, sub_etag)
+                        if os.path.exists(p):
+                            self.miss_queue.put([[idx, etag], [sub_idx, sub_etag]])
+                            read_idx = sub_idx
+                            break
+                        else:
+                            self.miss_queue.put([[sub_idx, sub_etag], [sub_idx, sub_etag]])
+                    # read_val = self.read(self.data[sub_idx], sub_idx)
+                    read_val = self.get_data(sub_idx)
+                
+                if read_idx is not None and read_idx in self.unused_idx:
+                    self.unused_idx.remove(read_idx)
+                return read_val
+            else:
+                return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
         else:
             return self.data[idx]
     
