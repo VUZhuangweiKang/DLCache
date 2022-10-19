@@ -1,3 +1,4 @@
+from collections import defaultdict
 import concurrent.futures
 import os
 import sys
@@ -5,6 +6,7 @@ import shutil
 import grpc
 import boto3
 import json, bson
+import pandas as pd
 import configparser
 import multiprocessing
 import grpctool.dbus_pb2 as pb
@@ -312,44 +314,55 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             s3_client = self.manager.get_s3_client(cred)
             bucket_name = request.datasource.bucket
             
-            # check whther data objs are exists or out-of-date, create the `Exist` field
-            bucket_objs = []
-            for prefix in request.datasource.keys:
-                paginator = s3_client.get_paginator('list_objects_v2')
-                pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
-                futures = []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-                    for page in pages:
-                        futures.append(executor.submit(self.manager.filter_objs, page))
-                for future in concurrent.futures.as_completed(futures):
-                    bucket_objs.extend(future.result())
-            
-            # release NFS space through data eviction
-            require_space = 0
-            for dataobj in bucket_objs:
-                if not dataobj['Exist']:
-                    require_space += dataobj['Size']
-            if require_space > 0:
-                self.manager.data_eviction(require=require_space)
-            
-            # copy data from cloud to NFS, init the `ChunkSize`, `Location`, and `ChunkTag` fields
-            obj_chunks = []
-            node_seq = request.nodeSequence
-            with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-                futures = []
-                for dataobj in bucket_objs:
-                    # download missing data before training
-                    if not dataobj['Exist']:
-                        # we also perform data eviction in the clone_dataobj function if pre-allocated space is occupied by other jobs
-                        futures.append(executor.submit(self.manager.clone_dataobj, dataobj, s3_client, bucket_name, request.qos.MaxMemoryMill, node_seq))
-                    else:
-                        # move the data to a node in nodeSequence
-                        futures.append(executor.submit(self.manager.move_data, dataobj, node_seq))
+            # check whether data objs are exists or out-of-date, create the `Exist` field
+            def load_dataobj(keys):
+                data_objs = []
+                for prefix in keys:
+                    paginator = s3_client.get_paginator('list_objects_v2')
+                    pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+                    futures = []
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                        for page in pages:
+                            futures.append(executor.submit(self.manager.filter_objs, page))
+                    for future in concurrent.futures.as_completed(futures):
+                        data_objs.extend(future.result())
+                return data_objs
 
-                for future in concurrent.futures.as_completed(futures):
-                    obj_chunks.extend(future.result())
+            train = request.datasource.keys.train
+            val = request.datasource.keys.validation
+            test = request.datasource.keys.test
+            
+            # TODO: manifest文件没有使用，应该用来将samples和targets对齐
+            def match_sample_target(dataset):
+                samples = load_dataobj(dataset.samples)
+                if dataset.target:
+                    targets = load_dataobj(dataset.targets)
+                    if dataset.manifest:
+                        # manifest is a csv file
+                        local_path = '/tmp/{}'.format(dataset.manifest.split('/')[-1])
+                        s3_client.download_file(bucket_name, dataset.manifest, local_path)
+                        
+                        os.remove(local_path)
+                    else:
+                        samples.sort(key=lambda x: x['Key'])
+                        targets.sort(key=lambda x: x['Key'])
+                else:
+                    targets = None
+                return {'samples': samples, 'targets': targets}
+            
+            dataset_objs = {
+                'train': match_sample_target(train),
+                'validation': match_sample_target(val),
+                'test': match_sample_target(test)
+            }
             
             # save jobinfo to database
+            dataset_etags = defaultdict(defaultdict(list))
+            for a in dataset_objs:
+                for b in dataset_objs[a]:
+                    dataobjs = dataset_objs[a][b]
+                    if dataobjs:
+                        dataset_etags[a][b] = [obj['ChunkETag'] for obj in dataobjs]
             jobInfo = {
                 "Meta": {
                     "Username": cred.username,
@@ -358,9 +371,42 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     "ResourceInfo": MessageToDict(request.resource)
                 },
                 "QoS": MessageToDict(request.qos),
-                "ETags": [item['ChunkETag'] for item in obj_chunks]
+                "ETags": dataset_etags
             }
             self.manager.job_col.insert_one(jobInfo)
+
+            # release NFS space via data eviction if necessary
+            require_space = 0
+            for a in dataset_objs:
+                for b in dataset_objs[a]:
+                    dataobjs = dataset_objs[a][b]
+                    if dataobjs:
+                        for obj in dataobjs:
+                            if not obj['Exist']:
+                                require_space += obj['Size']
+            if require_space > 0:
+                self.manager.data_eviction(require=require_space)
+            
+            # copy data from cloud to NFS, init the `ChunkSize`, `Location`, and `ChunkTag` fields
+            obj_chunks = []
+            node_seq = request.nodesequence
+            with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                futures = []
+                for a in dataset_objs:  # train, validation, test
+                    for b in dataset_objs[a]: # samples, targets
+                        dataobjs = dataset_objs[a][b]
+                        if dataobjs:
+                            for obj in dataobjs:
+                                # download missing data before training
+                                if not obj['Exist']:
+                                    # we also perform data eviction in the clone_dataobj function if pre-allocated space is occupied by other jobs
+                                    futures.append(executor.submit(self.manager.clone_dataobj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, node_seq))
+                                else:
+                                    # move the data to a node in nodesequence
+                                    futures.append(executor.submit(self.manager.move_data, obj, node_seq))
+
+                for future in concurrent.futures.as_completed(futures):
+                    obj_chunks.extend(future.result())
 
             # save dataset info into database
             for chunk in obj_chunks:

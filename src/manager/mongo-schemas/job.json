@@ -29,8 +29,31 @@
                         "name": {"bsonType": "string"},
                         "bucket": {"bsonType": "string"},
                         "keys": {
-                            "bsonType": "array",
-                            "items": {"bsonType": "string"}
+                            "bsonType": "object",
+                            "properties": {
+                                "train": {
+                                    "bsonType": "object",
+                                    "required": ["samples"],
+                                    "properties": {
+                                        "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
+                                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                                    }
+                                },
+                                "validation": {
+                                    "bsonType": "object",
+                                    "properties": {
+                                        "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
+                                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                                    }
+                                },
+                                "test": {
+                                    "bsonType": "object",
+                                    "properties": {
+                                        "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
+                                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                                    }
+                                }
+                            }
                         }
                     }
                 },
@@ -59,9 +82,32 @@
             "description": "QoS configuration"
         },
         "ETags": {
-            "bsonType": "array",
-            "items": {
-                "bsonType": "string"
+            "bsonType": "object",
+            "properties": {
+                "train": {
+                    "bsonType": "object",
+                    "required": ["samples"],
+                    "properties": {
+                        "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
+                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                    }
+                },
+                "validation": {
+                    "bsonType": "object",
+                    "required": ["samples"],
+                    "properties": {
+                        "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
+                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                    }
+                },
+                "test": {
+                    "bsonType": "object",
+                    "required": ["samples"],
+                    "properties": {
+                        "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
+                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                    }
+                }
             }
         }
     }

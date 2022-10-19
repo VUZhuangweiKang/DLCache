@@ -90,16 +90,24 @@ class Client(object):
         """
         for job in self.jobsmeta:
             qos = job['qos']
-            ds = job['dataSource']
+            ds = job['datasource']
             if 'keys' not in ds: ds['keys'] = []
-            for node in job['nodeSequence']:
+            for node in job['nodesequence']:
                 p = '/runtime/{}'.format(node)
                 if not os.path.exists(p):
                     os.mkdir(p)
             request = pb.RegisterRequest(
                 cred=self.cred,
-                datasource=pb.DataSource(name=ds['name'], bucket=ds['bucket'], keys=ds['keys']),
-                nodeSequence=job['nodeSequence'],
+                datasource=pb.DataSource(
+                    name=ds['name'], 
+                    bucket=ds['bucket'], 
+                    keys=pb.JobDatasets(
+                        train=pb.Dataset(*job['datasource']['train']),
+                        validation=pb.Dataset(*job['datasource']['validation']) if 'validation' in job['datasource'] else None,
+                        test=pb.Dataset(*job['datasource']['test']) if 'test' in job['datasource'] else None,
+                    )
+                ),
+                nodesequence=job['nodesequence'],
                 qos=ParseDict(qos, pb.QoS(), ignore_unknown_fields=True),
                 resource=pb.ResourceInfo(CPUMemoryFree=get_cpu_free_mem(), GPUMemoryFree=get_gpu_free_mem())
             )
@@ -137,8 +145,10 @@ class Client(object):
         if idx < len(self.nfs_paths):
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
-                for nfs_path in self.nfs_paths[idx]:
-                    futures.append(executor.submit(docopy, nfs_path))
+                for sample_path, target_path in self.nfs_paths[idx]:
+                    futures.append(executor.submit(docopy, sample_path))
+                    if target_path:
+                        futures.append(executor.submit(docopy, target_path))
 
             for task in futures:
                 rc, miss_file = task.result()
@@ -161,18 +171,6 @@ class Client(object):
                     self.cache_size = data["num_workers"] * data["prefetch_factor"]                
                     for i in range(self.cache_size):
                         self.prefetch(i)
-                    
-                    # # double check files
-                    # for idx in range(self.cache_size):
-                    #     for nfs_path in self.nfs_paths[idx]:
-                    #         try:
-                    #             tmpfspath = '/runtime' + nfs_path
-                    #             with open(tmpfspath, 'rb') as f:
-                    #                 pickle.load(f)
-                    #         except EOFError:
-                    #             print('EOFError:', nfs_path)
-                    #         except FileNotFoundError:
-                    #             print('FileNotFoundError:', nfs_path)
                     self.socket_rep.send(b'')
 
             if self.socket_sub in socks and socks[self.socket_sub] == zmq.POLLIN:
@@ -217,19 +215,23 @@ class Client(object):
                 elif topic == "releaseCache":
                     batch_idx = int(data)
                     if batch_idx < len(self.nfs_paths):
-                        for path in self.nfs_paths[batch_idx]:
-                            tmpfspath = '/runtime' + path
-                            if not os.path.exists(tmpfspath): continue
-                            etag = tmpfspath.split('/')[-1]
-                            now = datetime.datetime.now().timestamp()
-                            self.dataset_col.update_one(
-                                {"ETag": etag}, 
-                                {
-                                    "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
-                                    "$inc": {"TotalAccessTime": 1}
-                                })
-                            if os.path.exists(tmpfspath):
-                                os.remove(tmpfspath)
+                        for sample_path, target_path in self.nfs_paths[batch_idx]:
+                            def helper(path):
+                                tmpfspath = '/runtime' + path
+                                if not os.path.exists(tmpfspath): continue
+                                etag = tmpfspath.split('/')[-1]
+                                now = datetime.datetime.now().timestamp()
+                                self.dataset_col.update_one(
+                                    {"ETag": etag}, 
+                                    {
+                                        "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
+                                        "$inc": {"TotalAccessTime": 1}
+                                    })
+                                if os.path.exists(tmpfspath):
+                                    os.remove(tmpfspath)
+                            helper(sample_path)
+                            if target_path:
+                                helper(target_path)
 
 
 if __name__ == '__main__':

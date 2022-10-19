@@ -18,7 +18,7 @@ ipc_channel = 'ipc:///share/runtime.ipc'
 
 
 class DLCJobDataset(Dataset):
-    def __init__(self, keys: List[str] = None):
+    def __init__(self, dtype='train'):
         """An abstract class subclassing the torch.utils.data.Dataset class
         
         All datasets that represent a map from keys to data samples should subclass
@@ -30,20 +30,19 @@ class DLCJobDataset(Dataset):
         of :class:`~DLCJobDataLoader`.
         
         .. note::
-        Subclassing ~DLCJobDataset will load data under provided keys from DLCache to var:`self.data` as Map<Key, Value>.
-        Overwriting meth:`__process__` allows you to replace var:`self.data` and var:`self.targets` with
+        Subclassing ~DLCJobDataset will load data under provided keys from DLCache to var:`self.samples` as Map<Key, Value>.
+        Overwriting meth:`__process__` allows you to replace var:`self.samples` and var:`self.targets` with
         iteratable variables that can be iterated in meth:`__get_item__`.
         
         Args:
-            keys (List, optional): a list of bucket keys. Defaults to None, meaning loading all keys in the bucket.
-            shuffle (Bool, optional): default False
+            dtype: dataset type, including train, validation, test
         """
-        self.keys = keys
+        self.dtype = dtype            
         while not os.path.exists(jobinfo): pass
         with open(jobinfo, 'rb') as f:
             job_meta = json.load(f)
         self.qos = job_meta['qos']
-        self.bucket = job_meta['dataSource']['bucket']
+        self.bucket = job_meta['datasource']['bucket']
         self.chunks = []
         
         if self.qos['UseCache']:
@@ -74,149 +73,186 @@ class DLCJobDataset(Dataset):
         self.lock = Lock()
         self.unused_idx = set(list(range(self.__len__())))
 
-    def get_data(self, idx, func=None):
-        if func is None:
-            def func(path):
-                with open(path, 'rb') as f:
-                    read_val = f.read()
-                    return read_val
-        
+    def try_get_item(self, idx):
         if self.qos['LazyLoading']:
             if len(self.unused_idx) == 0:
                 self.unused_idx = set(list(range(self.__len__())))
             
-            dataobj = self.data[idx]
-            key = dataobj['Key']
+            dataobj, targetobj = self.samples[idx], self.targets[idx]
             if self.qos['UseCache']:
-                etag, loc = dataobj['ChunkETag'], dataobj['Location']
-                nfs_path = '/{}/{}'.format(loc, etag)
-                tmpfs_path = '/runtime{}'.format(nfs_path)
                 
-                read_idx = idx
-                read_val = None
+                def helper(obj, func):
+                    etag, loc = obj['ChunkETag'], obj['Location']
+                    nfs_path = '/{}/{}'.format(loc, etag)
+                    tmpfs_path = '/runtime{}'.format(nfs_path)
+                    
+                    read_idx = idx
+                    read_val = None
+                    
+                    # 3-level data hit
+                    if os.path.exists(tmpfs_path):
+                        read_val = func(tmpfs_path)
+                        # print("read tmpfs file {}".format(tmpfs_path))
+                    elif os.path.exists(nfs_path):
+                        read_val = func(nfs_path)
+                        # print("miss tmpfs file {}".format(tmpfs_path))
+                    else:
+                        # substitutable cache hit
+                        # 1. randomly select an unused data point
+                        # 2. replace the idx with sub_idx
+                        # 3. socket in data loader notify client to update data access sequence
+                        print('miss nfs file {}'.format(nfs_path))
+                        while True:
+                            # TODO： 当有多个worker同时load数据时，sub_idx可能重复， 但是如果上锁，会让并行worker串行，影响速度
+                            if len(self.unused_idx) == 0:
+                                sub_idx = random.randint(0, self.__len__()-1)
+                            else:
+                                sub_idx = random.choice(list(self.unused_idx))
+                            sub_etag, sub_loc = self.samples[sub_idx]['ChunkETag'], self.samples[sub_idx]['Location']
+                            p =  '/{}/{}'.format(sub_loc, sub_etag)
+                            if os.path.exists(p):
+                                self.miss_queue.put([[idx, etag], [sub_idx, sub_etag]])
+                                read_idx = sub_idx
+                                break
+                            else:
+                                self.miss_queue.put([[sub_idx, sub_etag], [sub_idx, sub_etag]])
+                        read_val = self.try_get_item(sub_idx)
+                    
+                    if read_idx is not None and read_idx in self.unused_idx:
+                        self.unused_idx.remove(read_idx)
+                    return read_val
                 
-                # 3-level data hit
-                if os.path.exists(tmpfs_path):
-                    read_val = func(tmpfs_path)
-                    # print("read tmpfs file {}".format(tmpfs_path))
-                elif os.path.exists(nfs_path):
-                    read_val = func(nfs_path)
-                    # print("miss tmpfs file {}".format(tmpfs_path))
-                else:
-                    # substitutable cache hit
-                    # 1. randomly select an unused data point
-                    # 2. replace the idx with sub_idx
-                    # 3. socket in data loader notify client to update data access sequence
-                    print('miss nfs file {}'.format(nfs_path))
-                    while True:
-                        # TODO： 当有多个worker同时load数据时，sub_idx可能重复， 但是如果上锁，会让并行worker串行，影响速度
-                        if len(self.unused_idx) == 0:
-                            sub_idx = random.randint(0, self.__len__()-1)
-                        else:
-                            sub_idx = random.choice(list(self.unused_idx))
-                        sub_etag, sub_loc = self.data[sub_idx]['ChunkETag'], self.data[sub_idx]['Location']
-                        p =  '/{}/{}'.format(sub_loc, sub_etag)
-                        if os.path.exists(p):
-                            self.miss_queue.put([[idx, etag], [sub_idx, sub_etag]])
-                            read_idx = sub_idx
-                            break
-                        else:
-                            self.miss_queue.put([[sub_idx, sub_etag], [sub_idx, sub_etag]])
-                    # read_val = self.read(self.data[sub_idx], sub_idx)
-                    read_val = self.get_data(sub_idx)
-                
-                if read_idx is not None and read_idx in self.unused_idx:
-                    self.unused_idx.remove(read_idx)
-                return read_val
+                sample, target = helper(dataobj, self.__sample_reader__), helper(targetobj, self.__target_reader__)
+                return sample, target
             else:
-                return self.client.get_object(Bucket=self.bucket, Key=key)['Body'].read()
+                sample = self.client.get_object(Bucket=self.bucket, Key=dataobj['Key'])['Body'].read()
+                if self.targetobj:
+                    target = self.client.get_object(Bucket=self.bucket, Key=targetobj['Key'])['Body'].read()
+                    return sample, target
+                return sample, None
         else:
-            return self.data[idx]
-    
-    def get_target(self, index):
-        return self.targets[index]
+            return self.samples[idx], self.targets[idx] if self.targets else None
 
     def loadKeysFromDLCache(self):
         maxmem = self.qos['MaxMemoryMill']*1e6  
-        etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags']
-        chunks = [chunk for chunk in self.dataset_col.find({"ETag": {"$in": etags}})]
-                    
+        etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags'][self.dtype]
+        sample_objs = self.dataset_col.find({"ETag": {"$in": etags['samples']}})
+        target_objs = self.dataset_col.find({"ETag": {"$in": etags['targets']}})
+        chunks = list(zip(sample_objs, target_objs))
+        
         if maxmem == 0 or self.qos['LazyLoading']:
             self.chunks.append(chunks)
         else:
             total_size = 0
             self.chunks.append([])
-            for chunk in chunks:
-                s = int(chunk['Size'])
+            for sample, target in chunks:
+                s = int(sample['Size']) + int(target['Size'])
                 total_size += s
                 # any single chunk should be smaller than the MaxMemory
                 if total_size >= maxmem:
                     self.chunks.append([])
                     total_size = 0
                 elif s > maxmem:
-                    raise Exception('Object {} size is greater than assigned MaxMemory.'.format(chunk['Key']))
+                    raise Exception('Object pair ({}, {}) size is greater than assigned MaxMemory.'.format(sample['Key'], target['Key']))
                 else:
-                    self.chunks[-1].append(chunk)
+                    self.chunks[-1].append((sample, target))
         
     def loadKeysFromCloud(self):
-        paginator = self.client.get_paginator('list_objects_v2')
-        if self.keys is not None:
-            pages = []
-            for k in self.keys:
-                pages.extend(paginator.paginate(Bucket=self.bucket, Prefix=k))
-        else:
-            pages = paginator.paginate(Bucket=self.bucket)
-        
+        paginator = self.client.get_paginator('list_objects_v2')       
+        def load_pages(keys):
+            if keys is not None:
+                pages = []
+                for k in keys:
+                    pages.extend(paginator.paginate(Bucket=self.bucket, Prefix=k))
+                return pages
+            return None
+
+        keys = self.job_col.find_one({"Meta.JobId": self.jobId})['Datasource'][self.dtype]
+        sample_pages = load_pages(keys['samples'])
+        if sample_pages is None:
+            sample_pages = paginator.paginate(Bucket=self.bucket)
+        if keys['targets']:
+            target_pages = load_pages(keys['targets'])
+
         maxmem = self.qos['MaxMemoryMill']*1e6
         maxmem = math.inf if maxmem==0 else maxmem
         total_size = 0
         self.chunks.append([])
-        for page in pages:
-            for item in page['Contents']:
-                s = int(item['Size'])
+        
+        for i in range(len(sample_pages)):
+            for j in range(len(sample_pages[i]['Contents'])):
+                sample = sample_pages[i]["Contents"][j]
+                target = target_pages[i]["Contents"][j] if target_pages else None
+                s = int(sample['Size'])
                 total_size += s
                 if total_size > maxmem:
                     self.chunks.append([])
                     total_size = 0
                 elif s > maxmem:
-                    raise Exception('File {} size is greater than assigned MaxMemory.'.format(item['Key']))
+                    raise Exception('File {} size is greater than assigned MaxMemory.'.format(sample['Key']))
                 else:
-                    self.chunks[-1].append(item)
+                    self.chunks[-1].append((sample, target))
 
     def load_data(self, chunk_idx):
         """Load file paths or actual data in the given chunk 
-        initialize the self.data and self.keys, where self.data is a dict with format {key: dataobj}
-        user performs data (X and y) pre-processing in the __process__ function, that convert self.data from
+        initialize the self.samples and self.samples_keys, where self.samples is a dict with format {key: dataobj}
+        user performs data (X and y) pre-processing in the __process__ function, that convert self.samples from
         dict to iteratable X, y
         
         Args:
             chunk_idx (int): file-based (LazyLoading) dataset only has one chunk, so the chunk_idx = 0
                              tabular dataset split file to multiple chunks
         """
-        self.data = {}
-        self.keys = []
+        self.samples = {}
+        self.targets = {}
         if self.qos['LazyLoading']:
             # file-based dataset only has one chunk, so the chunk_idx = 0
-            for dataobj in self.chunks[chunk_idx]:
-                self.keys.append(dataobj['Key'])
-                self.nfsFilePaths.append('/{}/{}'.format(dataobj['Location'], dataobj['ChunkETag']))
-                self.data[dataobj['Key']] = dataobj
+            for sampleobj, targetobj in self.chunks[chunk_idx]:
+                self.samples[sampleobj['Key']] = sampleobj
+                if targetobj:
+                    self.targets[targetobj]['Key'] = targetobj
+                    self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])])
+                else:
+                    self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), None])
         else:
             # Normal mode fits tabular or block datasets, so we load a subset of the original dataset here
-            with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-                futures = []
-                for dataobj in self.chunks[chunk_idx]:
-                    futures.append(executor.submit(self.read, dataobj))
-                for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                    dataobj = self.chunks[chunk_idx][i]
-                    self.keys.append(dataobj['Key'])
-                    self.nfsFilePaths.append('/{}/{}'.format(dataobj['Location'], dataobj['ChunkETag']))
-                    self.data[dataobj['Key']] = future.result()
-        
-        self.data, self.targets = self.__process__()
+            # TODO: 如果数据丢失怎么办？？？？
+            for sampleobj, targetobj in self.chunks[chunk_idx]:
+                sample_path = '/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag'])
+                self.samples[sampleobj['Key']] = self.__sample_reader__(sample_path)
+                if targetobj:
+                    target_path =  '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])
+                    self.targets[targetobj]['Key'] = self.__target_reader__(target_path)
+                    self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])])
+                else:
+                    self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), None])
+
+        self.samples, self.targets = self.__process__()
+
+    def __sample_reader__(self, path: str):
+        """this function defines the logic of reading sample data (X) from a file
+
+        Args:
+            path (string): _description_
+
+        Raises:
+            NotImplementedError: _description_
+        """
+        raise NotImplementedError
+    
+    def __target_reader__(self, path: str):
+        """this function defines the logic of reading target data (Y) from a file
+
+        Args:
+            path (string): _description_
+
+        Raises:
+            NotImplementedError: _description_
+        """
+        raise NotImplementedError
     
     def __process__(self) -> Tuple[List, List]:
-        """process self.data ans self.target
+        """process self.samples ans self.target
 
         Return iteratable X, y that can be indexed by __get_item__
         

@@ -84,13 +84,57 @@ spec:
                         etag:
                           type: string
                         keys:
-                          items:
-                            type: string
-                          type: array
+                          properties:
+                            test:
+                              properties:
+                                samples:
+                                  items:
+                                    type: string
+                                  type: array
+                                targets:
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - samples
+                              - targets
+                              type: object
+                            train:
+                              properties:
+                                samples:
+                                  items:
+                                    type: string
+                                  type: array
+                                targets:
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - samples
+                              - targets
+                              type: object
+                            validation:
+                              properties:
+                                samples:
+                                  items:
+                                    type: string
+                                  type: array
+                                targets:
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - samples
+                              - targets
+                              type: object
+                          required:
+                          - train
+                          type: object
                         name:
                           type: string
                       required:
                       - bucket
+                      - keys
                       - name
                       type: object
                     env:
@@ -608,7 +652,7 @@ spec:
                   pod to fit on a node. Selector which must match a node''s labels
                   for the pod to be scheduled on that node. More info: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/'
                 type: object
-              nodeSequence:
+              nodesequence:
                 description: Node weights of downloading dataset
                 items:
                   type: string
@@ -1064,8 +1108,8 @@ spec:
                                   items:
                                     type: string
                                   type: array
-                                dataSource:
-                                  description: 'dataSource field can be used to specify
+                                datasource:
+                                  description: 'datasource field can be used to specify
                                     either: * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot)
                                     * An existing PVC (PersistentVolumeClaim) If the
                                     provisioner or an external controller can support
@@ -1094,8 +1138,8 @@ spec:
                                   - kind
                                   - name
                                   type: object
-                                dataSourceRef:
-                                  description: 'dataSourceRef specifies the object
+                                datasourceRef:
+                                  description: 'datasourceRef specifies the object
                                     from which to populate the volume with data, if
                                     a non-empty volume is desired. This may be any
                                     local object from a non-empty API group (non core

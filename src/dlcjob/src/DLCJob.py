@@ -52,7 +52,7 @@ class DLCJobDataset(Dataset):
         with open('/jobsmeta/{}.json'.format(jobname), 'r') as f:
             self.job = json.load(f)
         self.qos = self.job['qos']
-        self.bucket = self.job['dataSource']['bucket']
+        self.bucket = self.job['datasource']['bucket']
         self.chunks = []
         
         if self.qos['UseCache']:

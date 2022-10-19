@@ -58,11 +58,23 @@ type QoSConfigurations struct {
 	MaxMemoryMill int64 `json:"maxmemorymill"`
 }
 
+type DatasetStruct struct {
+	Samples []string `json:"samples"` // prefix
+	Targets []string `json:"targets"` // prefix
+
+	// manifest file is optional, if it's not provided, we sort samples and targets by the key
+	Manifest string `json:"manifest"`
+}
+type JobDatasetsStruct struct {
+	Train      DatasetStruct `json:"train"`
+	Validation DatasetStruct `json:"validation,omitempty"`
+	Test       DatasetStruct `json:"test,omitempty"`
+}
 type DataSourceStruct struct {
-	Name   string   `json:"name"`
-	Bucket string   `json:"bucket"`
-	Keys   []string `json:"keys,omitempty"`
-	ETag   string   `json:"etag,omitempty"`
+	Name   string            `json:"name"`
+	Bucket string            `json:"bucket"`
+	Keys   JobDatasetsStruct `json:"keys"`
+	ETag   string            `json:"etag,omitempty"`
 }
 
 // Container defines Kubernetes container attributes.
@@ -193,7 +205,7 @@ type DLCPodSpec struct {
 
 	// Node weights of downloading dataset
 	// +optional
-	NodeSequence []string `json:"nodeSequence,omitempty"`
+	NodeSequence []string `json:"nodesequence,omitempty"`
 }
 
 // DLCPodStatus defines the observed state of DLCPod

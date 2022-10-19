@@ -5,10 +5,11 @@ from DLCJob import DLCJobDataset
 
 
 class ImageNetDataset(DLCJobDataset):
-    def __init__(self, keys, 
+    def __init__(self, sample_keys,
+                 target_keys = None, 
                  transform: Optional[Callable] = None,
                  target_transform: Optional[Callable] = None):
-        super().__init__(keys)
+        super().__init__(sample_keys, target_keys)
         self.transform = transform
         self.target_transform = target_transform
         self.count = 0

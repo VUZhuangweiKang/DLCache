@@ -238,33 +238,55 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	checkErr(err)
 	s3client := s3.NewFromConfig(cfg)
 
-	etags := []string{}
+	etags := map[string]map[string][]string{}
 	for _, job := range spec.Jobs {
-		for _, prefix := range job.DataSource.Keys {
-			worker := func(wg *sync.WaitGroup, page *s3.ListObjectsV2Output) {
-				for _, obj := range page.Contents {
-					etags = append(etags, *obj.ETag)
+		loadETags := func(keys []string) []string {
+			etags_ := []string{}
+			for _, prefix := range keys {
+				worker := func(wg *sync.WaitGroup, page *s3.ListObjectsV2Output) {
+					for _, obj := range page.Contents {
+						etags_ = append(etags_, *obj.ETag)
+					}
+					wg.Done()
 				}
-				wg.Done()
-			}
-			paginator := s3.NewListObjectsV2Paginator(s3client, &s3.ListObjectsV2Input{
-				Bucket: &job.DataSource.Bucket,
-				Prefix: &prefix,
-			})
+				paginator := s3.NewListObjectsV2Paginator(s3client, &s3.ListObjectsV2Input{
+					Bucket: &job.DataSource.Bucket,
+					Prefix: &prefix,
+				})
 
-			var wg sync.WaitGroup
-			for paginator.HasMorePages() {
-				page, err := paginator.NextPage(awsctx)
-				checkErr(err) // if bucket doesn't exist, this will raise error
-				wg.Add(1)
-				go worker(&wg, page)
+				var wg sync.WaitGroup
+				for paginator.HasMorePages() {
+					page, err := paginator.NextPage(awsctx)
+					checkErr(err) // if bucket doesn't exist, this will raise error
+					wg.Add(1)
+					go worker(&wg, page)
+				}
+				wg.Wait()
 			}
-			wg.Wait()
+			return etags_
+		}
+		etags["train"]["samples"] = loadETags(job.DataSource.Keys.Train.Samples)
+		if job.DataSource.Keys.Train.Targets != nil {
+			etags["train"]["targets"] = loadETags(job.DataSource.Keys.Train.Targets)
+		}
+		if job.DataSource.Keys.Validation.Samples != nil {
+			etags["validation"]["samples"] = loadETags(job.DataSource.Keys.Validation.Samples)
+		}
+		if job.DataSource.Keys.Validation.Targets != nil {
+			etags["validation"]["targets"] = loadETags(job.DataSource.Keys.Validation.Targets)
+		}
+		if job.DataSource.Keys.Test.Samples != nil {
+			etags["test"]["samples"] = loadETags(job.DataSource.Keys.Test.Samples)
+		}
+		if job.DataSource.Keys.Test.Targets != nil {
+			etags["test"]["targets"] = loadETags(job.DataSource.Keys.Test.Targets)
 		}
 	}
 
 	var existingETags []string
 	existingPaths := map[string]bool{}
+
+	// list existing files on NFS
 	for _, node := range nodes.Items {
 		err := filepath.Walk(fmt.Sprintf("/%s", node.Status.Addresses[0].Address), func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -280,9 +302,15 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 			return nil
 		}
 	}
-	for _, etag := range etags {
-		if _, ok := existingPaths[etag]; ok {
-			existingETags = append(existingETags, etag)
+
+	// find existing etags over all ETags
+	for dataset := range etags {
+		for data := range etags[dataset] {
+			for _, etag := range etags[dataset][data] {
+				if _, ok := existingPaths[etag]; ok {
+					existingETags = append(existingETags, etag)
+				}
+			}
 		}
 	}
 
@@ -510,8 +538,8 @@ func (r *DLCPodReconciler) createConfigMap(ctx context.Context, dlcpod v1alpha1.
 	for _, job := range spec.Jobs {
 		jobinfo := map[string]interface{}{
 			"name":         job.Name,
-			"dataSource":   job.DataSource,
-			"nodeSequence": dlcpod.Spec.NodeSequence,
+			"datasource":   job.DataSource,
+			"nodesequence": dlcpod.Spec.NodeSequence,
 		}
 		if job.ConfigurationsFromConfigMap.Name != "" {
 			var qos_config corev1.ConfigMap
