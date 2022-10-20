@@ -64,7 +64,8 @@ class Objective(object):
 
         test_dataset = SpectrogramDataset(
             audio_conf=self.cfg.spect_cfg,
-            input_path=hydra.utils.to_absolute_path(cfg.test_path),
+            # input_path=hydra.utils.to_absolute_path(cfg.test_path),
+            dtype='test',
             labels=self.labels,
             normalize=True
         )

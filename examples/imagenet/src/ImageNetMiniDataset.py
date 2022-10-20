@@ -1,17 +1,11 @@
 from collections import defaultdict
 import pickle
-from typing import Callable, Optional
 from DLCJob import DLCJobDataset
 
 
 class ImageNetDataset(DLCJobDataset):
-    def __init__(self, sample_keys,
-                 target_keys = None, 
-                 transform: Optional[Callable] = None,
-                 target_transform: Optional[Callable] = None):
-        super().__init__(sample_keys, target_keys)
-        self.transform = transform
-        self.target_transform = target_transform
+    def __init__(self, dtype: str = 'train'):
+        super().__init__(dtype)
         self.count = 0
         self.dur = []
     
@@ -25,7 +19,7 @@ class ImageNetDataset(DLCJobDataset):
         classes = list(cls_keys.keys())
         return cls_keys, classes
 
-    def __convert__(self):
+    def __process__(self):
         samples = []
         targets = []
         cls_keys, classes = self.find_classes(self.keys)
@@ -36,9 +30,14 @@ class ImageNetDataset(DLCJobDataset):
         return samples, targets
     
     def __getitem__(self, index: int):
-        img, target = self.get_data(index), self.get_target(index)
-        img = pickle.loads(img)
+        img, target = self.try_get_item(index)
         return img, target
 
+    def __sample_reader__(self, path: str = None, raw_bytes: bytes = None):
+        return pickle.loads(raw_bytes)
+    
+    def __target_reader__(self, path: str = None, raw_bytes: bytes = None):
+        pass
+    
     def __len__(self) -> int:
         return len(self.data)

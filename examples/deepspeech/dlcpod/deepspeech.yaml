@@ -14,8 +14,16 @@ spec:
       name: LibriSpeech
       bucket: vuzhuangwei
       keys:
-      - LibriSpeech/train
-      - LibriSpeech/val
+        train:
+          samples:
+            - LibriSpeech/train/wav
+          targets:
+            - LibriSpeech/train/txt
+        validation:
+          samples:
+            - LibriSpeech/val/wav
+          targets:
+            - LibriSpeech/val/txt
     qos:
       usecache: true
       maxmemorymill: 10000

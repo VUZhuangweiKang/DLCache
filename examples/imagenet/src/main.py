@@ -2,8 +2,6 @@ import argparse
 import os
 import random
 import shutil
-from statistics import mean, median, stdev
-import statistics
 import time
 import warnings
 from enum import Enum
@@ -19,11 +17,10 @@ import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
-import torchvision.datasets as datasets
 import torchvision.models as models
 from torch.utils.data import Subset
 from ImageNetMiniDataset import *
-from DLCJob import *
+from dlcjob.src.DLCJob import *
 
 
 model_names = sorted(name for name in models.__dict__

@@ -87,6 +87,11 @@ spec:
                           properties:
                             test:
                               properties:
+                                manifest:
+                                  description: manifest file is optional, if it's
+                                    not provided, we sort samples and targets by the
+                                    key
+                                  type: string
                                 samples:
                                   items:
                                     type: string
@@ -96,11 +101,17 @@ spec:
                                     type: string
                                   type: array
                               required:
+                              - manifest
                               - samples
                               - targets
                               type: object
                             train:
                               properties:
+                                manifest:
+                                  description: manifest file is optional, if it's
+                                    not provided, we sort samples and targets by the
+                                    key
+                                  type: string
                                 samples:
                                   items:
                                     type: string
@@ -110,11 +121,17 @@ spec:
                                     type: string
                                   type: array
                               required:
+                              - manifest
                               - samples
                               - targets
                               type: object
                             validation:
                               properties:
+                                manifest:
+                                  description: manifest file is optional, if it's
+                                    not provided, we sort samples and targets by the
+                                    key
+                                  type: string
                                 samples:
                                   items:
                                     type: string
@@ -124,6 +141,7 @@ spec:
                                     type: string
                                   type: array
                               required:
+                              - manifest
                               - samples
                               - targets
                               type: object
@@ -1108,8 +1126,8 @@ spec:
                                   items:
                                     type: string
                                   type: array
-                                datasource:
-                                  description: 'datasource field can be used to specify
+                                dataSource:
+                                  description: 'dataSource field can be used to specify
                                     either: * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot)
                                     * An existing PVC (PersistentVolumeClaim) If the
                                     provisioner or an external controller can support
@@ -1138,8 +1156,8 @@ spec:
                                   - kind
                                   - name
                                   type: object
-                                datasourceRef:
-                                  description: 'datasourceRef specifies the object
+                                dataSourceRef:
+                                  description: 'dataSourceRef specifies the object
                                     from which to populate the volume with data, if
                                     a non-empty volume is desired. This may be any
                                     local object from a non-empty API group (non core

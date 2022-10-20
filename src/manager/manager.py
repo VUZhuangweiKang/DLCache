@@ -6,7 +6,6 @@ import shutil
 import grpc
 import boto3
 import json, bson
-import pandas as pd
 import configparser
 import multiprocessing
 import grpctool.dbus_pb2 as pb

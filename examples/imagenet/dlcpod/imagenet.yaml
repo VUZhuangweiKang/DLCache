@@ -15,8 +15,12 @@ spec:
       name: Imagenet-Mini-Obj
       bucket: vuzhuangwei
       keys:
-      # - Imagenet-Mini-Obj/train
-      - Imagenet-Mini-Obj/val
+        train:
+          samples:
+            - Imagenet-Mini-Obj/train
+        validation:
+          samples:
+            - Imagenet-Mini-Obj/val
     qos:
       usecache: true
       maxmemorymill: 10000

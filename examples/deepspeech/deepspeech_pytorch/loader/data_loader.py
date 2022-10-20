@@ -1,7 +1,5 @@
-import json
 import math
 import os
-from pathlib import Path
 from tempfile import NamedTemporaryFile
 from DLCJob import *
 
@@ -139,8 +137,8 @@ class SpectrogramParser(AudioParser):
 class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
     def __init__(self,
                  audio_conf: SpectConfig,
-                 input_path: str,
                  labels: list,
+                 dtype: str = 'train',
                  normalize: bool = False,
                  aug_cfg: AugmentationConfig = None):
         """
@@ -151,20 +149,25 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
         ...
         You can also pass the directory of dataset.
         :param audio_conf: Config containing the sample rate, window and the window length/stride in seconds
-        :param input_path: Path to input.
+        :param dtype: dataset type (train/validation/test)
         :param labels: List containing all the possible characters to map to
         :param normalize: Apply standard mean and deviation normalization to audio tensor
         :param augmentation_conf(Optional): Config containing the augmentation parameters
         """
-        DLCJobDataset.__init__(self, [input_path])
+        DLCJobDataset.__init__(self, dtype)
         self.labels_map = dict([(labels[i], i) for i in range(len(labels))])
         SpectrogramParser.__init__(self, audio_conf, normalize, aug_cfg)
 
     def __getitem__(self, index):
-        spect, transcript_path = self.get_data(index, self.parse_audio), self.get_target(index)
-        transcript = self.parse_transcript(transcript_path)
+        spect, transcript = self.try_get_item(index)
         return spect, transcript
-
+    
+    def __sample_reader__(self, path: str = None, raw_bytes: bytes = None):
+        return self.parse_audio(path)
+    
+    def __target_reader__(self, path: str = None, raw_bytes: bytes = None):
+        return self.parse_transcript(path)
+    
     def __process__(self):
         """convert keys of self.data from /path/to/audio.wav to /path/to/audio.txt
         
