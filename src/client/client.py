@@ -1,3 +1,4 @@
+from random import sample
 import grpc
 import signal
 import json
@@ -96,16 +97,27 @@ class Client(object):
                 p = '/runtime/{}'.format(node)
                 if not os.path.exists(p):
                     os.mkdir(p)
+            
+            train_keys = ds['keys']['train']
+            val_keys = ds['keys']['validation']
+            if len(val_keys) == 0:
+                val_keys = {'samples': [], 'targets': []}
+            test_keys = ds['keys']['test']
+            if len(test_keys) == 0:
+                test_keys = {'samples': [], 'targets': []}
+            
+            job_datasets = pb.JobDatasets(
+                train=pb.Dataset(**train_keys),
+                validation=pb.Dataset(**val_keys),
+                test=pb.Dataset(**test_keys)
+            )
+            
             request = pb.RegisterRequest(
                 cred=self.cred,
                 datasource=pb.DataSource(
                     name=ds['name'], 
                     bucket=ds['bucket'], 
-                    keys=pb.JobDatasets(
-                        train=pb.Dataset(*job['datasource']['train']),
-                        validation=pb.Dataset(*job['datasource']['validation']) if 'validation' in job['datasource'] else None,
-                        test=pb.Dataset(*job['datasource']['test']) if 'test' in job['datasource'] else None,
-                    )
+                    keys=job_datasets
                 ),
                 nodesequence=job['nodesequence'],
                 qos=ParseDict(qos, pb.QoS(), ignore_unknown_fields=True),
@@ -218,7 +230,7 @@ class Client(object):
                         for sample_path, target_path in self.nfs_paths[batch_idx]:
                             def helper(path):
                                 tmpfspath = '/runtime' + path
-                                if not os.path.exists(tmpfspath): continue
+                                if not os.path.exists(tmpfspath): return
                                 etag = tmpfspath.split('/')[-1]
                                 now = datetime.datetime.now().timestamp()
                                 self.dataset_col.update_one(

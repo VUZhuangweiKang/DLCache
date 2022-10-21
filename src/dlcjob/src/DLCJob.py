@@ -64,7 +64,6 @@ class DLCJobDataset(Dataset):
             self.loadKeysFromCloud()
         
         self.nfsFilePaths = []
-        self.targets = None
         self.load_data(chunk_idx=0)
         
         self.miss_queue = Queue()
@@ -78,7 +77,6 @@ class DLCJobDataset(Dataset):
             
             dataobj, targetobj = self.samples[idx], self.targets[idx]
             if self.qos['UseCache']:
-                
                 def helper(obj, func):
                     etag, loc = obj['ChunkETag'], obj['Location']
                     nfs_path = '/{}/{}'.format(loc, etag)
@@ -208,7 +206,7 @@ class DLCJobDataset(Dataset):
             for sampleobj, targetobj in self.chunks[chunk_idx]:
                 self.samples[sampleobj['Key']] = sampleobj
                 if targetobj:
-                    self.targets[targetobj]['Key'] = targetobj
+                    self.targets[targetobj['Key']] = targetobj
                     self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])])
                 else:
                     self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), None])
@@ -220,7 +218,7 @@ class DLCJobDataset(Dataset):
                 self.samples[sampleobj['Key']] = self.__sample_reader__(sample_path)
                 if targetobj:
                     target_path =  '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])
-                    self.targets[targetobj]['Key'] = self.__target_reader__(target_path)
+                    self.targets[targetobj['Key']] = self.__target_reader__(target_path)
                     self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])])
                 else:
                     self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), None])

@@ -127,7 +127,7 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 				dlcpod.Annotations = map[string]string{"spec": string(data)}
 			}
 			if err := r.Update(ctx, &dlcpod, &client.UpdateOptions{}); err != nil {
-				return ctrl.Result{}, nil
+				return ctrl.Result{}, err
 			}
 
 			// create configmap
@@ -139,6 +139,7 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 					return ctrl.Result{}, err
 				} else {
 					if err := r.Create(ctx, &configmap, &client.CreateOptions{}); err != nil {
+						log.Error(err, fmt.Sprintf("error in creating configmap %s: %s.", configmap.Name, err.Error()))
 						return ctrl.Result{}, err
 					}
 				}
@@ -192,7 +193,7 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		newconfigmap, _ := r.createConfigMap(ctx, dlcpod)
 		if err := r.Update(ctx, &newconfigmap, &client.UpdateOptions{}); err != nil {
 			log.Error(err, fmt.Sprintf("error in updating configmap %s", req.Name))
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
@@ -238,49 +239,52 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	checkErr(err)
 	s3client := s3.NewFromConfig(cfg)
 
-	etags := map[string]map[string][]string{}
-	for _, job := range spec.Jobs {
-		loadETags := func(keys []string) []string {
-			etags_ := []string{}
-			for _, prefix := range keys {
-				worker := func(wg *sync.WaitGroup, page *s3.ListObjectsV2Output) {
-					for _, obj := range page.Contents {
-						etags_ = append(etags_, *obj.ETag)
-					}
-					wg.Done()
+	job := spec.Jobs[0]
+	loadETags := func(keys []string) []string {
+		etags := []string{}
+		if keys == nil {
+			return etags
+		}
+		for _, prefix := range keys {
+			worker := func(wg *sync.WaitGroup, page *s3.ListObjectsV2Output) {
+				for _, obj := range page.Contents {
+					etags = append(etags, *obj.ETag)
 				}
-				paginator := s3.NewListObjectsV2Paginator(s3client, &s3.ListObjectsV2Input{
-					Bucket: &job.DataSource.Bucket,
-					Prefix: &prefix,
-				})
-
-				var wg sync.WaitGroup
-				for paginator.HasMorePages() {
-					page, err := paginator.NextPage(awsctx)
-					checkErr(err) // if bucket doesn't exist, this will raise error
-					wg.Add(1)
-					go worker(&wg, page)
-				}
-				wg.Wait()
+				wg.Done()
 			}
-			return etags_
+			paginator := s3.NewListObjectsV2Paginator(s3client, &s3.ListObjectsV2Input{
+				Bucket: &job.DataSource.Bucket,
+				Prefix: &prefix,
+			})
+
+			var wg sync.WaitGroup
+			for paginator.HasMorePages() {
+				page, err := paginator.NextPage(awsctx)
+				checkErr(err) // if bucket doesn't exist, this will raise error
+				wg.Add(1)
+				go worker(&wg, page)
+			}
+			wg.Wait()
 		}
-		etags["train"]["samples"] = loadETags(job.DataSource.Keys.Train.Samples)
-		if job.DataSource.Keys.Train.Targets != nil {
-			etags["train"]["targets"] = loadETags(job.DataSource.Keys.Train.Targets)
-		}
-		if job.DataSource.Keys.Validation.Samples != nil {
-			etags["validation"]["samples"] = loadETags(job.DataSource.Keys.Validation.Samples)
-		}
-		if job.DataSource.Keys.Validation.Targets != nil {
-			etags["validation"]["targets"] = loadETags(job.DataSource.Keys.Validation.Targets)
-		}
-		if job.DataSource.Keys.Test.Samples != nil {
-			etags["test"]["samples"] = loadETags(job.DataSource.Keys.Test.Samples)
-		}
-		if job.DataSource.Keys.Test.Targets != nil {
-			etags["test"]["targets"] = loadETags(job.DataSource.Keys.Test.Targets)
-		}
+		return etags
+	}
+
+	train := job.DataSource.Keys.Train
+	val := job.DataSource.Keys.Validation
+	test := job.DataSource.Keys.Test
+	etags := map[string]map[string][]string{
+		"train": {
+			"samples": loadETags(train.Samples),
+			"targets": loadETags(train.Targets),
+		},
+		"validation": {
+			"samples": loadETags(val.Samples),
+			"targets": loadETags(val.Targets),
+		},
+		"test": {
+			"samples": loadETags(test.Samples),
+			"targets": loadETags(test.Targets),
+		},
 	}
 
 	var existingETags []string

@@ -46,8 +46,8 @@ message ResourceInfo { // Pod resource info, load from proc file system
     optional int64 GPUMemoryFree = 2;
 }
 message Dataset {
-    repeated string samples = 1;  // prefix
-    repeated string targets = 2;  // prefix
+    repeated string samples = 1;
+    repeated string targets = 2;
     optional string manifest = 3;
 }
 message JobDatasets {
@@ -58,7 +58,7 @@ message JobDatasets {
 message DataSource {
     required string name = 1;
     required string bucket = 2;
-    repeated JobDatasets keys = 3;
+    required JobDatasets keys = 3;
 }
 message QoS {
     optional bool UseCache = 1 [default = true];

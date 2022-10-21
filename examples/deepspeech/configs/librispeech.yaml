@@ -1,7 +1,5 @@
 # @package _global_
 data:
-  train_path: LibriSpeec/train/wav
-  val_path: LibriSpeec/val/wav
   num_workers: 8
   augmentation:
     spec_augment: True

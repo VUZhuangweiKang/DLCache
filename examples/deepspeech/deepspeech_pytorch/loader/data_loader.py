@@ -175,12 +175,12 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
             list(str): corresponding .txt file paths
         """
         audio_objs = []
-        transcript_paths = []
-        for wav_path in self.data:
-            transcript_path = str(wav_path).replace('/wav/', '/txt/').replace('.wav', '.txt')
-            audio_objs.append(self.data[wav_path])
-            transcript_paths.append(transcript_path)
-        return audio_objs, transcript_paths
+        transcript_objs = []
+        for wav_path in self.samples:
+            txt_path = str(wav_path).replace('/wav/', '/txt/').replace('.wav', '.txt')
+            audio_objs.append(self.samples[wav_path])
+            transcript_objs.append(self.targets[txt_path])
+        return audio_objs, transcript_objs
     
     def parse_transcript(self, transcript_path):
         with open(transcript_path, 'r', encoding='utf8') as transcript_file:
@@ -189,7 +189,7 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
         return transcript
 
     def __len__(self):
-        return len(self.data)
+        return len(self.samples)
 
 
 def _collate_fn(batch):

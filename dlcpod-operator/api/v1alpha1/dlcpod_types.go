@@ -59,16 +59,22 @@ type QoSConfigurations struct {
 }
 
 type DatasetStruct struct {
-	Samples []string `json:"samples"` // prefix
-	Targets []string `json:"targets"` // prefix
+	Samples []string `json:"samples,omitempty"`
 
-	// manifest file is optional, if it's not provided, we sort samples and targets by the key
-	Manifest string `json:"manifest"`
+	// +optional
+	Targets []string `json:"targets,omitempty"`
+
+	// +optional
+	Manifest string `json:"manifest,omitempty"`
 }
 type JobDatasetsStruct struct {
-	Train      DatasetStruct `json:"train"`
-	Validation DatasetStruct `json:"validation,omitempty"`
-	Test       DatasetStruct `json:"test,omitempty"`
+	Train DatasetStruct `json:"train"`
+
+	// +optional
+	Validation DatasetStruct `json:"validation"`
+
+	// +optional
+	Test DatasetStruct `json:"test"`
 }
 type DataSourceStruct struct {
 	Name   string            `json:"name"`

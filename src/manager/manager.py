@@ -135,8 +135,11 @@ class Manager():
             for node in node_sequence:
                 if shutil.disk_usage("/{}".format(node))[-1] >= dataobj['ChunkSize']:
                     if node != dataobj['Location']:
-                        shutil.move(src='/{}/{}'.format(dataobj['Location'], dataobj['ChunkETag']), dst='/{}/{}'.format(node, dataobj['ChunkETag']))
-                        self.dataset_col.update_one(filter={"ChunkETag": dataobj['ChunkETag']}, update={"Location": {"$set": node}})
+                        src_path = '/{}/{}'.format(dataobj['Location'], dataobj['ChunkETag'])
+                        dst_path = '/{}/{}'.format(node, dataobj['ChunkETag'])
+                        if not os.path.exists(dst_path):
+                            shutil.move(src=src_path, dst=dst_path)
+                        self.dataset_col.update_one({"ChunkETag": dataobj['ChunkETag']}, {"$set ": {"Location": node}})
                         dataobj['Location'] = node
                     return [dataobj]
             self.data_eviction(node=node_sequence[0], require=dataobj['ChunkSize'])
@@ -175,7 +178,8 @@ class Manager():
             if not miss:
                 dataobj = assignLocation(dataobj)
             path = "/%s/%s" % (dataobj['Location'], etag)
-            s3_client.download_file(bucket_name, key, path)
+            if not os.path.exists(path):
+                s3_client.download_file(bucket_name, key, path)
             obj_chunks = [dataobj]
         else:
             s3_client.download_file(Bucket=bucket_name, Key=key, Filename=key)
@@ -327,20 +331,15 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                         data_objs.extend(future.result())
                 return data_objs
 
-            train = request.datasource.keys.train
-            val = request.datasource.keys.validation
-            test = request.datasource.keys.test
-            
-            # TODO: manifest文件没有使用，应该用来将samples和targets对齐
             def match_sample_target(dataset):
                 samples = load_dataobj(dataset.samples)
-                if dataset.target:
+                if dataset.targets:
                     targets = load_dataobj(dataset.targets)
                     if dataset.manifest:
                         # manifest is a csv file
                         local_path = '/tmp/{}'.format(dataset.manifest.split('/')[-1])
                         s3_client.download_file(bucket_name, dataset.manifest, local_path)
-                        
+                        # TODO: manifest文件没有使用，应该用来将samples和targets对齐
                         os.remove(local_path)
                     else:
                         samples.sort(key=lambda x: x['Key'])
@@ -350,13 +349,13 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                 return {'samples': samples, 'targets': targets}
             
             dataset_objs = {
-                'train': match_sample_target(train),
-                'validation': match_sample_target(val),
-                'test': match_sample_target(test)
+                'train': match_sample_target(request.datasource.keys.train),
+                'validation': match_sample_target(request.datasource.keys.validation),
+                'test': match_sample_target(request.datasource.keys.test)
             }
             
             # save jobinfo to database
-            dataset_etags = defaultdict(defaultdict(list))
+            dataset_etags = defaultdict(dict)
             for a in dataset_objs:
                 for b in dataset_objs[a]:
                     dataobjs = dataset_objs[a][b]

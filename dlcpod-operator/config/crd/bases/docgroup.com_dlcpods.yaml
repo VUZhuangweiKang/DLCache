@@ -88,9 +88,6 @@ spec:
                             test:
                               properties:
                                 manifest:
-                                  description: manifest file is optional, if it's
-                                    not provided, we sort samples and targets by the
-                                    key
                                   type: string
                                 samples:
                                   items:
@@ -100,17 +97,10 @@ spec:
                                   items:
                                     type: string
                                   type: array
-                              required:
-                              - manifest
-                              - samples
-                              - targets
                               type: object
                             train:
                               properties:
                                 manifest:
-                                  description: manifest file is optional, if it's
-                                    not provided, we sort samples and targets by the
-                                    key
                                   type: string
                                 samples:
                                   items:
@@ -120,17 +110,10 @@ spec:
                                   items:
                                     type: string
                                   type: array
-                              required:
-                              - manifest
-                              - samples
-                              - targets
                               type: object
                             validation:
                               properties:
                                 manifest:
-                                  description: manifest file is optional, if it's
-                                    not provided, we sort samples and targets by the
-                                    key
                                   type: string
                                 samples:
                                   items:
@@ -140,10 +123,6 @@ spec:
                                   items:
                                     type: string
                                   type: array
-                              required:
-                              - manifest
-                              - samples
-                              - targets
                               type: object
                           required:
                           - train
