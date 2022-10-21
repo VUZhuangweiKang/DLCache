@@ -33,15 +33,21 @@ class DLCJobDataset(Dataset):
         iteratable variables that can be iterated in meth:`__get_item__`.
         
         Args:
-            dtype: dataset type, including train, validation, test
+            dtype: dataset type, train/validation/test for supervised and unsupervised training/testing
         """
-        self.dtype = dtype            
+        if dtype not in ["train", "validation", "test", 
+                         "train/samples", "validation/samples", "test/samples"]:
+            raise ValueError("invalid dataset type".format(dtype))
+        
+        self.dtype = dtype.split('/')
         while not os.path.exists(jobinfo): pass
         with open(jobinfo, 'rb') as f:
             job_meta = json.load(f)
         self.qos = job_meta['qos']
         self.bucket = job_meta['datasource']['bucket']
         self.chunks = []
+        self.samples = {}
+        self.targets = {}
         
         if self.qos['UseCache']:
             from pymongo.mongo_client import MongoClient
@@ -67,7 +73,6 @@ class DLCJobDataset(Dataset):
         self.load_data(chunk_idx=0)
         
         self.miss_queue = Queue()
-        self.lock = Lock()
         self.unused_idx = set(list(range(self.__len__())))
 
     def try_get_item(self, idx):
@@ -75,9 +80,11 @@ class DLCJobDataset(Dataset):
             if len(self.unused_idx) == 0:
                 self.unused_idx = set(list(range(self.__len__())))
             
-            dataobj, targetobj = self.samples[idx], self.targets[idx]
+            dataobj, targetobj = self.samples[idx], self.targets[idx] if self.targets else None                
             if self.qos['UseCache']:
-                def helper(obj, func):
+                def helper(obj, reader):
+                    if obj is None:
+                        return None
                     etag, loc = obj['ChunkETag'], obj['Location']
                     nfs_path = '/{}/{}'.format(loc, etag)
                     tmpfs_path = '/runtime{}'.format(nfs_path)
@@ -87,10 +94,10 @@ class DLCJobDataset(Dataset):
                     
                     # 3-level data hit
                     if os.path.exists(tmpfs_path):
-                        read_val = func(tmpfs_path)
+                        read_val = reader(tmpfs_path)
                         # print("read tmpfs file {}".format(tmpfs_path))
                     elif os.path.exists(nfs_path):
-                        read_val = func(nfs_path)
+                        read_val = reader(nfs_path)
                         # print("miss tmpfs file {}".format(tmpfs_path))
                     else:
                         # substitutable cache hit
@@ -104,14 +111,16 @@ class DLCJobDataset(Dataset):
                                 sub_idx = random.randint(0, self.__len__()-1)
                             else:
                                 sub_idx = random.choice(list(self.unused_idx))
+                                                            
                             sub_etag, sub_loc = self.samples[sub_idx]['ChunkETag'], self.samples[sub_idx]['Location']
                             p =  '/{}/{}'.format(sub_loc, sub_etag)
                             if os.path.exists(p):
-                                self.miss_queue.put([[idx, etag], [sub_idx, sub_etag]])
+                                self.miss_queue.put([[idx, etag], sub_idx])
                                 read_idx = sub_idx
                                 break
                             else:
-                                self.miss_queue.put([[sub_idx, sub_etag], [sub_idx, sub_etag]])
+                                self.miss_queue.put([[sub_idx, sub_etag], sub_idx])
+                        
                         read_val = self.try_get_item(sub_idx)
                     
                     if read_idx is not None and read_idx in self.unused_idx:
@@ -130,11 +139,16 @@ class DLCJobDataset(Dataset):
             return self.samples[idx], self.targets[idx] if self.targets else None
 
     def loadKeysFromDLCache(self):
-        maxmem = self.qos['MaxMemoryMill']*1e6  
-        etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags'][self.dtype]
-        sample_objs = self.dataset_col.find({"ETag": {"$in": etags['samples']}})
-        target_objs = self.dataset_col.find({"ETag": {"$in": etags['targets']}})
-        chunks = list(zip(sample_objs, target_objs))
+        maxmem = self.qos['MaxMemoryMill']*1e6
+        if len(self.dtype) == 1:
+            etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags'][self.dtype[0]]
+            sample_objs = self.dataset_col.find({"ETag": {"$in": etags['samples']}})
+            target_objs = self.dataset_col.find({"ETag": {"$in": etags['targets']}})
+            chunks = list(zip(sample_objs, target_objs))
+        else:
+            etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags'][self.dtype[0]][self.dtype[1]]
+            objs = self.dataset_col.find({"ETag": {"$in": etags}})
+            chunks = list(zip(objs, [None] * len(objs)))
         
         if maxmem == 0 or self.qos['LazyLoading']:
             self.chunks.append(chunks)
@@ -142,39 +156,41 @@ class DLCJobDataset(Dataset):
             total_size = 0
             self.chunks.append([])
             for sample, target in chunks:
-                s = int(sample['Size']) + int(target['Size'])
+                s = 0
+                if sample:
+                    s += int(sample['Size'])
+                if target:
+                    s += int(target['Size'])
                 total_size += s
                 # any single chunk should be smaller than the MaxMemory
                 if total_size >= maxmem:
                     self.chunks.append([])
                     total_size = 0
                 elif s > maxmem:
-                    raise Exception('Object pair ({}, {}) size is greater than assigned MaxMemory.'.format(sample['Key'], target['Key']))
+                    raise Exception('Object size is greater than assigned MaxMemory.')
                 else:
                     self.chunks[-1].append((sample, target))
         
     def loadKeysFromCloud(self):
         paginator = self.client.get_paginator('list_objects_v2')       
         def load_pages(keys):
-            if keys is not None:
+            if keys:
                 pages = []
                 for k in keys:
                     pages.extend(paginator.paginate(Bucket=self.bucket, Prefix=k))
                 return pages
             return None
 
-        keys = self.job_col.find_one({"Meta.JobId": self.jobId})['Datasource'][self.dtype]
-        sample_pages = load_pages(keys['samples'])
-        if sample_pages is None:
-            sample_pages = paginator.paginate(Bucket=self.bucket)
-        if keys['targets']:
-            target_pages = load_pages(keys['targets'])
-
+        keys = self.job_col.find_one({"Meta.JobId": self.jobId})['Datasource']['keys'][self.dtype[0]]
+        sample_pages = None
+        target_pages = None
         maxmem = self.qos['MaxMemoryMill']*1e6
         maxmem = math.inf if maxmem==0 else maxmem
         total_size = 0
         self.chunks.append([])
         
+        sample_pages = load_pages(keys['samples'])
+        target_pages = load_pages(keys['targets']) if len(self.dtype) == 1 else None
         for i in range(len(sample_pages)):
             for j in range(len(sample_pages[i]['Contents'])):
                 sample = sample_pages[i]["Contents"][j]
@@ -199,29 +215,19 @@ class DLCJobDataset(Dataset):
             chunk_idx (int): file-based (LazyLoading) dataset only has one chunk, so the chunk_idx = 0
                              tabular dataset split file to multiple chunks
         """
-        self.samples = {}
-        self.targets = {}
-        if self.qos['LazyLoading']:
-            # file-based dataset only has one chunk, so the chunk_idx = 0
-            for sampleobj, targetobj in self.chunks[chunk_idx]:
-                self.samples[sampleobj['Key']] = sampleobj
-                if targetobj:
-                    self.targets[targetobj['Key']] = targetobj
-                    self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])])
-                else:
-                    self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), None])
-        else:
-            # Normal mode fits tabular or block datasets, so we load a subset of the original dataset here
-            # TODO: 如果数据丢失怎么办？？？？
-            for sampleobj, targetobj in self.chunks[chunk_idx]:
+        for sampleobj, targetobj in self.chunks[chunk_idx]:
+            nfspath = [None, None]
+            if sampleobj:
                 sample_path = '/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag'])
-                self.samples[sampleobj['Key']] = self.__sample_reader__(sample_path)
-                if targetobj:
-                    target_path =  '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])
-                    self.targets[targetobj['Key']] = self.__target_reader__(target_path)
-                    self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])])
-                else:
-                    self.nfsFilePaths.append(['/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag']), None])
+                nfspath[0] = sample_path
+                self.samples[sampleobj['Key']] = sampleobj if self.qos['LazyLoading'] else self.__sample_reader__(sample_path)
+                
+            if targetobj:
+                target_path =  '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])
+                nfspath[1] = target_path
+                self.targets[targetobj['Key']] = targetobj if self.qos["LazyLoading"] else self.__target_reader__(target_path)
+                        
+            self.nfsFilePaths.append(nfspath)
 
         self.samples, self.targets = self.__process__()
 
@@ -415,8 +421,8 @@ class DLCJobDataLoader(object):
             info = self.torch_loader.dataset.miss_queue.get()
             if info is not None:
                 miss_idx, miss_etag = info[0]
-                sub_idx, sub_etag = info[1]
-                msg = "{}:{} {}:{}".format(miss_idx, miss_etag, sub_idx, sub_etag)
+                sub_idx = info[1]
+                msg = "{}:{} {}".format(miss_idx, miss_etag, sub_idx)
                 socket.send_multipart([b'dataMiss', msg.encode('utf-8')])
     
     def __iter__(self):

@@ -15,7 +15,7 @@ from deepspeech_pytorch.validation import run_evaluation
 @dataclass
 class OptimizerConfig:
     model_path: str = ''
-    test_path: str = ''  # Path to test manifest or csv
+    dtype: str = 'test'  # Path to test manifest or csv
     is_character_based: bool = True  # Use CER or WER for finding optimal parameters
     lm_path: str = ''
     beam_width: int = 10
@@ -64,7 +64,6 @@ class Objective(object):
 
         test_dataset = SpectrogramDataset(
             audio_conf=self.cfg.spect_cfg,
-            # input_path=hydra.utils.to_absolute_path(cfg.test_path),
             dtype='test',
             labels=self.labels,
             normalize=True

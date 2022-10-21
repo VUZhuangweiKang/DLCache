@@ -218,9 +218,8 @@ class Client(object):
                             self.prefetch_idx += 1
                         self.cache_size = capacity
                 elif topic == "dataMiss":
-                    miss_info, sub_info = data.split(' ')
+                    miss_info, sub_idx = data.split(' ')
                     miss_idx, miss_etag = miss_info.split(":")
-                    sub_idx, sub_etag = sub_info.split(':')
                     miss_idx, sub_idx = int(miss_idx), int(sub_idx)
                     self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size], self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size] = self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size], self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size]
                     self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
@@ -228,7 +227,7 @@ class Client(object):
                     batch_idx = int(data)
                     if batch_idx < len(self.nfs_paths):
                         for sample_path, target_path in self.nfs_paths[batch_idx]:
-                            def helper(path):
+                            def release(path):
                                 tmpfspath = '/runtime' + path
                                 if not os.path.exists(tmpfspath): return
                                 etag = tmpfspath.split('/')[-1]
@@ -241,9 +240,9 @@ class Client(object):
                                     })
                                 if os.path.exists(tmpfspath):
                                     os.remove(tmpfspath)
-                            helper(sample_path)
+                            release(sample_path)
                             if target_path:
-                                helper(target_path)
+                                release(target_path)
 
 
 if __name__ == '__main__':
