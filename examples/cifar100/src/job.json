@@ -1,0 +1,12 @@
+{
+   
+  "qos":{
+    "UseCache": false,
+    "maxmemorymill": 0,
+    "lazyloading": true},
+  "dataSource":{
+    "name": "Imagenet-Mini",
+    "bucket": "zhuangwei-bucket",
+    "keys":["imagenet-mini/train","imagenet-mini/val"]
+  }
+}
