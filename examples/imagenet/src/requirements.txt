@@ -1,5 +1,0 @@
-torch
-torchvision
-boto3
-pymongo
-zmq

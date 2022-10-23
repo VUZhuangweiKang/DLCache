@@ -1,0 +1,28 @@
+apiVersion: docgroup.com/v1alpha1
+kind: DLCPod
+metadata:
+  name: imagenet
+  namespace: default
+spec:
+  secret:
+    name: dlcpod-client-credentials
+  jobs:
+  - name: job
+    image: zhuangweikang/imagedatasets-dev:latest
+    command: ["bash"]
+    datasource:
+      name: Imagenet-Mini-Obj
+      bucket: vuzhuangwei
+      keys:
+        train:
+          samples:
+            - Imagenet-Mini-Obj/train
+        validation:
+          samples:
+            - Imagenet-Mini-Obj/val
+    qos:
+      usecache: true
+      maxmemorymill: 10000
+      lazyloading: true
+    tty: true
+    stdin: true

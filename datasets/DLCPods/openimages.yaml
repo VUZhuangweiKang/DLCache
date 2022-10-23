@@ -1,0 +1,28 @@
+apiVersion: docgroup.com/v1alpha1
+kind: DLCPod
+metadata:
+  name: openimage
+  namespace: default
+spec:
+  secret:
+    name: dlcpod-client-credentials
+  jobs:
+  - name: job
+    image: zhuangweikang/imagedatasets-dev:latest
+    command: ["bash"]
+    datasource:
+      name: OpenImages
+      bucket: vuzhuangwei
+      keys:
+        train:
+          samples:
+            - OpenImages/train
+        validation:
+          samples:
+            - OpenImages/val
+    qos:
+      usecache: true
+      maxmemorymill: 10000
+      lazyloading: true
+    tty: true
+    stdin: true

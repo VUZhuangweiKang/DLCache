@@ -1,8 +1,0 @@
-torch
-torchvision
-boto3
-pymongo
-zmq
-numpy
-PIL
-
