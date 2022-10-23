@@ -20,7 +20,7 @@ import torchvision.transforms as transforms
 import torchvision.models as models
 from torch.utils.data import Subset
 from ImageNetMiniDataset import *
-from dlcjob.src.DLCJob import *
+from DLCJob import *
 
 
 model_names = sorted(name for name in models.__dict__
@@ -221,7 +221,7 @@ def main_worker(gpu, ngpus_per_node, args):
     ])
     
     t = time.time()
-    val_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/val'], transform=transform)
+    val_dataset = ImageNetDataset(dtype='validation/samples', transform=transform)
     print('dataset init time: ', time.time()-t)
     
     if args.distributed:
@@ -238,8 +238,7 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
     else:
-        # train_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/train'], transform=transform)
-        train_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/val'], transform=transform)  # for test only
+        train_dataset = ImageNetDataset(dtype='train/samples', transform=transform)  # for test only
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         else:

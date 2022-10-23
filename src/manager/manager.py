@@ -1,3 +1,5 @@
+# TODO: client 注册之后等待时间特别长，可能是move data函数太慢
+
 from collections import defaultdict
 import concurrent.futures
 import os
@@ -399,7 +401,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                                 if not obj['Exist']:
                                     # we also perform data eviction in the clone_dataobj function if pre-allocated space is occupied by other jobs
                                     futures.append(executor.submit(self.manager.clone_dataobj, obj, s3_client, bucket_name, request.qos.MaxMemoryMill, node_seq))
-                                else:
+                                elif obj['Location'] != node_seq[0]:
                                     # move the data to a node in nodesequence
                                     futures.append(executor.submit(self.manager.move_data, obj, node_seq))
 

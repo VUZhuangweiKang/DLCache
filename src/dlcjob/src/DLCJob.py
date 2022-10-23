@@ -85,6 +85,7 @@ class DLCJobDataset(Dataset):
                 def helper(obj, reader):
                     if obj is None:
                         return None
+                    
                     etag, loc = obj['ChunkETag'], obj['Location']
                     nfs_path = '/{}/{}'.format(loc, etag)
                     tmpfs_path = '/runtime{}'.format(nfs_path)
@@ -127,7 +128,8 @@ class DLCJobDataset(Dataset):
                         self.unused_idx.remove(read_idx)
                     return read_val
                 
-                sample, target = helper(dataobj, self.__sample_reader__), helper(targetobj, self.__target_reader__)
+                sample = helper(dataobj, self.__sample_reader__)
+                target = helper(targetobj, self.__target_reader__) if len(self.dtype) == 1 else targetobj
                 return sample, target
             else:
                 sample = self.client.get_object(Bucket=self.bucket, Key=dataobj['Key'])['Body'].read()
@@ -147,7 +149,7 @@ class DLCJobDataset(Dataset):
             chunks = list(zip(sample_objs, target_objs))
         else:
             etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags'][self.dtype[0]][self.dtype[1]]
-            objs = self.dataset_col.find({"ETag": {"$in": etags}})
+            objs = list(self.dataset_col.find({"ETag": {"$in": etags}}))
             chunks = list(zip(objs, [None] * len(objs)))
         
         if maxmem == 0 or self.qos['LazyLoading']:
@@ -253,7 +255,7 @@ class DLCJobDataset(Dataset):
         Raises:
             NotImplementedError: _description_
         """
-        raise NotImplementedError
+        pass
     
     def __process__(self) -> Tuple[List, List]:
         """process self.samples ans self.target
@@ -375,7 +377,7 @@ class DLCJobDataLoader(object):
         self.generator = generator
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
-        self.num_batches = math.ceil(len(self.dataset.data)/batch_size)
+        self.num_batches = math.ceil(len(self.dataset.samples)/batch_size)
         
         self.lazy = self.dataset.qos['LazyLoading']
         self.chunk_idx = 0
