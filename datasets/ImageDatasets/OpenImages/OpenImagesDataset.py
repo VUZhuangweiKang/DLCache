@@ -1,3 +1,4 @@
+# TODO: OpenImage 不能使用find_class方法确定image的label, 需要修改
 from ImageDataset import *
 from torchvision import transforms
 from PIL import Image

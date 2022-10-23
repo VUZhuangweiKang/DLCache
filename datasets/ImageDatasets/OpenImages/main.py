@@ -232,7 +232,7 @@ def main_worker(gpu, ngpus_per_node, args):
     
     t = time.time()
     random_seed = int(time.time())
-    dataset_test = OpenImagesDataset(keys=['OpenImageSubset/val'], is_train = False, random_seed=random_seed, num_classes = 10)
+    dataset_test = OpenImagesDataset(dtype='test/samples')
     print('dataset init time: ', time.time()-t)
     
     if args.distributed:
@@ -244,14 +244,12 @@ def main_worker(gpu, ngpus_per_node, args):
     data_loader_test = DLCJobDataLoader(dataset_test, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
     print('dataloader init time: ', time.time()-t)
 
-    
-
     if args.evaluate:
         validate(data_loader_test, model, criterion, args)
         return
     else:
         # train_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/train'], transform=transform)
-        dataset_train = OpenImagesDataset(keys=['OpenImageSubset/train'], is_train = True, random_seed=random_seed, num_classes = 10)  # for test only
+        dataset_train = OpenImagesDataset(dtype='train/samples')  # for test only
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
         else:

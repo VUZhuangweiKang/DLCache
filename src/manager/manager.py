@@ -135,15 +135,18 @@ class Manager():
     def move_data(self, dataobj, node_sequence):
         while True:
             for node in node_sequence:
-                if shutil.disk_usage("/{}".format(node))[-1] >= dataobj['ChunkSize']:
+                # if shutil.disk_usage("/{}".format(node))[-1] >= dataobj['ChunkSize']:
+                try:
                     if node != dataobj['Location']:
                         src_path = '/{}/{}'.format(dataobj['Location'], dataobj['ChunkETag'])
                         dst_path = '/{}/{}'.format(node, dataobj['ChunkETag'])
                         if not os.path.exists(dst_path):
-                            shutil.move(src=src_path, dst=dst_path)
-                        self.dataset_col.update_one({"ChunkETag": dataobj['ChunkETag']}, {"$set ": {"Location": node}})
+                            os.rename(src=src_path, dst=dst_path)
+                        self.dataset_col.update_one({"ChunkETag": dataobj['ChunkETag']}, {"$set": {"Location": node}})
                         dataobj['Location'] = node
                     return [dataobj]
+                except OSError:  # handle the case that the node is out of space
+                    continue
             self.data_eviction(node=node_sequence[0], require=dataobj['ChunkSize'])
     
     def clone_dataobj(self, dataobj: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None, miss=False):
