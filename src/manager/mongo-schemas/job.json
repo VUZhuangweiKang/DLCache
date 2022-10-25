@@ -81,7 +81,7 @@
             },
             "description": "QoS configuration"
         },
-        "ETags": {
+        "ChunkETags": {
             "bsonType": "object",
             "properties": {
                 "train": {
@@ -89,7 +89,8 @@
                     "required": ["samples"],
                     "properties": {
                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
-                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
+                        "manifest": {"bsonType": "string"}
                     }
                 },
                 "validation": {
@@ -97,7 +98,8 @@
                     "required": ["samples"],
                     "properties": {
                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
-                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
+                        "manifest": {"bsonType": "string"}
                     }
                 },
                 "test": {
@@ -105,7 +107,8 @@
                     "required": ["samples"],
                     "properties": {
                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
-                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
+                        "manifest": {"bsonType": "string"}
                     }
                 }
             }

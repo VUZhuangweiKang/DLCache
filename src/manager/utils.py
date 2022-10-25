@@ -109,4 +109,3 @@ def copyfile(src, dst):
     if not os.path.exists(base_dir):
         os.system('mkdir -p {}'.format(base_dir))
     shutil.copy(src, dst)
-    

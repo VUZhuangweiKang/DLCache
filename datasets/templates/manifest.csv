@@ -1,0 +1,5 @@
+sample,sample_chunk,target,target_chunk
+5328.png,CIFAR100/train/11.tar.gz,11,
+34909.png,CIFAR100/train/11.tar.gz,11,
+27369.png,CIFAR100/train/11.tar.gz,11,
+16448.png,CIFAR100/train/11.tar.gz,11,

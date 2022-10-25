@@ -13,6 +13,11 @@
         "LastModified": {"bsonType": "timestamp"},
         "TotalAccessTime": {"bsonType": "int"},
         "LastAccessTime": {"bsonType": "timestamp"},
+        "Files": {
+            "bsonType": "array",
+            "items": {
+            "bsonType": "string"}
+        },
         "Jobs": {
             "bsonType": "array",
             "items": {

@@ -80,15 +80,12 @@ class DLCJobDataset(Dataset):
             if len(self.unused_idx) == 0:
                 self.unused_idx = set(list(range(self.__len__())))
             
-            dataobj, targetobj = self.samples[idx], self.targets[idx] if self.targets else None                
+            sample_path, target_path = self.samples[idx], self.targets[idx] if self.targets else None                
             if self.qos['UseCache']:
-                def helper(obj, reader):
-                    if obj is None:
+                def helper(path, reader):
+                    if path is None:
                         return None
-                    
-                    etag, loc = obj['ChunkETag'], obj['Location']
-                    nfs_path = '/{}/{}'.format(loc, etag)
-                    tmpfs_path = '/runtime{}'.format(nfs_path)
+                    tmpfs_path = '/runtime{}'.format(path)
                     
                     read_idx = idx
                     read_val = None
@@ -97,29 +94,29 @@ class DLCJobDataset(Dataset):
                     if os.path.exists(tmpfs_path):
                         read_val = reader(tmpfs_path)
                         # print("read tmpfs file {}".format(tmpfs_path))
-                    elif os.path.exists(nfs_path):
-                        read_val = reader(nfs_path)
+                    elif os.path.exists(path):
+                        read_val = reader(path)
                         # print("miss tmpfs file {}".format(tmpfs_path))
                     else:
                         # substitutable cache hit
                         # 1. randomly select an unused data point
                         # 2. replace the idx with sub_idx
                         # 3. socket in data loader notify client to update data access sequence
-                        print('miss nfs file {}'.format(nfs_path))
+                        print('miss nfs file {}'.format(path))
                         while True:
-                            # TODO： 当有多个worker同时load数据时，sub_idx可能重复， 但是如果上锁，会让并行worker串行，影响速度
                             if len(self.unused_idx) == 0:
                                 sub_idx = random.randint(0, self.__len__()-1)
                             else:
                                 sub_idx = random.choice(list(self.unused_idx))
                                                             
-                            sub_etag, sub_loc = self.samples[sub_idx]['ChunkETag'], self.samples[sub_idx]['Location']
-                            p =  '/{}/{}'.format(sub_loc, sub_etag)
-                            if os.path.exists(p):
+                            sub_path = self.samples[sub_idx]
+                            if os.path.exists(sub_path):
+                                etag = path.split('/')[1]
                                 self.miss_queue.put([[idx, etag], sub_idx])
                                 read_idx = sub_idx
                                 break
                             else:
+                                sub_etag = sub_path.split("/")[1]
                                 self.miss_queue.put([[sub_idx, sub_etag], sub_idx])
                         
                         read_val = self.try_get_item(sub_idx)
@@ -128,33 +125,35 @@ class DLCJobDataset(Dataset):
                         self.unused_idx.remove(read_idx)
                     return read_val
                 
-                sample = helper(dataobj, self.__sample_reader__)
-                target = helper(targetobj, self.__target_reader__) if len(self.dtype) == 1 else targetobj
+                sample = helper(sample_path, self.__sample_reader__)
+                target = helper(target_path, self.__target_reader__) if len(self.dtype) == 1 else target_path
                 return sample, target
             else:
-                sample = self.client.get_object(Bucket=self.bucket, Key=dataobj['Key'])['Body'].read()
+                # TODO: 如果不使用Cache, self.samples中存的应该是Key
+                sample = self.client.get_object(Bucket=self.bucket, Key=sample_path)['Body'].read()
                 if self.targetobj:
-                    target = self.client.get_object(Bucket=self.bucket, Key=targetobj['Key'])['Body'].read()
+                    target = self.client.get_object(Bucket=self.bucket, Key=target_path)['Body'].read()
                     return sample, target
                 return sample, None
         else:
             return self.samples[idx], self.targets[idx] if self.targets else None
 
+    # this function initialize the self.chunks list, items are dict tuples
     def loadKeysFromDLCache(self):
         maxmem = self.qos['MaxMemoryMill']*1e6
+        chunk_etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ChunkETags'][self.dtype[0]]
         if len(self.dtype) == 1:
-            etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags'][self.dtype[0]]
-            sample_objs = self.dataset_col.find({"ETag": {"$in": etags['samples']}})
-            target_objs = self.dataset_col.find({"ETag": {"$in": etags['targets']}})
-            chunks = list(zip(sample_objs, target_objs))
+            sample_chunks = self.dataset_col.find({"ChunkETag": {"$in": chunk_etags['samples']}})
+            target_chunks = self.dataset_col.find({"ChunkETag": {"$in": chunk_etags['targets']}})
+            chunks = list(zip(sample_chunks, target_chunks))
         else:
-            etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ETags'][self.dtype[0]][self.dtype[1]]
-            objs = list(self.dataset_col.find({"ETag": {"$in": etags}}))
+            objs = list(self.dataset_col.find({"ChunkETag": {"$in": chunk_etags[self.dtype[1]]}}))
             chunks = list(zip(objs, [None] * len(objs)))
         
         if maxmem == 0 or self.qos['LazyLoading']:
             self.chunks.append(chunks)
         else:
+            # 此处处理大数据文件被manager切片的情况
             total_size = 0
             self.chunks.append([])
             for sample, target in chunks:
@@ -173,6 +172,7 @@ class DLCJobDataset(Dataset):
                 else:
                     self.chunks[-1].append((sample, target))
         
+    # dataset shouldn't be compressed when using this function
     def loadKeysFromCloud(self):
         paginator = self.client.get_paginator('list_objects_v2')       
         def load_pages(keys):
@@ -209,27 +209,50 @@ class DLCJobDataset(Dataset):
 
     def load_data(self, chunk_idx):
         """Load file paths or actual data in the given chunk 
-        initialize the self.samples and self.samples_keys, where self.samples is a dict with format {key: dataobj}
-        user performs data (X and y) pre-processing in the __process__ function, that convert self.samples from
+        initialize the self.samples and self.targets, where self.samples is a dict with format {key: file_path/data}
+        user performs data (X and y) processing in the __process__ function, that convert self.samples from
         dict to iteratable X, y
+        
+        If the chunk is a compressed datablock, we generate a dummy key for individual files.
+        We start operating on individual data items from this function. Before this, all operations are on chunks.
         
         Args:
             chunk_idx (int): file-based (LazyLoading) dataset only has one chunk, so the chunk_idx = 0
                              tabular dataset split file to multiple chunks
         """
-        for sampleobj, targetobj in self.chunks[chunk_idx]:
+        for sample_chunk, target_chunk in self.chunks[chunk_idx]:
             nfspath = [None, None]
-            if sampleobj:
-                sample_path = '/{}/{}'.format(sampleobj['Location'], sampleobj['ChunkETag'])
+            lazy = self.qos['LazyLoading']
+            sample_key, target_key = sample_chunk['Key'], target_chunk['Key'] if target_chunk else None
+            sample_loc, target_loc = sample_chunk['Location'], target_chunk['Location'] if target_chunk else None
+            sample_etag, target_etag = sample_chunk['ChunkETag'], target_chunk['ChunkETag'] if target_chunk else None
+
+            # files are compressed as chunks
+            if 'Files' in sample_chunk:
+                for i in range(len(sample_chunk["Files"])):
+                    sample_file = sample_chunk['Files'][i]
+                    sample_path = '/{}/{}/{}'.format(sample_loc, sample_etag, sample_file)
+                    nfspath[0] = sample_path
+                    dummy_key = '{}/{}'.format(sample_key, sample_file)
+                    self.samples[dummy_key] = sample_path if lazy else self.__sample_reader__(sample_path)
+                    
+                    if target_chunk:
+                        target_file = target_chunk['Files'][i]
+                        target_path = '/{}/{}/{}'.format(target_loc, target_etag, target_file)
+                        nfspath[1] = target_path
+                        dummy_key = '{}/{}'.format(target_key, target_file)
+                        self.targets[dummy_key] = target_path if lazy else self.__target_reader__(target_path)
+                    self.nfsFilePaths.append(nfspath) 
+            else:
+                sample_path = '/{}/{}'.format(sample_loc, sample_etag)
                 nfspath[0] = sample_path
-                self.samples[sampleobj['Key']] = sampleobj if self.qos['LazyLoading'] else self.__sample_reader__(sample_path)
+                self.samples[sample_key] = sample_path if lazy else self.__sample_reader__(sample_path)
                 
-            if targetobj:
-                target_path =  '/{}/{}'.format(targetobj['Location'], targetobj['ChunkETag'])
-                nfspath[1] = target_path
-                self.targets[targetobj['Key']] = targetobj if self.qos["LazyLoading"] else self.__target_reader__(target_path)
-                        
-            self.nfsFilePaths.append(nfspath)
+                if target_chunk:
+                    target_path = '/{}/{}'.format(target_loc, target_etag)
+                    nfspath[1] = target_path
+                    self.targets[target_key] = target_path if lazy else self.__target_reader__(target_path)
+                self.nfsFilePaths.append(nfspath)
 
         self.samples, self.targets = self.__process__()
 

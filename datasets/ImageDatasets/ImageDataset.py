@@ -25,7 +25,7 @@ class ImageDataset(DLCJobDataset):
     def __process__(self):
         samples = []
         targets = []
-        keys = [self.samples[etag]['Key'] for etag in self.samples]
+        keys = list(self.samples.values())
         cls_keys, classes = self.find_classes(keys)
         for i, class_name in enumerate(classes):
             for key in cls_keys[class_name]:
