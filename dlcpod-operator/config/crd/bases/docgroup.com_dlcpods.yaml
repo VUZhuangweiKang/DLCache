@@ -538,13 +538,13 @@ spec:
                     qos:
                       description: QoS configuration of the job from ConfigMap
                       properties:
-                        lazyloading:
-                          description: Load data in a lazy way
-                          type: boolean
-                        maxmemorymill:
+                        MaxPartMill:
                           description: Max size of the tmpfs folder
                           format: int64
                           type: integer
+                        lazyloading:
+                          description: Load data in a lazy way
+                          type: boolean
                         usecache:
                           description: Whether to use Cache or s3
                           type: boolean

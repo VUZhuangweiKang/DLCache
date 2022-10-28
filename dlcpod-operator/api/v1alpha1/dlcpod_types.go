@@ -55,7 +55,7 @@ type QoSConfigurations struct {
 
 	// Max size of the tmpfs folder
 	// +optional
-	MaxMemoryMill int64 `json:"maxmemorymill"`
+	MaxPartMill int64 `json:"MaxPartMill"`
 }
 
 type DatasetStruct struct {

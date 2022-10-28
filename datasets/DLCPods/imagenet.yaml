@@ -16,13 +16,15 @@ spec:
       keys:
         train:
           samples:
-            - Imagenet-Mini-Obj/train
+            - Imagenet-Mini/train/samples
+          manifest: Imagenet-Mini/train/manifest.csv
         validation:
           samples:
-            - Imagenet-Mini-Obj/val
+            - Imagenet-Mini/val/samples
+          manifest: Imagenet-Mini/val/manifest.csv
     qos:
       usecache: true
-      maxmemorymill: 10000
+      MaxPartMill: 10000
       lazyloading: true
     tty: true
     stdin: true

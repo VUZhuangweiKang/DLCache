@@ -36,21 +36,24 @@
                                     "required": ["samples"],
                                     "properties": {
                                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
-                                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
+                                        "manifest": {"bsonType": "string"}
                                     }
                                 },
                                 "validation": {
                                     "bsonType": "object",
                                     "properties": {
                                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
-                                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
+                                        "manifest": {"bsonType": "string"}
                                     }
                                 },
                                 "test": {
                                     "bsonType": "object",
                                     "properties": {
                                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
-                                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}}
+                                        "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
+                                        "manifest": {"bsonType": "string"}
                                     }
                                 }
                             }
@@ -72,12 +75,12 @@
             "required": [
                 "UseCache",
                 "LazyLoading",
-                "MaxMemoryMill"
+                "MaxPartMill"
             ],
             "properties": {
                 "UseCache": {"bsonType": "bool"},
                 "LazyLoading": {"bsonType": "bool"},
-                "MaxMemoryMill": {"bsonType": "int"}
+                "MaxPartMill": {"bsonType": "int"}
             },
             "description": "QoS configuration"
         },
@@ -110,6 +113,23 @@
                         "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
                         "manifest": {"bsonType": "string"}
                     }
+                }
+            }
+        },
+        "Manifests": {
+            "bsonType": "object",
+            "properties": {
+                "train": {
+                    "bsonType": "array",
+                    "items": {"bsonType": "byte"}
+                },
+                "validation": {
+                    "bsonType": "array",
+                    "items": {"bsonType": "byte"}
+                },
+                "test": {
+                    "bsonType": "array",
+                    "items": {"bsonType": "byte"}
                 }
             }
         }

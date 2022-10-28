@@ -7,3 +7,4 @@ protobuf
 pytz
 hazelcast-python-client
 pyyaml
+pandas

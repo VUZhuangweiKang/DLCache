@@ -4,7 +4,7 @@ import math
 import random
 import numpy as np
 import zmq
-from multiprocessing import Process, Queue, Lock
+from multiprocessing import Process, Queue
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
@@ -43,19 +43,29 @@ class DLCJobDataset(Dataset):
         while not os.path.exists(jobinfo): pass
         with open(jobinfo, 'rb') as f:
             job_meta = json.load(f)
-        self.qos = job_meta['qos']
+
         self.bucket = job_meta['datasource']['bucket']
-        self.chunks = []
+        self.lazy = job_meta['qos']['LazyLoading']
+        self.usecache = job_meta['qos']['UseCache']
+        self.maxpart = job_meta['qos']['MaxPartMill'] * 1e6
+        if self.maxpart == 0:
+            self.maxpart = math.inf
+        
+        self.sample_chunks = []
+        self.target_chunks = []
+        
         self.samples = {}
         self.targets = {}
         
-        if self.qos['UseCache']:
+        if self.usecache:
             from pymongo.mongo_client import MongoClient
+            import pandas as pd
             mongo_client = MongoClient(job_meta['mongoUri'])
-            self.jobId = job_meta['jobId']
-            self.job_col = mongo_client.Cacher.Job
+            self.job_info = mongo_client.Cacher.Job.find_one({"Meta.JobId": job_meta['jobId']})
             self.dataset_col = mongo_client.Cacher.Datasets
-            self.loadKeysFromDLCache()
+            manifest = self.job_info['Manifests'][self.dtype[0]]
+            self.manifest = pd.read_csv(manifest) if manifest else None 
+            self.loadChunksFromDLCache()
         else:
             import configparser, boto3
             parser = configparser.ConfigParser()
@@ -67,7 +77,7 @@ class DLCJobDataset(Dataset):
                 region_name=s3auth['region_name']
             )
             self.client = s3_session.client('s3')
-            self.loadKeysFromCloud()
+            self.loadChunksFromCloud()
         
         self.nfsFilePaths = []
         self.load_data(chunk_idx=0)
@@ -76,12 +86,12 @@ class DLCJobDataset(Dataset):
         self.unused_idx = set(list(range(self.__len__())))
 
     def try_get_item(self, idx):
-        if self.qos['LazyLoading']:
+        if self.lazy:
             if len(self.unused_idx) == 0:
                 self.unused_idx = set(list(range(self.__len__())))
             
             sample_path, target_path = self.samples[idx], self.targets[idx] if self.targets else None                
-            if self.qos['UseCache']:
+            if self.usecache:
                 def helper(path, reader):
                     if path is None:
                         return None
@@ -98,7 +108,7 @@ class DLCJobDataset(Dataset):
                         read_val = reader(path)
                         # print("miss tmpfs file {}".format(tmpfs_path))
                     else:
-                        # substitutable cache hit
+                        # Substitutable cache hit
                         # 1. randomly select an unused data point
                         # 2. replace the idx with sub_idx
                         # 3. socket in data loader notify client to update data access sequence
@@ -126,54 +136,47 @@ class DLCJobDataset(Dataset):
                     return read_val
                 
                 sample = helper(sample_path, self.__sample_reader__)
-                target = helper(target_path, self.__target_reader__) if len(self.dtype) == 1 else target_path
-                return sample, target
+                target = helper(target_path, self.__target_reader__) if len(self.dtype) == 1 else None
             else:
-                # TODO: 如果不使用Cache, self.samples中存的应该是Key
                 sample = self.client.get_object(Bucket=self.bucket, Key=sample_path)['Body'].read()
-                if self.targetobj:
-                    target = self.client.get_object(Bucket=self.bucket, Key=target_path)['Body'].read()
-                    return sample, target
-                return sample, None
+                target = self.client.get_object(Bucket=self.bucket, Key=target_path)['Body'].read() if len(self.dtype) == 1 else None
+            return sample, target
         else:
             return self.samples[idx], self.targets[idx] if self.targets else None
 
-    # this function initialize the self.chunks list, items are dict tuples
-    def loadKeysFromDLCache(self):
-        maxmem = self.qos['MaxMemoryMill']*1e6
-        chunk_etags = self.job_col.find_one({"Meta.JobId": self.jobId})['ChunkETags'][self.dtype[0]]
-        if len(self.dtype) == 1:
-            sample_chunks = self.dataset_col.find({"ChunkETag": {"$in": chunk_etags['samples']}})
-            target_chunks = self.dataset_col.find({"ChunkETag": {"$in": chunk_etags['targets']}})
-            chunks = list(zip(sample_chunks, target_chunks))
-        else:
-            objs = list(self.dataset_col.find({"ChunkETag": {"$in": chunk_etags[self.dtype[1]]}}))
-            chunks = list(zip(objs, [None] * len(objs)))
+    def loadChunksFromDLCache(self):
+        """Load all chunks (MongoDB query result) of the given dataset. 
         
-        if maxmem == 0 or self.qos['LazyLoading']:
-            self.chunks.append(chunks)
-        else:
-            # 此处处理大数据文件被manager切片的情况
+        In the LazyLoading mode, there is only 1 group because no memory pressure.
+        Otherwise, we group chunks to make them fit the MaxPartMill constraint.
+
+        Returns:
+            None: initialize the self.sample_chunks and self.target_chunks
+        """
+        chunk_etags = self.job_info['ChunkETags'][self.dtype[0]]
+        
+        def helper(target_etags):
+            chunk_groups = []
+            chunks = self.dataset_col.find({"ChunkETag": {"$in": target_etags}})
             total_size = 0
-            self.chunks.append([])
-            for sample, target in chunks:
-                s = 0
-                if sample:
-                    s += int(sample['Size'])
-                if target:
-                    s += int(target['Size'])
-                total_size += s
-                # any single chunk should be smaller than the MaxMemory
-                if total_size >= maxmem:
-                    self.chunks.append([])
+            chunk_groups.append([])
+            for chunk in chunks:
+                total_size += int(chunk['Size'])
+                if total_size >= self.maxpart:
+                    chunk_groups.append([])
                     total_size = 0
-                elif s > maxmem:
-                    raise Exception('Object size is greater than assigned MaxMemory.')
+                elif int(chunk['Size']) > self.maxpart:
+                    raise Exception('File {} size is greater than assigned maxpartory.'.format(chunk['Key']))
                 else:
-                    self.chunks[-1].append((sample, target))
+                    chunk_groups[-1].append(chunk)
+            return chunk_groups
+    
+        self.sample_chunks = helper(chunk_etags['samples'])
+        if len(self.dtype) == 1:
+            self.target_chunks = helper(chunk_etags['targets'])
         
     # dataset shouldn't be compressed when using this function
-    def loadKeysFromCloud(self):
+    def loadChunksFromCloud(self):
         paginator = self.client.get_paginator('list_objects_v2')       
         def load_pages(keys):
             if keys:
@@ -183,77 +186,100 @@ class DLCJobDataset(Dataset):
                 return pages
             return None
 
-        keys = self.job_col.find_one({"Meta.JobId": self.jobId})['Datasource']['keys'][self.dtype[0]]
-        sample_pages = None
-        target_pages = None
-        maxmem = self.qos['MaxMemoryMill']*1e6
-        maxmem = math.inf if maxmem==0 else maxmem
-        total_size = 0
-        self.chunks.append([])
+        keys = self.job_info['Datasource']['keys'][self.dtype[0]]
         
-        sample_pages = load_pages(keys['samples'])
-        target_pages = load_pages(keys['targets']) if len(self.dtype) == 1 else None
-        for i in range(len(sample_pages)):
-            for j in range(len(sample_pages[i]['Contents'])):
-                sample = sample_pages[i]["Contents"][j]
-                target = target_pages[i]["Contents"][j] if target_pages else None
-                s = int(sample['Size'])
-                total_size += s
-                if total_size > maxmem:
-                    self.chunks.append([])
-                    total_size = 0
-                elif s > maxmem:
-                    raise Exception('File {} size is greater than assigned MaxMemory.'.format(sample['Key']))
-                else:
-                    self.chunks[-1].append((sample, target))
+        def helper(target_keys):
+            total_size = 0
+            chunk_groups = []
+            pages = load_pages(target_keys)
+            for i in range(len(pages)):
+                for j in range(len(pages[i]['Contents'])):
+                    dataobj = pages[i]["Contents"][j]
+                    s = int(dataobj['Size'])
+                    total_size += s
+                    if total_size > self.maxpart:
+                        chunk_groups.append([])
+                        total_size = 0
+                    elif s > self.maxpart:
+                        raise Exception('File {} size is greater than assigned maxpartory.'.format(dataobj['Key']))
+                    else:
+                        chunk_groups[-1].append(dataobj)
+            return chunk_groups
+        
+        self.sample_chunks = helper(keys['samples'])
+        if len(self.dtype) == 1:
+            self.target_chunks = helper(keys['targets'])  
 
-    def load_data(self, chunk_idx):
-        """Load file paths or actual data in the given chunk 
-        initialize the self.samples and self.targets, where self.samples is a dict with format {key: file_path/data}
-        user performs data (X and y) processing in the __process__ function, that convert self.samples from
-        dict to iteratable X, y
+    def load_data(self, partition_index):
+        """Load file paths or actual data in the given partition
         
-        If the chunk is a compressed datablock, we generate a dummy key for individual files.
+        Initialize the self.samples and self.targets, where self.samples is a dict with format {key: file_path/data}
+        user performs data (X and y) processing in the __process__ function, that convert self.samples ans self.targets
+        from dict to iteratable X, y
+        
+        If a chunk is a compressed, we generate a dummy key for individual files.
         We start operating on individual data items from this function. Before this, all operations are on chunks.
         
+        Samples are matched with corresponding targets based on the manifest file provided by user, which specifies the 
+        mappings between X and y.
+        
+        Only file-based datasets might have the manifest file.
+        
         Args:
-            chunk_idx (int): file-based (LazyLoading) dataset only has one chunk, so the chunk_idx = 0
-                             tabular dataset split file to multiple chunks
+            partition_index (int): file-based (LazyLoading) dataset only has one partition, so the partition_index = 0
+                             tabular dataset might split file to multiple partitions
         """
-        for sample_chunk, target_chunk in self.chunks[chunk_idx]:
-            nfspath = [None, None]
-            lazy = self.qos['LazyLoading']
-            sample_key, target_key = sample_chunk['Key'], target_chunk['Key'] if target_chunk else None
-            sample_loc, target_loc = sample_chunk['Location'], target_chunk['Location'] if target_chunk else None
-            sample_etag, target_etag = sample_chunk['ChunkETag'], target_chunk['ChunkETag'] if target_chunk else None
-
-            # files are compressed as chunks
-            if 'Files' in sample_chunk:
-                for i in range(len(sample_chunk["Files"])):
-                    sample_file = sample_chunk['Files'][i]
-                    sample_path = '/{}/{}/{}'.format(sample_loc, sample_etag, sample_file)
-                    nfspath[0] = sample_path
-                    dummy_key = '{}/{}'.format(sample_key, sample_file)
-                    self.samples[dummy_key] = sample_path if lazy else self.__sample_reader__(sample_path)
-                    
-                    if target_chunk:
-                        target_file = target_chunk['Files'][i]
-                        target_path = '/{}/{}/{}'.format(target_loc, target_etag, target_file)
-                        nfspath[1] = target_path
-                        dummy_key = '{}/{}'.format(target_key, target_file)
-                        self.targets[dummy_key] = target_path if lazy else self.__target_reader__(target_path)
-                    self.nfsFilePaths.append(nfspath) 
-            else:
-                sample_path = '/{}/{}'.format(sample_loc, sample_etag)
-                nfspath[0] = sample_path
-                self.samples[sample_key] = sample_path if lazy else self.__sample_reader__(sample_path)
-                
-                if target_chunk:
-                    target_path = '/{}/{}'.format(target_loc, target_etag)
-                    nfspath[1] = target_path
-                    self.targets[target_key] = target_path if lazy else self.__target_reader__(target_path)
-                self.nfsFilePaths.append(nfspath)
-
+        
+        def helper(chunks, reader):
+            data = {}
+            nfs_path = []
+            for chunk in chunks[partition_index]:
+                key, loc = chunk['Key'], chunk['Location']
+                if self.usecache:
+                    if not chunk:
+                        nfs_path.append(None)
+                        continue
+                    etag = chunk['ChunkETag']
+                    chunk_path = '/{}/{}'.format(loc, etag)
+                    # decompressed folder, so key has the .tar.gz extension
+                    if os.path.isdir(chunk_path):
+                        # We assume data won't be immediately deleted after being downloaded by Manager.
+                        for root, dirs, files in os.walk(chunk_path):
+                            for name in files:
+                                fpath = os.path.join(root, name)
+                                nfs_path.append(fpath)
+                                # dummy_key = chunk key + '/' + sample file name
+                                dummy_key = os.path.join(key, fpath.replace(chunk_path, ''))
+                                data[dummy_key] = fpath if self.lazy else reader(fpath)
+                    else:
+                        nfs_path.append(chunk_path)
+                        data[key] = chunk_path if self.lazy else reader(chunk_path)
+                else:
+                    data[key] = key
+                    nfs_path.append(None)
+            return data, nfs_path
+            
+        self.samples, sample_fpaths = helper(self.sample_chunks, self.__sample_reader__)
+        self.targets, target_fpaths = helper(self.target_chunks, self.__target_reader__)
+        
+        # build mappings between samples and targets if the dataset is file-based
+        # and the manifest is specified
+        if self.lazy and self.targets and self.manifest:
+            samples_ = {}
+            targets_ = {}
+            sample_fpaths_ = []
+            target_fpaths = []
+            for _, row in self.manifest.iterrows():
+                dummy_key = os.path.join(row['sample_chunk'], row['sample'])
+                samples_[dummy_key] = self.samples[dummy_key]
+                dummy_key = os.path.join(row['target_chunk'], row['target'])
+                targets_[dummy_key] = self.targets[dummy_key]
+            self.samples = samples_
+            self.targets = targets_
+            sample_fpaths = list(self.samples.values())
+            target_fpaths = list(self.targets.values())
+        
+        self.nfsFilePaths = list(zip(sample_fpaths, target_fpaths))
         self.samples, self.targets = self.__process__()
 
     def __sample_reader__(self, path: str = None, raw_bytes: bytes = None):
@@ -403,7 +429,7 @@ class DLCJobDataLoader(object):
         self.num_batches = math.ceil(len(self.dataset.samples)/batch_size)
         
         self.lazy = self.dataset.qos['LazyLoading']
-        self.chunk_idx = 0
+        self.partition_index = 0
         self.clear()
         
         context = zmq.Context()
@@ -472,15 +498,15 @@ class DLCJobDataLoader(object):
         except StopIteration:
             print('raise StopIteration Exception....')
              # epoch is down
-            if self.chunk_idx == len(self.dataset.chunks)-1:
-                self.chunk_idx = 0
+            if self.partition_index == len(self.dataset.sample_chunks)-1:
+                self.partition_index = 0
                 self._init_loader(first_iter=False)
                 raise StopIteration
             else:
                 # data in the current chunk have been consumed
-                self.chunk_idx += 1
+                self.partition_index += 1
                 self.clear()
-                self.dataset.load_data(self.chunk_idx)
+                self.dataset.load_data(self.partition_index)
                 self._init_loader(first_iter=True)
                 data = next(self.loader)
         return data

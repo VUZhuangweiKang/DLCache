@@ -3,7 +3,6 @@ import sys
 import shutil
 import grpc
 import boto3
-import pandas as pd
 import json, bson
 import configparser
 import multiprocessing
@@ -19,22 +18,23 @@ from utils import *
 logger = get_logger(name=__name__, level='debug')
 
 
-# TODO: 可能有bug, path如果多层，可能会有路径不存在OSError
 def download_file(client, bucket, key, path):
     if os.path.exists(path):
         return
     import tarfile, zipfile
     tmp_file = '/tmp{}'.format(key.split('/')[-1])
+    logger.info("downloading file {} ...".format(key))
     client.download_file(bucket, key, tmp_file)
     if tarfile.is_tarfile(tmp_file):
         with tarfile.open(tmp_file,"r") as mytar:
             mytar.extractall(path)
+        os.remove(tmp_file)
     elif zipfile.is_zipfile(tmp_file):
         with zipfile.ZipFile(tmp_file) as myzip:
             myzip.extractall(path)
+        os.remove(tmp_file)
     else:
         os.rename(tmp_file, path)
-
         
         
 class Manager():
@@ -203,7 +203,7 @@ class Manager():
             chunk['ChunkSize'] = chunk['Size']
             if not miss:
                 chunk = assignLocation(chunk)
-            path = "/%s/%s" % (chunk['Location'], etag)
+            path = "/{}/{}".format(chunk['Location'], etag)
             download_file(s3_client, bucket_name, key, path)
             obj_chunks = [chunk]
         else:
@@ -359,7 +359,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     paginator = s3_client.get_paginator('list_objects_v2')
                     pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
                     futures = []
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                         for page in pages:
                             futures.append(executor.submit(self.manager.filter_objs, page))
                     for future in concurrent.futures.as_completed(futures):
@@ -395,15 +395,15 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             # collect sample and target etags
             dataset_etags = defaultdict(dict)
             chunks = []
+            manifests = {}
             node_seq = request.nodesequence
             with concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
                 for l1 in ['train', 'val', 'test']:
                     # read manifest
-                    manifest = None
                     if dataset_chunks[l1]["manifest"]:
                         response = s3_client.get_object(Bucket=bucket_name, Key=dataset_chunks[l1]["manifest"])
-                        manifest = pd.read_csv(response.get('Body'))
+                        manifests[l1] = response.get('Body')
                         
                     for l2 in ['samples', 'targets']:
                         subset = dataset_chunks[l1][l2]
@@ -415,18 +415,9 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                             
                         # downloading ...
                         for chunk in subset:
-                            # Add manifest info for this chunk
-                            # Since values of the Files filed are in the order of that in manifest file, 
-                            # sample and target are matched in the DLCJob loadKeysFromDLCache function
-                            if manifest:
-                                if l2 == 'samples':
-                                    chunk['Files'] = manifest[manifest['sample_chunk'] == chunk['Key']]['sample'].values
-                                elif l2 == "targets":
-                                    chunk['Files'] = manifest[manifest['target_chunk'] == chunk['Key']]['target'].values
-
                             if not chunk['Exist']:
                                 # we also perform data eviction in the clone_chunk function if pre-allocated space is occupied by other jobs
-                                futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, request.qos.MaxMemoryMill, node_seq))
+                                futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, request.qos.MaxPartMill, node_seq))
                             elif chunk['Location'] != node_seq[0]:
                                 # move the data to a node in nodesequence
                                 futures.append(executor.submit(self.manager.move_chunk, chunk, node_seq))
@@ -442,7 +433,8 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     "ResourceInfo": MessageToDict(request.resource)
                 },
                 "QoS": MessageToDict(request.qos),
-                "ChunkETags": dataset_etags
+                "ChunkETags": dataset_etags,
+                "Manifests": manifests
             }
             self.manager.job_col.insert_one(jobInfo)
 

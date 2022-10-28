@@ -22,7 +22,7 @@ spec:
             - OpenImages/val
     qos:
       usecache: true
-      maxmemorymill: 10000
+      MaxPartMill: 10000
       lazyloading: true
     tty: true
     stdin: true

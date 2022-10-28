@@ -294,11 +294,12 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	for _, node := range nodes.Items {
 		err := filepath.Walk(fmt.Sprintf("/%s", node.Status.Addresses[0].Address), func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				return err
-			}
-			if info.IsDir() {
 				return nil
 			}
+			// Operations are based on chunk, so if we see a folder, this folder should be an uncompressed chunk
+			// if info.IsDir() {
+			// 	return nil
+			// }
 			existingPaths[path] = true
 			return nil
 		})
