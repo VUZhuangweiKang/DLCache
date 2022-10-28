@@ -2,7 +2,7 @@ import os
 import sys
 import shutil
 import grpc
-import boto3
+import boto3, botocore
 import json, bson
 import configparser
 import multiprocessing
@@ -22,9 +22,15 @@ def download_file(client, bucket, key, path):
     if os.path.exists(path):
         return
     import tarfile, zipfile
-    tmp_file = '/tmp{}'.format(key.split('/')[-1])
+    tmp_file = '/tmp/{}'.format(path.split('/')[-1])
     logger.info("downloading file {} ...".format(key))
-    client.download_file(bucket, key, tmp_file)
+    try:
+        client.download_file(bucket, key, tmp_file)
+    except botocore.exceptions.ClientError as e:
+        if e.response["Error"]["Code"] == "404":
+            logger.error("Object {} does not exist".format(key))
+        return False
+    
     if tarfile.is_tarfile(tmp_file):
         with tarfile.open(tmp_file,"r") as mytar:
             mytar.extractall(path)
@@ -35,8 +41,9 @@ def download_file(client, bucket, key, path):
         os.remove(tmp_file)
     else:
         os.rename(tmp_file, path)
+    return True    
         
-        
+
 class Manager():
     def __init__(self):
         parser = configparser.ConfigParser()
@@ -50,6 +57,7 @@ class Manager():
         
         self.mongoUri = "mongodb://{}:{}@{}:{}".format(mconf['username'], mconf['password'], mconf['host'], mconf['port'])
         mongo_client = MongoClient(self.mongoUri)        
+        
         def load_collection(name, schema):
             collections = mongo_client.Cacher.list_collection_names()
             with open(schema, 'r') as f:
@@ -97,20 +105,19 @@ class Manager():
         s3_client = s3_session.client('s3')
         return s3_client
 
-    def filter_objs(self, page):
-        try:
-            # ETag value from S3 contains " sometimes
-            for i in range(len(page["Contents"])):
-                page["Contents"][i]["ETag"] = page["Contents"][i]["ETag"].strip('"')
-            # if prefix is invalid, `Contents` field is not in page, raising error
-            etags = {info['ETag']: info['LastModified'] for info in page['Contents']}
-        except:
-            return []
+    def filter_chunks(self, page: list):
+        etags = {}
+        for i in range(len(page)):
+            if page[i]['Size'] == 0: continue
+            page[i]["ETag"] = page[i]["ETag"].strip('"')  # ETag value from S3 contains " sometimes
+            etags[page[i]["ETag"]] = page[i]["LastModified"]
+            
         results = self.dataset_col.aggregate(pipeline=[{"$match": {"ETag": {"$in": list(etags.keys())}}}])
         existing_etags = {item['ETag']: item for item in results}
 
-        bucket_objs = []
-        for info in page['Contents']:
+        chunks = []
+        for info in page:
+            if info['Size'] == 0: continue
             lastModified = bson.timestamp.Timestamp(int(info['LastModified'].timestamp()), inc=1)
             if info['ETag'] not in existing_etags or lastModified > existing_etags[info['ETag']]['LastModified']:
                 info['Exist'] = False
@@ -118,8 +125,8 @@ class Manager():
                 info = existing_etags[info['ETag']]
                 info['Exist'] = True
             info['ChunkETag'] = info['ETag']
-            bucket_objs.append(info)
-        return bucket_objs
+            chunks.append(info)
+        return chunks
     
     # Hybrid Data Eviction: evict dataobj from a specific NFS server
     # 1. data objs without any binding running jobs are first removed based on the LFU policy.
@@ -196,16 +203,7 @@ class Manager():
             if 'ETag' in chunk:
                 etag = chunk['ETag'].strip("\"")
             else:
-                value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
-                etag = hashing(value)
-            chunk["Part"] = 0
-            chunk['ChunkETag'] = etag
-            chunk['ChunkSize'] = chunk['Size']
-            if not miss:
-                chunk = assignLocation(chunk)
-            path = "/{}/{}".format(chunk['Location'], etag)
-            download_file(s3_client, bucket_name, key, path)
-            obj_chunks = [chunk]
+                value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'obj_chunks
         else:
             # large file
             obj_chunks = []
@@ -342,79 +340,67 @@ class RegistrationService(pb_grpc.RegistrationServicer):
         if rc == pb.RC.CONNECTED:
             s3_client = self.manager.get_s3_client(cred)
             bucket_name = request.datasource.bucket
+            train = request.datasource.keys.train
+            val = request.datasource.keys.validation
+            test = request.datasource.keys.test
             
-            def load_chunks(keys):
-                """check if chunk objects exists or out-of-date (filter_objs), 
-                add the 'Exist' and 'ChunkETag' fields;
-                this step marks chunks that need to be cloned.
-
-                Args:
-                    keys (List[str]): prefix keys
-
-                Returns:
-                    List[dict]: the list of all chunk objects
-                """
+            def load_chunks(l1, l2):
+                
+                if l1 == 'train':
+                    if l2 == "samples":
+                        keys = train.samples
+                    elif l2 == 'targets':
+                        keys = train.targets
+                    else:
+                        keys = train.manifests
+                elif l1 == 'validation':
+                    if l2 == "samples":
+                        keys = val.samples
+                    elif l2 == 'targets':
+                        keys = val.targets
+                    else:
+                        keys = val.manifests
+                else:
+                    if l2 == "samples":
+                        keys = test.samples
+                    elif l2 == 'targets':
+                        keys = test.targets
+                    else:
+                        keys = test.manifests
+                    
                 chunks = []
                 for prefix in keys:
                     paginator = s3_client.get_paginator('list_objects_v2')
                     pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
                     futures = []
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                         for page in pages:
-                            futures.append(executor.submit(self.manager.filter_objs, page))
+                            if 'Contents' not in page:
+                                continue
+                            futures.append(executor.submit(self.manager.filter_chunks, page['Contents']))
                     for future in concurrent.futures.as_completed(futures):
                         chunks.extend(future.result())
                 chunks.sort(key=lambda x: x['Key'])
                 return chunks
             
-            train = request.datasource.keys.train
-            val = request.datasource.keys.validation
-            test = request.datasource.keys.test
-            
-            # we assume sample and targets file names are well-formated
-            # so they can match with each other by sorting    
-            dataset_chunks = {
-                'train': {
-                    'samples': load_chunks(train.samples), 
-                    'targets': load_chunks(train.targets),
-                    'manifest': train.manifest
-                },
-                'validation': {
-                    'samples': load_chunks(val.samples), 
-                    'targets': load_chunks(val.targets),
-                    'manifest': val.manifest
-                },
-                'test': {
-                    'samples': load_chunks(test.samples), 
-                    'targets': load_chunks(test.targets),
-                    'manifest': test.manifest
-                }
-            }
-            
             # copy data from cloud to NFS, init the `ChunkSize`, `Location`, and `Files` fields
             # collect sample and target etags
             dataset_etags = defaultdict(dict)
             chunks = []
-            manifests = {}
             node_seq = request.nodesequence
-            with concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
-                for l1 in ['train', 'val', 'test']:
-                    # read manifest
-                    if dataset_chunks[l1]["manifest"]:
-                        response = s3_client.get_object(Bucket=bucket_name, Key=dataset_chunks[l1]["manifest"])
-                        manifests[l1] = response.get('Body')
-                        
-                    for l2 in ['samples', 'targets']:
-                        subset = dataset_chunks[l1][l2]
-                        if not subset:
-                            dataset_etags[l1][l2] = None
+                for l1 in ['train', 'validation', 'test']:
+                    for l2 in ['samples', 'targets', 'manifests']:
+                        raw_chunks = load_chunks(l1, l2)
+                        if not raw_chunks:
+                            dataset_etags[l1][l2] = []
                             continue
                         else:
-                            dataset_etags[l1][l2] = [chunk['ChunkETag'] for chunk in subset]
+                            dataset_etags[l1][l2] = [chunk['ChunkETag'] for chunk in raw_chunks]
                             
                         # downloading ...
-                        for chunk in subset:
+                        for chunk in raw_chunks:
                             if not chunk['Exist']:
                                 # we also perform data eviction in the clone_chunk function if pre-allocated space is occupied by other jobs
                                 futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, request.qos.MaxPartMill, node_seq))
@@ -433,8 +419,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     "ResourceInfo": MessageToDict(request.resource)
                 },
                 "QoS": MessageToDict(request.qos),
-                "ChunkETags": dataset_etags,
-                "Manifests": manifests
+                "ChunkETags": dict(dataset_etags)
             }
             self.manager.job_col.insert_one(jobInfo)
 

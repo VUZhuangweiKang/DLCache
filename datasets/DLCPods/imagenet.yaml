@@ -11,17 +11,19 @@ spec:
     image: zhuangweikang/imagedatasets-dev:latest
     command: ["bash"]
     datasource:
-      name: Imagenet-Mini-Obj
+      name: Imagenet-Mini
       bucket: vuzhuangwei
       keys:
         train:
           samples:
             - Imagenet-Mini/train/samples
-          manifest: Imagenet-Mini/train/manifest.csv
+          manifests: 
+            - Imagenet-Mini/train/manifest.csv
         validation:
           samples:
             - Imagenet-Mini/val/samples
-          manifest: Imagenet-Mini/val/manifest.csv
+          manifests: 
+            - Imagenet-Mini/val/manifest.csv
     qos:
       usecache: true
       MaxPartMill: 10000

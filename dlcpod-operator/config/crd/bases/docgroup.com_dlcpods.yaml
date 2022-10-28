@@ -87,8 +87,10 @@ spec:
                           properties:
                             test:
                               properties:
-                                manifest:
-                                  type: string
+                                manifests:
+                                  items:
+                                    type: string
+                                  type: array
                                 samples:
                                   items:
                                     type: string
@@ -100,8 +102,10 @@ spec:
                               type: object
                             train:
                               properties:
-                                manifest:
-                                  type: string
+                                manifests:
+                                  items:
+                                    type: string
+                                  type: array
                                 samples:
                                   items:
                                     type: string
@@ -113,8 +117,10 @@ spec:
                               type: object
                             validation:
                               properties:
-                                manifest:
-                                  type: string
+                                manifests:
+                                  items:
+                                    type: string
+                                  type: array
                                 samples:
                                   items:
                                     type: string

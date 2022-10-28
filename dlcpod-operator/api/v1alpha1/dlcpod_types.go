@@ -59,13 +59,14 @@ type QoSConfigurations struct {
 }
 
 type DatasetStruct struct {
+	// +optional
 	Samples []string `json:"samples,omitempty"`
 
 	// +optional
 	Targets []string `json:"targets,omitempty"`
 
 	// +optional
-	Manifest string `json:"manifest,omitempty"`
+	Manifests []string `json:"manifests,omitempty"`
 }
 type JobDatasetsStruct struct {
 	Train DatasetStruct `json:"train"`

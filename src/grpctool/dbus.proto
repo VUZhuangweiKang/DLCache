@@ -48,7 +48,7 @@ message ResourceInfo { // Pod resource info, load from proc file system
 message Dataset {
     repeated string samples = 1;
     repeated string targets = 2;
-    optional string manifest = 3;
+    repeated string manifests = 3;
 }
 message JobDatasets {
     required Dataset train = 1;

@@ -1,4 +1,3 @@
-from random import sample
 import grpc
 import signal
 import json
@@ -100,24 +99,17 @@ class Client(object):
             
             train_keys = ds['keys']['train']
             val_keys = ds['keys']['validation']
-            if len(val_keys) == 0:
-                val_keys = {'samples': [], 'targets': []}
             test_keys = ds['keys']['test']
-            if len(test_keys) == 0:
-                test_keys = {'samples': [], 'targets': []}
-            
-            job_datasets = pb.JobDatasets(
-                train=pb.Dataset(**train_keys),
-                validation=pb.Dataset(**val_keys),
-                test=pb.Dataset(**test_keys)
-            )
-            
             request = pb.RegisterRequest(
                 cred=self.cred,
                 datasource=pb.DataSource(
                     name=ds['name'], 
                     bucket=ds['bucket'], 
-                    keys=job_datasets
+                    keys=pb.JobDatasets(
+                        train=pb.Dataset(**train_keys),
+                        validation=pb.Dataset(**val_keys),
+                        test=pb.Dataset(**test_keys)
+                    )
                 ),
                 nodesequence=job['nodesequence'],
                 qos=ParseDict(qos, pb.QoS(), ignore_unknown_fields=True),

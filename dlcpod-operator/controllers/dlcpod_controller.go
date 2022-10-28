@@ -274,16 +274,19 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	test := job.DataSource.Keys.Test
 	etags := map[string]map[string][]string{
 		"train": {
-			"samples": loadETags(train.Samples),
-			"targets": loadETags(train.Targets),
+			"samples":   loadETags(train.Samples),
+			"targets":   loadETags(train.Targets),
+			"manifests": loadETags(train.Manifests),
 		},
 		"validation": {
-			"samples": loadETags(val.Samples),
-			"targets": loadETags(val.Targets),
+			"samples":   loadETags(val.Samples),
+			"targets":   loadETags(val.Targets),
+			"manifests": loadETags(val.Manifests),
 		},
 		"test": {
-			"samples": loadETags(test.Samples),
-			"targets": loadETags(test.Targets),
+			"samples":   loadETags(test.Samples),
+			"targets":   loadETags(test.Targets),
+			"manifests": loadETags(test.Manifests),
 		},
 	}
 

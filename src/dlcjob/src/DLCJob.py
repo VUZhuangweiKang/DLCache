@@ -63,8 +63,16 @@ class DLCJobDataset(Dataset):
             mongo_client = MongoClient(job_meta['mongoUri'])
             self.job_info = mongo_client.Cacher.Job.find_one({"Meta.JobId": job_meta['jobId']})
             self.dataset_col = mongo_client.Cacher.Datasets
-            manifest = self.job_info['Manifests'][self.dtype[0]]
-            self.manifest = pd.read_csv(manifest) if manifest else None 
+            
+            mfst_etags = self.job_info["ChunkETags"][self.dtype[0]]["manifests"]
+            self.manifest = None
+            for mfst_etag in mfst_etags:
+                mfst_chunk = self.dataset_col.find_one({"ETag": mfst_etag})
+                mfst_fpath = "/{}/{}".format(mfst_chunk['Location'], mfst_etag)
+                if self.manifest is None:
+                    self.manifest = pd.read_csv(manifest)
+                else:
+                    self.manifest = pd.concat([self.manifest, pd.read_csv(manifest)])
             self.loadChunksFromDLCache()
         else:
             import configparser, boto3

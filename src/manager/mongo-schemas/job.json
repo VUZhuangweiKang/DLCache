@@ -37,7 +37,7 @@
                                     "properties": {
                                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
                                         "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
-                                        "manifest": {"bsonType": "string"}
+                                        "manifests": {"bsonType": "array", "items": {"bsonType": "string"}}
                                     }
                                 },
                                 "validation": {
@@ -45,7 +45,7 @@
                                     "properties": {
                                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
                                         "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
-                                        "manifest": {"bsonType": "string"}
+                                        "manifests": {"bsonType": "array", "items": {"bsonType": "string"}}
                                     }
                                 },
                                 "test": {
@@ -53,7 +53,7 @@
                                     "properties": {
                                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
                                         "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
-                                        "manifest": {"bsonType": "string"}
+                                        "manifests": {"bsonType": "array", "items": {"bsonType": "string"}}
                                     }
                                 }
                             }
@@ -93,43 +93,24 @@
                     "properties": {
                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
                         "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
-                        "manifest": {"bsonType": "string"}
+                        "manifests": {"bsonType": "array", "items": {"bsonType": "string"}}
                     }
                 },
                 "validation": {
                     "bsonType": "object",
-                    "required": ["samples"],
                     "properties": {
                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
                         "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
-                        "manifest": {"bsonType": "string"}
+                        "manifests": {"bsonType": "array", "items": {"bsonType": "string"}}
                     }
                 },
                 "test": {
                     "bsonType": "object",
-                    "required": ["samples"],
                     "properties": {
                         "samples": {"bsonType": "array", "items": {"bsonType": "string"}},
                         "targets": {"bsonType": "array", "items": {"bsonType": "string"}},
-                        "manifest": {"bsonType": "string"}
+                        "manifests": {"bsonType": "array", "items": {"bsonType": "string"}}
                     }
-                }
-            }
-        },
-        "Manifests": {
-            "bsonType": "object",
-            "properties": {
-                "train": {
-                    "bsonType": "array",
-                    "items": {"bsonType": "byte"}
-                },
-                "validation": {
-                    "bsonType": "array",
-                    "items": {"bsonType": "byte"}
-                },
-                "test": {
-                    "bsonType": "array",
-                    "items": {"bsonType": "byte"}
                 }
             }
         }

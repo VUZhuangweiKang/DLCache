@@ -19,6 +19,9 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.models as models
 from torch.utils.data import Subset
+
+import sys
+sys.path.append("..")
 from ImageDataset import *
 from DLCJob import *
 
