@@ -146,12 +146,20 @@ class Client(object):
             # print('failed to copy {}'.format(nfs_path))
             return False, nfs_path
 
+        def create_path(nfs_path):
+            tmpfs_path = '/runtime{}'.format(nfs_path)
+            root_folder = '/'.join(tmpfs_path.split('/')[:-1])
+            if not os.path.exists(root_folder):
+                os.makedirs(root_folder)
+                        
         if idx < len(self.nfs_paths):
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
                 for sample_path, target_path in self.nfs_paths[idx]:
+                    create_path(sample_path)
                     futures.append(executor.submit(docopy, sample_path))
                     if target_path:
+                        create_path(target_path)
                         futures.append(executor.submit(docopy, target_path))
 
             for task in futures:

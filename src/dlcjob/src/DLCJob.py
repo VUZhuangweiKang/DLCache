@@ -45,6 +45,7 @@ class DLCJobDataset(Dataset):
             job_meta = json.load(f)
 
         self.bucket = job_meta['datasource']['bucket']
+        self.qos = job_meta["qos"]
         self.lazy = job_meta['qos']['LazyLoading']
         self.usecache = job_meta['qos']['UseCache']
         self.maxpart = job_meta['qos']['MaxPartMill'] * 1e6
@@ -70,9 +71,9 @@ class DLCJobDataset(Dataset):
                 mfst_chunk = self.dataset_col.find_one({"ETag": mfst_etag})
                 mfst_fpath = "/{}/{}".format(mfst_chunk['Location'], mfst_etag)
                 if self.manifest is None:
-                    self.manifest = pd.read_csv(manifest)
+                    self.manifest = pd.read_csv(mfst_fpath)
                 else:
-                    self.manifest = pd.concat([self.manifest, pd.read_csv(manifest)])
+                    self.manifest = pd.concat([self.manifest, pd.read_csv(mfst_fpath)])
             self.loadChunksFromDLCache()
         else:
             import configparser, boto3
@@ -88,7 +89,7 @@ class DLCJobDataset(Dataset):
             self.loadChunksFromCloud()
         
         self.nfsFilePaths = []
-        self.load_data(chunk_idx=0)
+        self.load_data(partition_index=0)
         
         self.miss_queue = Queue()
         self.unused_idx = set(list(range(self.__len__())))
@@ -96,9 +97,7 @@ class DLCJobDataset(Dataset):
     def try_get_item(self, idx):
         if self.lazy:
             if len(self.unused_idx) == 0:
-                self.unused_idx = set(list(range(self.__len__())))
-            
-            sample_path, target_path = self.samples[idx], self.targets[idx] if self.targets else None                
+                self.unused_idx = set(list(range(self.__len__())))            
             if self.usecache:
                 def helper(path, reader):
                     if path is None:
@@ -143,14 +142,29 @@ class DLCJobDataset(Dataset):
                         self.unused_idx.remove(read_idx)
                     return read_val
                 
-                sample = helper(sample_path, self.__sample_reader__)
-                target = helper(target_path, self.__target_reader__) if len(self.dtype) == 1 else None
+                sample = helper(self.samples[idx], self.__sample_reader__)
+                if len(self.dtype) == 1:
+                    target = helper(self.targets[idx], self.__target_reader__)
+                elif self.targets:
+                    target = self.targets[idx]
+                else:
+                    target = None
             else:
-                sample = self.client.get_object(Bucket=self.bucket, Key=sample_path)['Body'].read()
-                target = self.client.get_object(Bucket=self.bucket, Key=target_path)['Body'].read() if len(self.dtype) == 1 else None
-            return sample, target
+                sample = self.client.get_object(Bucket=self.bucket, Key=self.samples[idx])['Body'].read()
+                if len(self.dtype) == 1:
+                    target = self.client.get_object(Bucket=self.bucket, Key=self.targets[idx])['Body'].read()
+                elif self.targets:
+                    target = self.targets[idx]
+                else:
+                    target = None
+            
+            if target:
+                return sample, target
+            return sample
         else:
-            return self.samples[idx], self.targets[idx] if self.targets else None
+            if self.targets:
+                return self.samples[idx], self.targets[idx]
+            return self.samples[idx]
 
     def loadChunksFromDLCache(self):
         """Load all chunks (MongoDB query result) of the given dataset. 
@@ -256,8 +270,7 @@ class DLCJobDataset(Dataset):
                             for name in files:
                                 fpath = os.path.join(root, name)
                                 nfs_path.append(fpath)
-                                # dummy_key = chunk key + '/' + sample file name
-                                dummy_key = os.path.join(key, fpath.replace(chunk_path, ''))
+                                dummy_key = key + fpath.replace(chunk_path, '')
                                 data[dummy_key] = fpath if self.lazy else reader(fpath)
                     else:
                         nfs_path.append(chunk_path)
@@ -268,15 +281,15 @@ class DLCJobDataset(Dataset):
             return data, nfs_path
             
         self.samples, sample_fpaths = helper(self.sample_chunks, self.__sample_reader__)
-        self.targets, target_fpaths = helper(self.target_chunks, self.__target_reader__)
+        target_fpaths = []
+        if self.target_chunks:
+            self.targets, target_fpaths = helper(self.target_chunks, self.__target_reader__)
         
         # build mappings between samples and targets if the dataset is file-based
         # and the manifest is specified
         if self.lazy and self.targets and self.manifest:
             samples_ = {}
             targets_ = {}
-            sample_fpaths_ = []
-            target_fpaths = []
             for _, row in self.manifest.iterrows():
                 dummy_key = os.path.join(row['sample_chunk'], row['sample'])
                 samples_[dummy_key] = self.samples[dummy_key]
@@ -287,6 +300,8 @@ class DLCJobDataset(Dataset):
             sample_fpaths = list(self.samples.values())
             target_fpaths = list(self.targets.values())
         
+        if not target_fpaths:
+            target_fpaths = [None] * len(sample_fpaths)
         self.nfsFilePaths = list(zip(sample_fpaths, target_fpaths))
         self.samples, self.targets = self.__process__()
 
