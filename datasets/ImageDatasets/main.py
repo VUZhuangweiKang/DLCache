@@ -2,8 +2,6 @@ import argparse
 import os
 import random
 import shutil
-from statistics import mean, median, stdev
-import statistics
 import time
 import warnings
 from enum import Enum
@@ -19,7 +17,6 @@ import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
-import torchvision.datasets as datasets
 import torchvision.models as models
 from torch.utils.data import Subset
 from ImageDataset import *
@@ -30,12 +27,15 @@ model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
-parser = argparse.ArgumentParser(description='PyTorch Cifar100 Training')
+parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet18)')
+parser.add_argument('-d', '--dataset', default='cifar100', 
+                    choices=['cifar100', 'imagenet', 'imagenet-mini', 'openimages'],
+                    help='dataset name')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
@@ -223,8 +223,14 @@ def main_worker(gpu, ngpus_per_node, args):
         normalize,
     ])
     
+    if args.dataset == 'openimages':
+        from OpenImages.OpenImagesDataset import OpenImagesDataset
+        DatasetCls = OpenImagesDataset
+    else:
+        DatasetCls = ImageDataset
+    
     t = time.time()
-    val_dataset = ImageDataset(dtype='validation/samples', transform=transform)
+    val_dataset = DatasetCls(dtype='validation', transform=transform)
     print('dataset init time: ', time.time()-t)
     
     if args.distributed:
@@ -241,8 +247,7 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
     else:
-        # train_dataset = ImageNetDataset(keys=['Imagenet-Mini-Obj/train'], transform=transform)
-        train_dataset = ImageDataset(dtype='train/samples', transform=transform)  # for test only
+        train_dataset = DatasetCls(dtype='train', transform=transform)
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         else:

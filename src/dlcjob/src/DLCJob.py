@@ -35,11 +35,11 @@ class DLCJobDataset(Dataset):
         Args:
             dtype: dataset type, train/validation/test for supervised and unsupervised training/testing
         """
-        if dtype not in ["train", "validation", "test", 
-                         "train/samples", "validation/samples", "test/samples"]:
+        if dtype not in ["train", "validation", "test"]:
             raise ValueError("invalid dataset type".format(dtype))
         
-        self.dtype = dtype.split('/')
+        self.dtype = dtype
+        
         while not os.path.exists(jobinfo): pass
         with open(jobinfo, 'rb') as f:
             job_meta = json.load(f)
@@ -65,7 +65,7 @@ class DLCJobDataset(Dataset):
             self.job_info = mongo_client.Cacher.Job.find_one({"Meta.JobId": job_meta['jobId']})
             self.dataset_col = mongo_client.Cacher.Datasets
             
-            mfst_etags = self.job_info["ChunkETags"][self.dtype[0]]["manifests"]
+            mfst_etags = self.job_info["ChunkETags"][self.dtype]["manifests"]
             self.manifest = None
             for mfst_etag in mfst_etags:
                 mfst_chunk = self.dataset_col.find_one({"ETag": mfst_etag})
@@ -115,10 +115,12 @@ class DLCJobDataset(Dataset):
                         read_val = reader(path)
                         # print("miss tmpfs file {}".format(tmpfs_path))
                     else:
-                        # Substitutable cache hit
-                        # 1. randomly select an unused data point
-                        # 2. replace the idx with sub_idx
-                        # 3. socket in data loader notify client to update data access sequence
+                        """
+                        Substitutable cache hit
+                        1. randomly select an unused data point
+                        2. replace the idx with sub_idx
+                        3. socket in data loader notify client to update data access sequence
+                        """
                         print('miss nfs file {}'.format(path))
                         while True:
                             if len(self.unused_idx) == 0:
@@ -143,28 +145,26 @@ class DLCJobDataset(Dataset):
                     return read_val
                 
                 sample = helper(self.samples[idx], self.__sample_reader__)
-                if len(self.dtype) == 1:
-                    target = helper(self.targets[idx], self.__target_reader__)
-                elif self.targets:
+                
+                """ for supervised learning, there might be two cases:
+                1. targets are derived while parsing samples
+                2. targets are saved as individual samples
+                """
+                target = None
+                if len(self.targets) > 0:
                     target = self.targets[idx]
-                else:
-                    target = None
+                    if os.path.exists(str(target)):
+                        target = helper(target, self.__target_reader__)
             else:
                 sample = self.client.get_object(Bucket=self.bucket, Key=self.samples[idx])['Body'].read()
-                if len(self.dtype) == 1:
-                    target = self.client.get_object(Bucket=self.bucket, Key=self.targets[idx])['Body'].read()
-                elif self.targets:
+                target = None
+                if len(self.targets) > 0:
                     target = self.targets[idx]
-                else:
-                    target = None
-            
-            if target:
-                return sample, target
-            return sample
+                    if os.path.exists(str(target)):
+                        target = self.client.get_object(Bucket=self.bucket, Key=self.targets[idx])['Body'].read()            
+            return (sample, target) if target is not None else sample
         else:
-            if self.targets:
-                return self.samples[idx], self.targets[idx]
-            return self.samples[idx]
+            return (self.samples[idx], self.targets[idx]) if self.targets else self.samples[idx]
 
     def loadChunksFromDLCache(self):
         """Load all chunks (MongoDB query result) of the given dataset. 
@@ -175,27 +175,27 @@ class DLCJobDataset(Dataset):
         Returns:
             None: initialize the self.sample_chunks and self.target_chunks
         """
-        chunk_etags = self.job_info['ChunkETags'][self.dtype[0]]
+        chunk_etags = self.job_info['ChunkETags'][self.dtype]
         
-        def helper(target_etags):
+        def helper(etags):
             chunk_groups = []
-            chunks = self.dataset_col.find({"ChunkETag": {"$in": target_etags}})
-            total_size = 0
-            chunk_groups.append([])
-            for chunk in chunks:
-                total_size += int(chunk['Size'])
-                if total_size >= self.maxpart:
-                    chunk_groups.append([])
-                    total_size = 0
-                elif int(chunk['Size']) > self.maxpart:
-                    raise Exception('File {} size is greater than assigned maxpartory.'.format(chunk['Key']))
-                else:
-                    chunk_groups[-1].append(chunk)
+            if etags:
+                chunks = self.dataset_col.find({"ChunkETag": {"$in": etags}})
+                total_size = 0
+                chunk_groups.append([])
+                for chunk in chunks:
+                    total_size += int(chunk['Size'])
+                    if total_size >= self.maxpart:
+                        chunk_groups.append([])
+                        total_size = 0
+                    elif int(chunk['Size']) > self.maxpart:
+                        raise Exception('File {} size is greater than assigned maxpartory.'.format(chunk['Key']))
+                    else:
+                        chunk_groups[-1].append(chunk)
             return chunk_groups
     
         self.sample_chunks = helper(chunk_etags['samples'])
-        if len(self.dtype) == 1:
-            self.target_chunks = helper(chunk_etags['targets'])
+        self.target_chunks = helper(chunk_etags['targets'])
         
     # dataset shouldn't be compressed when using this function
     def loadChunksFromCloud(self):
@@ -208,29 +208,29 @@ class DLCJobDataset(Dataset):
                 return pages
             return None
 
-        keys = self.job_info['Datasource']['keys'][self.dtype[0]]
+        keys = self.job_info['Datasource']['keys'][self.dtype]
         
-        def helper(target_keys):
+        def helper(keys):
             total_size = 0
             chunk_groups = []
-            pages = load_pages(target_keys)
-            for i in range(len(pages)):
-                for j in range(len(pages[i]['Contents'])):
-                    dataobj = pages[i]["Contents"][j]
-                    s = int(dataobj['Size'])
-                    total_size += s
-                    if total_size > self.maxpart:
-                        chunk_groups.append([])
-                        total_size = 0
-                    elif s > self.maxpart:
-                        raise Exception('File {} size is greater than assigned maxpartory.'.format(dataobj['Key']))
-                    else:
-                        chunk_groups[-1].append(dataobj)
+            if keys:
+                pages = load_pages(keys)
+                for i in range(len(pages)):
+                    for j in range(len(pages[i]['Contents'])):
+                        dataobj = pages[i]["Contents"][j]
+                        s = int(dataobj['Size'])
+                        total_size += s
+                        if total_size > self.maxpart:
+                            chunk_groups.append([])
+                            total_size = 0
+                        elif s > self.maxpart:
+                            raise Exception('File {} size is greater than assigned maxpartory.'.format(dataobj['Key']))
+                        else:
+                            chunk_groups[-1].append(dataobj)
             return chunk_groups
         
         self.sample_chunks = helper(keys['samples'])
-        if len(self.dtype) == 1:
-            self.target_chunks = helper(keys['targets'])  
+        self.target_chunks = helper(keys['targets'])  
 
     def load_data(self, partition_index):
         """Load file paths or actual data in the given partition
@@ -302,10 +302,13 @@ class DLCJobDataset(Dataset):
         
         if not target_fpaths:
             target_fpaths = [None] * len(sample_fpaths)
+
+        assert len(sample_fpaths) == len(target_fpaths)
         self.nfsFilePaths = list(zip(sample_fpaths, target_fpaths))
         self.samples, self.targets = self.__process__()
+        assert len(self.samples) == len(self.targets)
 
-    def __sample_reader__(self, path: str = None, raw_bytes: bytes = None):
+    def sample_reader(self, path: str = None, raw_bytes: bytes = None):
         """this function defines the logic of reading sample data (X) from a file
 
         Args:
@@ -317,19 +320,16 @@ class DLCJobDataset(Dataset):
         """
         raise NotImplementedError
     
-    def __target_reader__(self, path: str = None, raw_bytes: bytes = None):
+    def target_reader(self, path: str = None, raw_bytes: bytes = None):
         """this function defines the logic of reading target data (Y) from a file
 
         Args:
             path (string): read from a file
             raw_bytes (bytes): read from raw bytes
-
-        Raises:
-            NotImplementedError: _description_
         """
-        pass
+        return
     
-    def __process__(self) -> Tuple[List, List]:
+    def process(self) -> Tuple[List, List]:
         """process self.samples ans self.target
 
         Return iteratable X, y that can be indexed by __get_item__
