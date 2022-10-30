@@ -16,10 +16,14 @@ spec:
       keys:
         train:
           samples:
-            - OpenImages/train
+            - OpenImages/train/samples
+          manifests:
+            - OpenImages/train/manifest.csv
         validation:
           samples:
             - OpenImages/val
+          manifests:
+            - OpenImages/val/manifest.csv
     qos:
       usecache: true
       MaxPartMill: 10000

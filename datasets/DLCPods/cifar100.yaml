@@ -11,15 +11,19 @@ spec:
     image: zhuangweikang/imagedatasets-dev:latest
     command: ["bash"]
     datasource:
-      name: Imagenet-Mini-Obj
+      name: CIFAR100
       bucket: vuzhuangwei
       keys:
         train:
           samples:
-            - cifar100/train
+            - CIFAR100/train/samples
+          manifests: 
+            - CIFAR100/train/manifest.csv
         validation:
           samples:
-            - cifar100/val
+            - CIFAR100/val/samples
+          manifests: 
+            - CIFAR100/val/manifest.csv
     qos:
       usecache: true
       MaxPartMill: 10000

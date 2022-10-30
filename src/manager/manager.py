@@ -18,10 +18,36 @@ from utils import *
 logger = get_logger(name=__name__, level='debug')
 
 
+# def download_file(client, bucket, key, path):
+#     if os.path.exists(path):
+#         return
+#     import tarfile, zipfile
+#     tmp_file = '/tmp/{}'.format(path.split('/')[-1])
+#     logger.info("downloading file {} ...".format(key))
+#     try:
+#         client.download_file(bucket, key, tmp_file)
+#     except botocore.exceptions.ClientError as e:
+#         if e.response["Error"]["Code"] == "404":
+#             logger.error("Object {} does not exist".format(key))
+#         return False
+    
+#     if tarfile.is_tarfile(tmp_file):
+#         read_type = "r:gz" if tmp_file.endswith("tgz") else "r"
+#         with tarfile.open(tmp_file, read_type) as mytar:
+#             mytar.extractall(path, members=mytar)
+#         os.remove(tmp_file)
+#     elif zipfile.is_zipfile(tmp_file):
+#         with zipfile.ZipFile(tmp_file) as myzip:
+#             myzip.extractall(path)
+#         os.remove(tmp_file)
+#     else:
+#         shutil.move(tmp_file, path)
+#     return True    
+
+
 def download_file(client, bucket, key, path):
     if os.path.exists(path):
         return
-    import tarfile, zipfile
     tmp_file = '/tmp/{}'.format(path.split('/')[-1])
     logger.info("downloading file {} ...".format(key))
     try:
@@ -31,19 +57,17 @@ def download_file(client, bucket, key, path):
             logger.error("Object {} does not exist".format(key))
         return False
     
-    if tarfile.is_tarfile(tmp_file):
-        with tarfile.open(tmp_file,"r") as mytar:
-            mytar.extractall(path)
+    if tmp_file.endswith("tar.gz") or tmp_file.endswith('tgz'):
+        os.system("tar --use-compress-program=pigz -xvpf {} -C {}".format(tmp_file, path))
         os.remove(tmp_file)
-    elif zipfile.is_zipfile(tmp_file):
-        with zipfile.ZipFile(tmp_file) as myzip:
-            myzip.extractall(path)
+    elif tmp_file.endswith('zip'):
+        os.system("unzip {} -d {}".format(tmp_file, path))
         os.remove(tmp_file)
     else:
-        os.rename(tmp_file, path)
+        shutil.move(tmp_file, path)
     return True    
         
-
+        
 class Manager():
     def __init__(self):
         parser = configparser.ConfigParser()
@@ -203,7 +227,16 @@ class Manager():
             if 'ETag' in chunk:
                 etag = chunk['ETag'].strip("\"")
             else:
-                value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'obj_chunks
+                value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
+                etag = hashing(value)
+            chunk["Part"] = 0
+            chunk['ChunkETag'] = etag
+            chunk['ChunkSize'] = chunk['Size']
+            if not miss:
+                chunk = assignLocation(chunk)
+            path = "/{}/{}".format(chunk['Location'], etag)
+            download_file(s3_client, bucket_name, key, path)
+            obj_chunks = [chunk]
         else:
             # large file
             obj_chunks = []

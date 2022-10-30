@@ -20,7 +20,7 @@ class DLCJobDataset(Dataset):
         """An abstract class subclassing the torch.utils.data.Dataset class
         
         All datasets that represent a map from keys to data samples should subclass
-        it. All subclasses should overwrite :meth:`__process__`, supporting pre-processing loaded data. 
+        it. All subclasses should overwrite :meth:`process`, supporting pre-processing loaded data. 
         Subclasses should also overwrite meth:`__getitem__`, supporting fetching a
         data sample for a given key. Subclasses could also optionally overwrite
         :meth:`__len__`, which is expected to return the size of the dataset by many
@@ -29,7 +29,7 @@ class DLCJobDataset(Dataset):
         
         .. note::
         Subclassing ~DLCJobDataset will load data under provided keys from DLCache to var:`self.samples` as Map<Key, Value>.
-        Overwriting meth:`__process__` allows you to replace var:`self.samples` and var:`self.targets` with
+        Overwriting meth:`process` allows you to replace var:`self.samples` and var:`self.targets` with
         iteratable variables that can be iterated in meth:`__get_item__`.
         
         Args:
@@ -236,7 +236,7 @@ class DLCJobDataset(Dataset):
         """Load file paths or actual data in the given partition
         
         Initialize the self.samples and self.targets, where self.samples is a dict with format {key: file_path/data}
-        user performs data (X and y) processing in the __process__ function, that convert self.samples ans self.targets
+        user performs data (X and y) processing in the process function, that convert self.samples ans self.targets
         from dict to iteratable X, y
         
         If a chunk is a compressed, we generate a dummy key for individual files.
@@ -305,7 +305,7 @@ class DLCJobDataset(Dataset):
 
         assert len(sample_fpaths) == len(target_fpaths)
         self.nfsFilePaths = list(zip(sample_fpaths, target_fpaths))
-        self.samples, self.targets = self.__process__()
+        self.samples, self.targets = self.process()
         assert len(self.samples) == len(self.targets)
 
     def sample_reader(self, path: str = None, raw_bytes: bytes = None):
@@ -508,7 +508,7 @@ class DLCJobDataLoader(object):
     def __next__(self):
         try:
             # prefetch the next batch
-            pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))    
+            pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
             pre_idx = [str(idx) for idx in pre_idx]
             if len(pre_idx) > 0:
                 self.socket_pub.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])

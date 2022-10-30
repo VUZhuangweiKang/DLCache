@@ -240,9 +240,9 @@ class Client(object):
                                     })
                                 if os.path.exists(tmpfspath):
                                     os.remove(tmpfspath)
+                            
                             release(sample_path)
-                            if target_path:
-                                release(target_path)
+                            release(target_path)
 
 
 if __name__ == '__main__':
