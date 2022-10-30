@@ -15,34 +15,7 @@ from pymongo.mongo_client import MongoClient
 from utils import *
 
 
-logger = get_logger(name=__name__, level='debug')
-
-
-# def download_file(client, bucket, key, path):
-#     if os.path.exists(path):
-#         return
-#     import tarfile, zipfile
-#     tmp_file = '/tmp/{}'.format(path.split('/')[-1])
-#     logger.info("downloading file {} ...".format(key))
-#     try:
-#         client.download_file(bucket, key, tmp_file)
-#     except botocore.exceptions.ClientError as e:
-#         if e.response["Error"]["Code"] == "404":
-#             logger.error("Object {} does not exist".format(key))
-#         return False
-    
-#     if tarfile.is_tarfile(tmp_file):
-#         read_type = "r:gz" if tmp_file.endswith("tgz") else "r"
-#         with tarfile.open(tmp_file, read_type) as mytar:
-#             mytar.extractall(path, members=mytar)
-#         os.remove(tmp_file)
-#     elif zipfile.is_zipfile(tmp_file):
-#         with zipfile.ZipFile(tmp_file) as myzip:
-#             myzip.extractall(path)
-#         os.remove(tmp_file)
-#     else:
-#         shutil.move(tmp_file, path)
-#     return True    
+logger = get_logger(name=__name__, level='debug') 
 
 
 def download_file(client, bucket, key, path):
@@ -65,7 +38,7 @@ def download_file(client, bucket, key, path):
         os.remove(tmp_file)
     else:
         shutil.move(tmp_file, path)
-    return True    
+    return True
         
         
 class Manager():
