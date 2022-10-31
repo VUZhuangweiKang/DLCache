@@ -18,7 +18,10 @@ from utils import *
 logger = get_logger(name=__name__, level='debug') 
 
 
-def download_file(client, bucket, key, path):    
+def download_file(client, bucket, key, path):
+    if os.path.exists(path):
+        return 
+    
     tmp_file = '/tmp/{}'.format(path.split('/')[-1])
     logger.info("downloading file {} ...".format(key))
     try:

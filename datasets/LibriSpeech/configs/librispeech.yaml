@@ -7,7 +7,7 @@ trainer:
   max_epochs: 16
   accelerator: 'auto'
   devices: 1
-  precision: 16
+  precision: 32 # default 16
   gradient_clip_val: 400  # Norm cutoff to prevent explosion of gradients
   strategy: ddp
   enable_checkpointing: True

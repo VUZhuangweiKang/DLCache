@@ -287,14 +287,12 @@ class DLCJobDataset(Dataset):
         
         # build mappings between samples and targets if the dataset is file-based
         # and the manifest is specified
-        if self.lazy and self.targets and self.manifest:
+        if self.lazy and len(self.targets)>0 and self.manifest is not None:
             samples_ = {}
             targets_ = {}
             for _, row in self.manifest.iterrows():
-                dummy_key = os.path.join(row['sample_chunk'], row['sample'])
-                samples_[dummy_key] = self.samples[dummy_key]
-                dummy_key = os.path.join(row['target_chunk'], row['target'])
-                targets_[dummy_key] = self.targets[dummy_key]
+                samples_[row['sample']] = self.samples[row['sample']]
+                targets_[row['target']] = self.targets[row['target']]
             self.samples = samples_
             self.targets = targets_
             sample_fpaths = list(self.samples.values())

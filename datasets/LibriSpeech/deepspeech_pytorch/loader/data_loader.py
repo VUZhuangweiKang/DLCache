@@ -168,7 +168,7 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
     def __target_reader__(self, path: str = None, raw_bytes: bytes = None):
         return self.parse_transcript(path)
     
-    def __process__(self):
+    def process(self):
         """convert keys of self.data from /path/to/audio.wav to /path/to/audio.txt
         
         Returns:
@@ -176,10 +176,12 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
         """
         audio_objs = []
         transcript_objs = []
-        for wav_path in self.samples:
-            txt_path = str(wav_path).replace('/wav/', '/txt/').replace('.wav', '.txt')
-            audio_objs.append(self.samples[wav_path])
-            transcript_objs.append(self.targets[txt_path])
+        
+        sample_keys = list(self.samples.keys())
+        target_keys = list(self.targets.keys())
+        for i in range(len(sample_keys)):
+            audio_objs.append(self.samples[sample_keys[i]])
+            transcript_objs.append(self.targets[target_keys[i]])
         return audio_objs, transcript_objs
     
     def parse_transcript(self, transcript_path):
