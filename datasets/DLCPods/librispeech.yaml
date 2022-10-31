@@ -19,11 +19,22 @@ spec:
             - LibriSpeech/train/wav
           targets:
             - LibriSpeech/train/txt
+          manifests:
+            - LibriSpeech/train/manifest.csv
         validation:
           samples:
             - LibriSpeech/val/wav
           targets:
             - LibriSpeech/val/txt
+          manifests:
+            - LibriSpeech/val/manifest.csv
+        test:
+          samples:
+            - LibriSpeech/test/wav
+          targets:
+            - LibriSpeech/test/txt
+          manifests:
+            - LibriSpeech/test/manifest.csv
     qos:
       usecache: true
       MaxPartMill: 10000

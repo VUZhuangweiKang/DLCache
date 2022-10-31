@@ -18,9 +18,7 @@ from utils import *
 logger = get_logger(name=__name__, level='debug') 
 
 
-def download_file(client, bucket, key, path):
-    if os.path.exists(path):
-        return
+def download_file(client, bucket, key, path):    
     tmp_file = '/tmp/{}'.format(path.split('/')[-1])
     logger.info("downloading file {} ...".format(key))
     try:
@@ -29,12 +27,11 @@ def download_file(client, bucket, key, path):
         if e.response["Error"]["Code"] == "404":
             logger.error("Object {} does not exist".format(key))
         return False
-    
-    if tmp_file.endswith("tar.gz") or tmp_file.endswith('tgz'):
-        os.system("tar --use-compress-program=pigz -xvpf {} -C {}".format(tmp_file, path))
-        os.remove(tmp_file)
-    elif tmp_file.endswith('zip'):
-        os.system("unzip {} -d {}".format(tmp_file, path))
+
+    if key.endswith("tar.gz") or key.endswith('tgz'):
+        if not os.path.exists(path):
+            os.makedirs(path)
+        os.system("tar --use-compress-program=pigz -xf {} -C {}".format(tmp_file, path))
         os.remove(tmp_file)
     else:
         shutil.move(tmp_file, path)
@@ -379,7 +376,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     paginator = s3_client.get_paginator('list_objects_v2')
                     pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
                     futures = []
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                         for page in pages:
                             if 'Contents' not in page:
                                 continue
@@ -394,7 +391,8 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             dataset_etags = defaultdict(dict)
             chunks = []
             node_seq = request.nodesequence
-            with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = []
                 for l1 in ['train', 'validation', 'test']:
                     for l2 in ['samples', 'targets', 'manifests']:
