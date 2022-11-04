@@ -4,6 +4,8 @@ RUN apt update && apt install -y python3-pip nano tar unzip pigz
 RUN mkdir app
 WORKDIR /app
 COPY manager ./
+COPY constants.py ./manager/
+COPY utils.py import ./manager/
 COPY grpctool ./grpctool
 RUN pip install -r requirements.txt
 RUN chmod +x *

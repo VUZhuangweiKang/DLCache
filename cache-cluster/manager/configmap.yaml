@@ -8,8 +8,9 @@ data:
     [manager]
     bind=[::]
     port=50051
-    eviction-policy=lru
-    eviction-size=1
+    attenuationFactor=2
+    stepFactor=0.5
+    costFactor=0.5
 
     [mongodb]
     username=docgroup

@@ -1,9 +1,8 @@
 import os
-import shutil
 import logging
-import string
-from google.protobuf.timestamp_pb2 import Timestamp
 import pickle
+import shutil
+from google.protobuf.timestamp_pb2 import Timestamp
 import hashlib
 import nvidia_smi
 
@@ -27,49 +26,26 @@ def get_logger(name=__name__, level:str ='INFO', file=None):
         logger.addHandler(fl)
     return logger
 
-grpc_ts = lambda ts: Timestamp(seconds=int(ts), nanos=int(ts % 1 * 1e9))
-
-
-def hashing(data):
-    if type(data) is not bytes:
-        data = pickle.dumps(data)
-    return hashlib.sha256(data).hexdigest()
-
-
-def get_cpu_free_mem():
-    total, used, free, shared, cache, available = map(int, os.popen('free -t -m').readlines()[1].split()[1:])
-    return free
-
-def get_gpu_free_mem():
-    try:
-        nvidia_smi.nvmlInit()
-        deviceCount = nvidia_smi.nvmlDeviceGetCount()
-        total = 0
-        total_free = 0
-        total_used = 0
-        for i in range(deviceCount):
-            handle = nvidia_smi.nvmlDeviceGetHandleByIndex(i)
-            info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
-            total += info.total
-            total_free += info.total_free
-            total_used += info.total_used
-        return total_free
-    except:
-        return 0
-
-def val(key: string, logger: logging.Logger=None):
-    v = os.environ.get(key)
-    if v is None:
-        logger.error("environment variable %s is unset".format(key))
-        raise Exception
-    return v
-
 class dotdict(dict):
     """dot.notation access to dictionary attributes"""
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
     
+grpc_ts = lambda ts: Timestamp(seconds=int(ts), nanos=int(ts % 1 * 1e9))
+
+def hashing(data):
+    if type(data) is not bytes:
+        data = pickle.dumps(data)
+    return hashlib.sha256(data).hexdigest()
+    
+def parse_config(section: str) -> dotdict:
+        with open("/config/{}".format(section), 'r') as f:
+            config_str = f.readlines()
+        result = {}
+        for item in map(lambda x: x.split("="), config_str):
+            result[item[0]] = item[1]
+        return dotdict(result)
 
 def MessageToDict(message):
     message_dict = {}
@@ -96,14 +72,49 @@ def MessageToDict(message):
     
     return message_dict
 
-
+def csv_has_header(path):
+    import csv
+    with open(path, 'rb') as csvfile:
+        sniffer = csv.Sniffer()
+        has_header = sniffer.has_header(csvfile.read(2048))
+        csvfile.seek(0)
+        return has_header
+    
 def copyfile(src, dst):
     assert os.path.exists(src)
     base_dir = '/'.join(dst.split('/')[:-1])
     if not os.path.exists(base_dir):
         os.system('mkdir -p {}'.format(base_dir))
-    shutil.copy2(src, dst)
+    shutil.copy(src, dst)
 
+
+def get_cpu_free_mem():
+    total, used, free, shared, cache, available = map(int, os.popen('free -t -m').readlines()[1].split()[1:])
+    return free
+
+def get_gpu_free_mem():
+    try:
+        nvidia_smi.nvmlInit()
+        deviceCount = nvidia_smi.nvmlDeviceGetCount()
+        total = 0
+        total_free = 0
+        total_used = 0
+        for i in range(deviceCount):
+            handle = nvidia_smi.nvmlDeviceGetHandleByIndex(i)
+            info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
+            total += info.total
+            total_free += info.total_free
+            total_used += info.total_used
+        return total_free
+    except:
+        return 0
+
+def val(key: str, logger: logging.Logger=None):
+    v = os.environ.get(key)
+    if v is None:
+        logger.error("environment variable %s is unset".format(key))
+        raise Exception
+    return v
 
 def read_secret(arg):
     path = '/secret/{}'.format(arg)

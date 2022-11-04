@@ -23,10 +23,18 @@ cloudSecret = {
     "aws_secret_access_key": read_secret('aws_secret_access_key'),
     "region_name": read_secret('region_name')   
 }
-manager_uri = "dlcpod-manager:50051"
+
 init_channel = 'ipc:///share/init.ipc'
 ipc_channel = 'ipc:///share/runtime.ipc'
 
+class CHUNK_STATUS:
+    PREPARE = 0
+    ACTIVE = 1
+    PENDING = 2
+    COOL_DOWN = 3
+    INACTIVE = 4
+    
+# TODO: 检测job进入cool down的时刻
 
 class Client(object):
     def __init__(self):

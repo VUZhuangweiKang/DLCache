@@ -3,6 +3,8 @@ RUN apt update && apt install -y python3-pip nano
 RUN mkdir app
 WORKDIR /app
 COPY client ./
+COPY constants.py ./client/
+COPY utils.py import ./client/
 COPY grpctool ./grpctool
 RUN pip3 install -r requirements.txt
 RUN chmod +x *

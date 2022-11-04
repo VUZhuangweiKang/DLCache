@@ -9,10 +9,16 @@ from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 
-
 jobinfo = "/share/{}.json".format(os.environ.get('JOBNAME'))
 init_channel = 'ipc:///share/init.ipc'
 ipc_channel = 'ipc:///share/runtime.ipc'
+
+class CHUNK_STATUS:
+    PREPARE = 0
+    ACTIVE = 1
+    PENDING = 2
+    COOL_DOWN = 3
+    INACTIVE = 4
 
 
 class DLCJobDataset(Dataset):
@@ -64,6 +70,16 @@ class DLCJobDataset(Dataset):
             mongo_client = MongoClient(job_meta['mongoUri'])
             self.job_info = mongo_client.Cacher.Job.find_one({"Meta.JobId": job_meta['jobId']})
             self.dataset_col = mongo_client.Cacher.Datasets
+            
+            # update chunk status
+            self.dataset_col.update_many(
+                {
+                    "Jobs": {"$elemMath": {"$eq": job_meta['jobId']}},
+                    "Category": {"$eq": self.dtype}
+                },{
+                    "Status": CHUNK_STATUS.ACTIVE
+                }
+            )
             
             mfst_etags = self.job_info["ChunkETags"][self.dtype]["manifests"]
             self.manifest = None

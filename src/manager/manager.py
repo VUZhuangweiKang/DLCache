@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import grpc
+import time
 import boto3, botocore
 import json, bson
 import configparser
@@ -12,35 +13,23 @@ from datetime import datetime
 import concurrent.futures
 from collections import defaultdict
 from pymongo.mongo_client import MongoClient
-from utils import *
+from utils import * 
 
 
 logger = get_logger(name=__name__, level='debug') 
+manager_uri = "dlcpod-manager:50051"
+
+API_PRICE = 0.004/1e4
+TRANSFER_PRICE = 0.09 # per GB
+
+class CHUNK_STATUS:
+    PREPARE = 0
+    ACTIVE = 1
+    PENDING = 2
+    COOL_DOWN = 3
+    INACTIVE = 4
 
 
-def download_file(client, bucket, key, path):
-    if os.path.exists(path):
-        return 
-    
-    tmp_file = '/tmp/{}'.format(path.split('/')[-1])
-    logger.info("downloading file {} ...".format(key))
-    try:
-        client.download_file(bucket, key, tmp_file)
-    except botocore.exceptions.ClientError as e:
-        if e.response["Error"]["Code"] == "404":
-            logger.error("Object {} does not exist".format(key))
-        return False
-
-    if key.endswith("tar.gz") or key.endswith('tgz'):
-        if not os.path.exists(path):
-            os.makedirs(path)
-        os.system("tar --use-compress-program=pigz -xf {} -C {}".format(tmp_file, path))
-        os.remove(tmp_file)
-    else:
-        shutil.move(tmp_file, path)
-    return True
-        
-        
 class Manager():
     def __init__(self):
         parser = configparser.ConfigParser()
@@ -101,8 +90,62 @@ class Manager():
         )
         s3_client = s3_session.client('s3')
         return s3_client
+    
+    def download_file(self, client, bucket, key, path):
+        """Download and extract file from S3
 
-    def filter_chunks(self, page: list):
+        Cost = a*(L_download + L_extraction) + (1-a)*(C_API + C_transport) 
+        
+        Args:
+            client (Client): s3 client
+            bucket (str): s3 bucket name
+            key (str): object key
+            path (str): destination path
+
+        Returns:
+            float: cost of data preparation
+        """
+        if os.path.exists(path):
+            return 0
+        
+        tmp_file = '/tmp/{}'.format(path.split('/')[-1])
+        logger.info("downloading file {} ...".format(key))
+        
+        l_download = l_extract = 0
+        cost_transport = 0
+        
+        start = time.time()
+        try:
+            client.download_file(bucket, key, tmp_file)
+            l_download = time.time() - start
+            cost_transport = TRANSFER_PRICE * os.path.getsize(tmp_file)
+        except botocore.exceptions.ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                logger.error("Object {} does not exist".format(key))
+            return -1
+
+        start = time.time()
+        if key.endswith("tar.gz") or key.endswith('tgz'):
+            if not os.path.exists(path):
+                os.makedirs(path)
+            os.system("tar --use-compress-program=pigz -xf {} -C {}".format(tmp_file, path))
+            l_extract = time.time() - start
+            os.remove(tmp_file)
+        else:
+            shutil.move(tmp_file, path)
+        
+        cost = self.managerconf['costFactor']*(l_download + l_extract) + (1-self.managerconf['costFactor'])*(API_PRICE+TRANSFER_PRICE*cost_transport)
+        return cost
+
+    def filter_chunks(self, page):
+        """Set the Exist and ChunkETag fields for s3 returned objects
+
+        Args:
+            page (List): s3 pages
+
+        Returns:
+            List[dict]: a list of s3 object contents
+        """
         etags = {}
         for i in range(len(page)):
             if page[i]['Size'] == 0: continue
@@ -124,6 +167,56 @@ class Manager():
             info['ChunkETag'] = info['ETag']
             chunks.append(info)
         return chunks
+    
+    def check_resources(self, chunks, node_sequence):
+        """Check if the cluster has sufficient resource to accomadate the chunks
+
+        Args:
+            chunks (List[dict]): a list of chunk objects
+            node_sequence (List[str]): Node IPs in the cluster
+            
+        Returns:
+            bool: if the chunks are deployable
+        """
+        free_space = {}
+        for node in node_sequence:
+            free_space[node] = shutil.disk_usage("/{}".format(node))[-1]
+        
+        remain_chunks = []
+        extra_space = 0
+        for chunk in chunks:
+            s = chunk['ChunkSize']
+            if chunk['Exist']:
+                continue
+            if len(free_space) > 0:
+                node = free_space.items()[0][0]
+                if free_space[node] >= s:
+                    free_space[node] -= s
+                else:
+                    remain_chunks.append(chunk)
+                    del free_space[node]
+            else:
+                extra_space += s
+        
+        if extra_space > 0:
+            # calculate preemptible space
+            preempt_space = self.dataset_col.aggregate([
+                {"$match": {"Status": {"$in": [CHUNK_STATUS.INACTIVE, CHUNK_STATUS.COOL_DOWN, CHUNK_STATUS.PENDING]}}},
+                {"$group": {"PreemptibleSpace": {"$sum": "$ChunkSize"}}}
+            ])['PreemptibleSpace']
+            # the job is deployable
+            if preempt_space >= extra_space:
+                for status in [CHUNK_STATUS.INACTIVE, CHUNK_STATUS.COOL_DOWN, CHUNK_STATUS.PENDING]:
+                    candidates = self.dataset_col.find({'Status': status})
+                    extra_space = self.cost_aware_lrfu(candidates, extra_space)
+                    if extra_space == 0:
+                        break
+            else:
+                return False
+        return True
+    
+    def cost_aware_lrfu(self, chunks, require: float):
+        pass
     
     # Hybrid Data Eviction: evict dataobj from a specific NFS server
     # 1. data objs without any binding running jobs are first removed based on the LFU policy.
@@ -172,7 +265,7 @@ class Manager():
                     return [chunk]
                 except OSError:  # handle the case that the node is out of space
                     continue
-            self.data_eviction(node=node_sequence[0], require=chunk['ChunkSize'])
+            # self.data_eviction(node=node_sequence[0], require=chunk['ChunkSize'])
     
     def clone_chunk(self, chunk: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None, miss=False):
         key = chunk['Key']
@@ -183,7 +276,7 @@ class Manager():
         now = datetime.utcnow().timestamp()
         chunk['LastAccessTime'] = bson.timestamp.Timestamp(int(now), inc=1)
         file_type = key.split('.')[-1].lower()
-
+        
         def assignLocation(obj):
             # try to assign the object follow the node sequence
             # if failed, evict data
@@ -193,7 +286,7 @@ class Manager():
                     if free_space >= obj['ChunkSize']:
                         obj['Location'] = node
                         return obj
-                self.data_eviction(node=node_sequence[0], require=obj['ChunkSize'])
+                # self.data_eviction(node=node_sequence[0], require=obj['ChunkSize'])
 
         chunk_size *= 1e6 # Mill bytes --> bytes
         if chunk['Size'] <= chunk_size:
@@ -208,13 +301,14 @@ class Manager():
             if not miss:
                 chunk = assignLocation(chunk)
             path = "/{}/{}".format(chunk['Location'], etag)
-            download_file(s3_client, bucket_name, key, path)
+            cost = self.download_file(s3_client, bucket_name, key, path)
+            chunk['Cost'] = cost
             obj_chunks = [chunk]
         else:
             # large file
             obj_chunks = []
             path = '/tmp/{}'.format(key)
-            download_file(s3_client, bucket_name, key, path)
+            cost = self.download_file(s3_client, bucket_name, key, path)
             if file_type in ['csv', 'parquet']:
                 from dask import dataframe as DF
                 if file_type == 'csv':
@@ -235,6 +329,7 @@ class Manager():
                             chunk_part.to_parquet(path='/', write_metadata_file=False, name_function=lambda _: path)
                         chunk['ChunkETag'] = etag
                         chunk['Part'] = i
+                        chunk['Cost'] = cost*chunk['ChunkSize']/chunk['Size']
                         obj_chunks.append(chunk)
             elif file_type == 'npy':
                 import numpy as np
@@ -263,6 +358,7 @@ class Manager():
                             np.save(path, value)
                             chunk['ChunkETag'] = etag
                             chunk['Part'] = p
+                            chunk['Cost'] = cost*chunk['ChunkSize']/chunk['Size']
                             obj_chunks.append(chunk)
                         start_row += num_rows
                         p += 1
@@ -275,6 +371,7 @@ class Manager():
                         if part is None or part == p:
                             etag = hashing(value)
                             chunk['ChunkSize'] = sys.getsizeof(value)
+                            chunk['Cost'] = cost*chunk['ChunkSize']/chunk['Size']
                             chunk = assignLocation(chunk)
                             path = "/{}/{}".format(chunk['Location'], etag)
                             with open(path, 'wb') as f:
@@ -351,7 +448,6 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             test = request.datasource.keys.test
             
             def load_chunks(l1, l2):
-                
                 if l1 == 'train':
                     if l2 == "samples":
                         keys = train.samples
@@ -398,22 +494,29 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = []
                 for l1 in ['train', 'validation', 'test']:
+                    raw_chunks  = []
                     for l2 in ['samples', 'targets', 'manifests']:
-                        raw_chunks = load_chunks(l1, l2)
-                        if not raw_chunks:
+                        raws = load_chunks(l1, l2)
+                        if not raws:
                             dataset_etags[l1][l2] = []
                             continue
                         else:
-                            dataset_etags[l1][l2] = [chunk['ChunkETag'] for chunk in raw_chunks]
-                            
-                        # downloading ...
-                        for chunk in raw_chunks:
-                            if not chunk['Exist']:
-                                # we also perform data eviction in the clone_chunk function if pre-allocated space is occupied by other jobs
-                                futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, request.qos.MaxPartMill, node_seq))
-                            elif chunk['Location'] != node_seq[0]:
-                                # move the data to a node in nodesequence
-                                futures.append(executor.submit(self.manager.move_chunk, chunk, node_seq))
+                            dataset_etags[l1][l2] = [chunk['ChunkETag'] for chunk in raws]
+                            for i in range(len(raws)):
+                                raws[i]['Category'] = l1
+                                raws[i]['Status'] = CHUNK_STATUS.PENDING
+                            raw_chunks.extend(raws)
+                    
+                    # TODO: check if the job is deployable, the train set must be deployable if the job can be accepted
+                    
+                     
+                    # downloading ...
+                    for chunk in raw_chunks:
+                        if not chunk['Exist']:
+                            futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, request.qos.MaxPartMill, node_seq))
+                        elif chunk['Location'] != node_seq[0]:
+                            # move the data to a node in nodesequence
+                            futures.append(executor.submit(self.manager.move_chunk, chunk, node_seq))
                 for future in concurrent.futures.as_completed(futures):
                     chunks.extend(future.result())
             
