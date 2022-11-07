@@ -1,41 +1,41 @@
 {
     "title" : "Datasets",    
     "bsonType": "object",
-    "required": ["ETag", "ChunkETag", "Key", "Location", "Size", "ChunkSize", "LastModified", "TotalAccessTime", "LastAccessTime"],
+    "required": ["Bucket", "Key", "ETag", "Location", "Size"],
     "properties": {
+        "Bucket": {"bsonType": "string"}, 
+        "Key": {"bsonType": "string"},
         "ETag": {"bsonType": "string"},
         "ChunkETag": {"bsonType": "string"},
         "Part": {"bsonType": "int"},
-        "Key": {"bsonType": "string"},
         "Location": {"bsonType": "string"},
         "Size": {"bsonType": ["long", "int"]},
         "ChunkSize": {"bsonType": ["long", "int"]},
-        "Cost": {"bsonType": "double"},
-        "Category": {"bsonType": "string"},
+        "Cost": {"bsonType": "string"},
+        "Category": {
+            "enum": ["train", "validation", "test"]
+        },
+        "Exist": {"bsonType": "bool"},
         "Status": {
             "bsonType": "object",
-            "required": ["code", "active_count", "cool_down_init"],
+            "required": ["code"],
             "properties": {
                 "code": {"bsonType": "int"},
-                "active_count": {"bsonType": "int"},
-                "cool_down_init": {"bsonType": ["timestamp", "int"]}
+                "active_count": {"bsonType": ["int", "null"]},
+                "cool_down_init": {"bsonType": ["timestamp", "null"]}
             }
         },
         "LastModified": {"bsonType": "timestamp"},
         "InitTime": {"bsonType": "timestamp"},
         "TotalAccessTime": {"bsonType": "int"},
-        "LastAccessTime": {"bsonType": "timestamp"},
         "References": {
             "bsonType": "array",
-            "items": {
-                "bsonType": "timestamp"
-            }
+            "items": {"bsonType": "timestamp"}
         },
         "Jobs": {
             "bsonType": "array",
-            "items": {
-                "bsonType": "string"
-            }
+            "items": {"bsonType": "string"}
         }
-    }
+    },
+    "additionalProperties": true
 }

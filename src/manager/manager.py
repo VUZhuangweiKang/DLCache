@@ -185,11 +185,11 @@ class Manager():
         remain_chunks = []
         extra_space = 0
         for chunk in chunks:
-            s = chunk['ChunkSize']
+            s = chunk['Size']
             if chunk['Exist']:
                 continue
             if len(free_space) > 0:
-                node = free_space.items()[0][0]
+                node = list(free_space.items())[0][0]
                 if free_space[node] >= s:
                     free_space[node] -= s
                 else:
@@ -218,7 +218,7 @@ class Manager():
     def cost_aware_lrfu(self, chunks, require: float):
         scores = []
         for i, chunk in enumerate(chunks):
-            init_time, ref_times, cost = chunk['InitTime'], chunk['References'], chunk['Cost']
+            init_time, ref_times, cost = chunk['InitTime'], chunk['References'], float(chunk['Cost'])
             crf = 0
             for ref in ref_times:
                 dur = (ref.as_datetime() - init_time.as_datetime()).total_seconds()
@@ -240,37 +240,37 @@ class Manager():
         if require <= 0:
             return 0
         return require
-            
+
     # Hybrid Data Eviction: evict dataobj from a specific NFS server
     # 1. data objs without any binding running jobs are first removed based on the LFU policy.
     # 2. regarding the datasets being used, we adopt the LRU policy
-    def data_eviction(self, node=None, require=None):
-        def helper(pipeline):
-            nonlocal require
-            if node:
-                pipeline.append({"$match": {"Location": node}})
-            rmobjs = self.dataset_col.aggregate(pipeline)
-            for obj in rmobjs:
-                if require <= 0: break
-                path = '/{}/{}'.format(obj['Location'], obj['ChunkETag'])
-                if os.path.exists(path):
-                    if os.path.isdir(path):
-                        os.rmdir(path)
-                    else:
-                        os.remove(path)
-                    require -= obj['ChunkSize']
-            self.dataset_col.delete_many({"ChunkETag": [obj['ChunkETag'] for obj in rmobjs]})
+    # def data_eviction(self, node=None, require=None):
+    #     def helper(pipeline):
+    #         nonlocal require
+    #         if node:
+    #             pipeline.append({"$match": {"Location": node}})
+    #         rmobjs = self.dataset_col.aggregate(pipeline)
+    #         for obj in rmobjs:
+    #             if require <= 0: break
+    #             path = '/{}/{}'.format(obj['Location'], obj['ChunkETag'])
+    #             if os.path.exists(path):
+    #                 if os.path.isdir(path):
+    #                     os.rmdir(path)
+    #                 else:
+    #                     os.remove(path)
+    #                 require -= obj['ChunkSize']
+    #         self.dataset_col.delete_many({"ChunkETag": [obj['ChunkETag'] for obj in rmobjs]})
             
-        lfu_pipeline = [{"$project": {'Location': 1, 'ChunkETag': 1, 'TotalAccessTime': 1, 'ChunkSize': 1, 'Jobs': 1, 'num_jobs': {'$size': '$Jobs'}}},
-                        {"$match": {"num_jobs": {"$eq": 0}}},
-                        {"$sort": {"TotalAccessTime": 1}}]
-        helper(lfu_pipeline)
+    #     lfu_pipeline = [{"$project": {'Location': 1, 'ChunkETag': 1, 'TotalAccessTime': 1, 'ChunkSize': 1, 'Jobs': 1, 'num_jobs': {'$size': '$Jobs'}}},
+    #                     {"$match": {"num_jobs": {"$eq": 0}}},
+    #                     {"$sort": {"TotalAccessTime": 1}}]
+    #     helper(lfu_pipeline)
         
-        if require > 0:
-            lru_pipline = [{"$project": {'Location': 1, 'ChunkETag': 1, 'LastAccessTime': 1, 'ChunkSize': 1, 'Jobs': 1, 'num_jobs': {'$size': '$Jobs'}}}, 
-                           {"$match": {"num_jobs": {"$gt": 0}}},
-                           {"$sort": {"LastAccessTime": 1}}]
-            helper(lru_pipline)
+    #     if require > 0:
+    #         lru_pipline = [{"$project": {'Location': 1, 'ChunkETag': 1, 'LastAccessTime': 1, 'ChunkSize': 1, 'Jobs': 1, 'num_jobs': {'$size': '$Jobs'}}}, 
+    #                        {"$match": {"num_jobs": {"$gt": 0}}},
+    #                        {"$sort": {"LastAccessTime": 1}}]
+    #         helper(lru_pipline)
 
     # Dataset Rebalance: if some data objects from a dataset is already existing
     def move_chunk(self, chunk, node_sequence):
@@ -289,7 +289,7 @@ class Manager():
                 except OSError:  # handle the case that the node is out of space
                     continue
             # self.data_eviction(node=node_sequence[0], require=chunk['ChunkSize'])
-    
+
     def clone_chunk(self, chunk: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None, miss=False):
         key = chunk['Key']
         chunk["Bucket"] = bucket_name
@@ -298,7 +298,6 @@ class Manager():
             chunk['TotalAccessTime'] = 0
         now = datetime.utcnow().timestamp()
         chunk['InitTime'] = bson.timestamp.Timestamp(int(now), inc=1)
-        chunk['LastAccessTime'] = bson.timestamp.Timestamp(int(now), inc=1)
         file_type = key.split('.')[-1].lower()
         
         def assignLocation(obj):
@@ -326,7 +325,7 @@ class Manager():
                 chunk = assignLocation(chunk)
             path = "/{}/{}".format(chunk['Location'], etag)
             cost = self.download_file(s3_client, bucket_name, key, path)
-            chunk['Cost'] = cost
+            chunk['Cost'] = str(cost)
             obj_chunks = [chunk]
         else:
             # large file
@@ -353,7 +352,7 @@ class Manager():
                             chunk_part.to_parquet(path='/', write_metadata_file=False, name_function=lambda _: path)
                         chunk['ChunkETag'] = etag
                         chunk['Part'] = i
-                        chunk['Cost'] = cost*chunk['ChunkSize']/chunk['Size']
+                        chunk['Cost'] = str(cost*chunk['ChunkSize']/chunk['Size'])
                         obj_chunks.append(chunk)
             elif file_type == 'npy':
                 import numpy as np
@@ -382,7 +381,7 @@ class Manager():
                             np.save(path, value)
                             chunk['ChunkETag'] = etag
                             chunk['Part'] = p
-                            chunk['Cost'] = cost*chunk['ChunkSize']/chunk['Size']
+                            chunk['Cost'] = str(cost*chunk['ChunkSize']/chunk['Size'])
                             obj_chunks.append(chunk)
                         start_row += num_rows
                         p += 1
@@ -395,7 +394,7 @@ class Manager():
                         if part is None or part == p:
                             etag = hashing(value)
                             chunk['ChunkSize'] = sys.getsizeof(value)
-                            chunk['Cost'] = cost*chunk['ChunkSize']/chunk['Size']
+                            chunk['Cost'] = str(cost*chunk['ChunkSize']/chunk['Size'])
                             chunk = assignLocation(chunk)
                             path = "/{}/{}".format(chunk['Location'], etag)
                             with open(path, 'wb') as f:
@@ -534,7 +533,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                                     else:
                                         raws[i]["Status"]["code"] = CHUNK_STATUS.PENDING
                                 else:
-                                    raws[i]['Status'] = {"code": CHUNK_STATUS.PENDING, "active_count": 1, "cool_down_init": -1}
+                                    raws[i]['Status'] = {"code": CHUNK_STATUS.PENDING, "active_count": 1}
                             raw_chunks.extend(raws)
                     
                     # try to acquire resources for the job
@@ -565,6 +564,8 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             self.manager.job_col.insert_one(jobInfo)
 
             for chunk in chunks:
+                if 'References' not in chunk:
+                    chunk['References'] = []
                 if not chunk['Exist']:
                     chunk['Jobs'] = [jobId]
                     self.manager.dataset_col.insert_one(chunk)

@@ -4,7 +4,7 @@
     "required": [
         "Meta",
         "QoS",
-        "ETags"
+        "ChunkETags"
     ],
     "properties": {
         "Meta": {
