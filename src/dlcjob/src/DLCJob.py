@@ -3,6 +3,8 @@ import json
 import math
 import random
 import numpy as np
+from datetime import datetime
+import bson
 import zmq
 from multiprocessing import Process, Queue
 from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
@@ -74,10 +76,11 @@ class DLCJobDataset(Dataset):
             # update chunk status
             self.dataset_col.update_many(
                 {
-                    "Jobs": {"$elemMath": {"$eq": job_meta['jobId']}},
+                    "Jobs": {"$elemMatch": {"$eq": job_meta['jobId']}},
                     "Category": {"$eq": self.dtype}
                 },{
-                    "Status": CHUNK_STATUS.ACTIVE
+                    "Status.code": CHUNK_STATUS.ACTIVE,
+                    "$inc": {"Status.active_count": 1}
                 }
             )
             
@@ -353,8 +356,8 @@ class DLCJobDataset(Dataset):
         """
         raise NotImplementedError
     
-    def __getitem__(self, index: int) -> Any:
-        """
+    def __getitem__(self, index: int):
+        """get the sample and target at the given index
         Args:
             index (int): Index
 
@@ -452,7 +455,7 @@ class DLCJobDataLoader(object):
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.sampler = sampler
-        self.batch_sampler = batch_sampler 
+        self.batch_sampler = batch_sampler
         self.num_workers = num_workers
         self.collate_fn = collate_fn
         self.pin_memory = pin_memory
@@ -483,6 +486,22 @@ class DLCJobDataLoader(object):
             self.torch_loader = DataLoader(self.dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
                                   self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
                                   prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
+
+            # update chunk status to ACTIVE
+            sample_etags = [chunk['ChunkETag'] for chunk in self.dataset.sample_chunks]
+            target_etags = [chunk['ChunkETag'] for chunk in self.dataset.target_chunks]
+            etags = sample_etags.extend(target_etags)
+            self.dataset.dataset_col.update_many(
+                {
+                    "ChunkETag": {"$in": etags},
+                    "Status.code": {"$ne": CHUNK_STATUS.ACTIVE}
+                }, 
+                [
+                    {"$set": { "Status.code": CHUNK_STATUS.ACTIVE}},
+                    {"$inc": {"Status.active_count": 1}}
+                ]
+            )
+                
             file_paths = np.array(self.dataset.nfsFilePaths)
             self.batchedNfsPaths = [file_paths[idx].tolist() for idx in iter(self.torch_loader._index_sampler)]
             # client will copy the first batch when receive init msg
@@ -521,6 +540,9 @@ class DLCJobDataLoader(object):
     
     def __next__(self):
         try:
+            if self.loader._send_idx == self.num_batches-1:
+                self._init_loader(first_iter=False)
+                
             # prefetch the next batch
             pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
             pre_idx = [str(idx) for idx in pre_idx]
@@ -534,13 +556,40 @@ class DLCJobDataLoader(object):
             data = next(self.loader)
         except StopIteration:
             print('raise StopIteration Exception....')
-             # epoch is down
+            # epoch is down
             if self.partition_index == len(self.dataset.sample_chunks)-1:
                 self.partition_index = 0
-                self._init_loader(first_iter=False)
+                    
+                # update chunk status to COOL_DOWN
+                all_chunks = self.dataset.sample_chunks.extend(self.dataset.target_chunks)
+                etags = [chunk['ChunkETag'] for chunk in all_chunks]
+                now = datetime.utcnow().timestamp()
+                self.dataset.dataset_col.update_many(
+                    {
+                        "ChunkETag": {"$in": etags}
+                    },
+                    [
+                        {"$inc": {"Status.active_count": -1}},
+                        {"$set": {
+                            "Status.code": {
+                                "$cond": {
+                                    "if": {"Status.active_count": 0},
+                                    "then": CHUNK_STATUS.INACTIVE
+                                }
+                            },
+                            "Status.cool_down_init": {
+                                "$cond": {
+                                    "if": {"Status.active_count": 0},
+                                    "then": bson.timestamp.Timestamp(int(now), inc=1)
+                                }
+                            }
+                        }}
+                    ]
+                )
+                self.socket_pub.send_multipart([b'expireCache', b''])
                 raise StopIteration
             else:
-                # data in the current chunk have been consumed
+                # data in the current part have been consumed
                 self.partition_index += 1
                 self.clear()
                 self.dataset.load_data(self.partition_index)

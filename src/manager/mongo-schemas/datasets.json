@@ -12,8 +12,17 @@
         "ChunkSize": {"bsonType": ["long", "int"]},
         "Cost": {"bsonType": "float"},
         "Category": {"bsonType": "string"},
-        "Status": {"bsonType": "int"},
+        "Status": {
+            "bsonType": "object",
+            "required": ["code", "active_count", "cool_down_init"],
+            "properties": {
+                "code": {"bsonType": "int"},
+                "active_count": {"bsonType": "int"},
+                "cool_down_init": {"bsonType": ["timestamp", "int"]}
+            }
+        },
         "LastModified": {"bsonType": "timestamp"},
+        "InitTime": {"bsonType": "timestamp"},
         "TotalAccessTime": {"bsonType": "int"},
         "LastAccessTime": {"bsonType": "timestamp"},
         "Jobs": {

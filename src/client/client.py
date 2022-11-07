@@ -23,18 +23,18 @@ cloudSecret = {
     "aws_secret_access_key": read_secret('aws_secret_access_key'),
     "region_name": read_secret('region_name')   
 }
-
+manager_uri = "dlcpod-manager:50051"
 init_channel = 'ipc:///share/init.ipc'
 ipc_channel = 'ipc:///share/runtime.ipc'
 
+COOL_DOWN_SEC = 600
 class CHUNK_STATUS:
     PREPARE = 0
     ACTIVE = 1
     PENDING = 2
     COOL_DOWN = 3
     INACTIVE = 4
-    
-# TODO: 检测job进入cool down的时刻
+
 
 class Client(object):
     def __init__(self):
@@ -74,12 +74,14 @@ class Client(object):
         self.socket_rep.bind(init_channel)
         self.socket_sub = context.socket(zmq.SUB)
         self.socket_sub.bind(ipc_channel)
-        for topic in [b'prefetch', b'dataMiss', b'releaseCache']:
+        for topic in [b'prefetch', b'dataMiss', b'releaseCache', b'expireCache']:
             self.socket_sub.setsockopt(zmq.SUBSCRIBE, topic)
         
         self.poller = zmq.Poller()
         self.poller.register(self.socket_rep, zmq.POLLIN)
         self.poller.register(self.socket_sub, zmq.POLLIN)
+        
+        self.cool_down_proc = None
         self.processEvents()
 
     def reset(self):                
@@ -176,6 +178,24 @@ class Client(object):
                 if not rc:
                     self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
 
+    def expireChunks(self):
+        time.sleep(COOL_DOWN_SEC)
+        etags = []
+        for sample_path, target_path in self.nfs_paths:
+            etags.append(sample_path.split('/')[-1])
+            if target_path:
+                etags.append(target_path.split("/")[-1])
+        self.dataset_col.update_many(
+            {
+                "ChunkETag": {"$in": etags},
+                "Status.code": CHUNK_STATUS.COOL_DOWN
+            },
+            {
+                "Status.code": CHUNK_STATUS.INACTIVE,
+                "Status.active_count": 0
+            }
+        )
+    
     def processEvents(self):
         batch_size = None
         while True:
@@ -198,7 +218,6 @@ class Client(object):
                 topic, data = topic.decode("utf-8"), data.decode("utf-8")
                 logger.info('recv msg: {} {}'.format(topic, data))
                 if topic == "prefetch":
-                    # self.socket.send(b'')
                     batch_idx = [int(idx) for idx in data.split(',') if len(idx) > 0]
                     for idx in batch_idx:
                         if idx >= self.prefetch_idx:
@@ -251,6 +270,11 @@ class Client(object):
                             
                             release(sample_path)
                             release(target_path)
+                elif topic == "expireCache":
+                    if self.cool_down_proc is not None and self.cool_down_proc.is_alive():
+                        self.cool_down_proc.terminate()
+                    self.cool_down_proc = multiprocessing.Process(self.expireChunks, daemon=True)
+                    self.cool_down_proc.start()
 
 
 if __name__ == '__main__':

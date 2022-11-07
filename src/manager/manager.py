@@ -201,16 +201,16 @@ class Manager():
         if extra_space > 0:
             # calculate preemptible space
             preempt_space = self.dataset_col.aggregate([
-                {"$match": {"Status": {"$in": [CHUNK_STATUS.INACTIVE, CHUNK_STATUS.COOL_DOWN, CHUNK_STATUS.PENDING]}}},
+                # {"$match": {"Status": {"$in": [CHUNK_STATUS.INACTIVE, CHUNK_STATUS.COOL_DOWN, CHUNK_STATUS.PENDING]}}},
+                {"$match": {"Status": CHUNK_STATUS.INACTIVE}},
                 {"$group": {"PreemptibleSpace": {"$sum": "$ChunkSize"}}}
             ])['PreemptibleSpace']
+            
             # the job is deployable
             if preempt_space >= extra_space:
-                for status in [CHUNK_STATUS.INACTIVE, CHUNK_STATUS.COOL_DOWN, CHUNK_STATUS.PENDING]:
-                    candidates = self.dataset_col.find({'Status': status})
-                    extra_space = self.cost_aware_lrfu(candidates, extra_space)
-                    if extra_space == 0:
-                        break
+                candidates = self.dataset_col.find({'Status': CHUNK_STATUS.INACTIVE})
+                extra_space = self.cost_aware_lrfu(candidates, extra_space)
+                return extra_space == 0
             else:
                 return False
         return True
@@ -274,6 +274,7 @@ class Manager():
             chunk['LastModified'] = bson.timestamp.Timestamp(int(chunk['LastModified'].timestamp()), inc=1)
             chunk['TotalAccessTime'] = 0
         now = datetime.utcnow().timestamp()
+        chunk['InitTime'] = bson.timestamp.Timestamp(int(now), inc=1)
         chunk['LastAccessTime'] = bson.timestamp.Timestamp(int(now), inc=1)
         file_type = key.split('.')[-1].lower()
         
@@ -504,11 +505,18 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                             dataset_etags[l1][l2] = [chunk['ChunkETag'] for chunk in raws]
                             for i in range(len(raws)):
                                 raws[i]['Category'] = l1
-                                raws[i]['Status'] = CHUNK_STATUS.PENDING
+                                if raws[i]["Exist"]:
+                                    if raws[i]["Status"]["code"] == CHUNK_STATUS.ACTIVE:
+                                        raws[i]["Status"]["active_count"] += 1
+                                    else:
+                                        raws[i]["Status"]["code"] = CHUNK_STATUS.PENDING
+                                else:
+                                    raws[i]['Status'] = {"code": CHUNK_STATUS.PENDING, "active_count": 1, "cool_down_init": -1}
                             raw_chunks.extend(raws)
                     
-                    # TODO: check if the job is deployable, the train set must be deployable if the job can be accepted
-                    
+                    # check if the job is deployable
+                    if not self.manager.check_resources(raw_chunks, node_seq):
+                        return pb.RegisterResponse(rc=pb.RC.FAILED, regerr=pb.RegisterError(error="failed to register the jod, disk resource is under pressure"))
                      
                     # downloading ...
                     for chunk in raw_chunks:
@@ -538,7 +546,8 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     chunk['Jobs'] = [jobId]
                     self.manager.dataset_col.insert_one(chunk)
                 else:
-                    self.manager.dataset_col.update_one({"ChunkETag": chunk['ChunkETag']}, {"$push": {"Jobs": jobId}})
+                    chunk['Jobs'].append(jobId)
+                    self.manager.dataset_col.replace_one({"ChunkETag": chunk['ChunkETag']}, chunk)
 
             return pb.RegisterResponse(rc=pb.RC.REGISTERED, regsucc=pb.RegisterSuccess(
                 jobId=jobId,
