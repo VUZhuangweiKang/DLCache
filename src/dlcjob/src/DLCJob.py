@@ -7,7 +7,7 @@ from datetime import datetime
 import bson
 import zmq
 from multiprocessing import Process, Queue
-from typing import Optional, Union, Sequence, Iterable, Any, List, Tuple
+from typing import Optional, Union, Sequence, Iterable, List, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 
@@ -491,6 +491,7 @@ class DLCJobDataLoader(object):
             sample_etags = [chunk['ChunkETag'] for chunk in self.dataset.sample_chunks]
             target_etags = [chunk['ChunkETag'] for chunk in self.dataset.target_chunks]
             etags = sample_etags.extend(target_etags)
+            now = datetime.utcnow().timestamp()
             self.dataset.dataset_col.update_many(
                 {
                     "ChunkETag": {"$in": etags},
@@ -498,7 +499,8 @@ class DLCJobDataLoader(object):
                 }, 
                 [
                     {"$set": { "Status.code": CHUNK_STATUS.ACTIVE}},
-                    {"$inc": {"Status.active_count": 1}}
+                    {"$inc": {"Status.active_count": 1}},
+                    {"$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}}
                 ]
             )
                 
@@ -542,7 +544,7 @@ class DLCJobDataLoader(object):
         try:
             if self.loader._send_idx == self.num_batches-1:
                 self._init_loader(first_iter=False)
-                
+
             # prefetch the next batch
             pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
             pre_idx = [str(idx) for idx in pre_idx]

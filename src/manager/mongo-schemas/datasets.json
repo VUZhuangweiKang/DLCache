@@ -10,7 +10,7 @@
         "Location": {"bsonType": "string"},
         "Size": {"bsonType": ["long", "int"]},
         "ChunkSize": {"bsonType": ["long", "int"]},
-        "Cost": {"bsonType": "float"},
+        "Cost": {"bsonType": "double"},
         "Category": {"bsonType": "string"},
         "Status": {
             "bsonType": "object",
@@ -25,6 +25,12 @@
         "InitTime": {"bsonType": "timestamp"},
         "TotalAccessTime": {"bsonType": "int"},
         "LastAccessTime": {"bsonType": "timestamp"},
+        "References": {
+            "bsonType": "array",
+            "items": {
+                "bsonType": "timestamp"
+            }
+        },
         "Jobs": {
             "bsonType": "array",
             "items": {

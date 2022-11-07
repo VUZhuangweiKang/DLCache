@@ -1,10 +1,6 @@
-numpy
 grpcio
 protobuf
-nvidia-ml-py3
 pickle-mixin
-scikit-learn
 numpy
-pyinotify
 pymongo
 zmq

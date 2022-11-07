@@ -5,5 +5,5 @@ pickle-mixin
 pymongo
 protobuf
 pytz
-pyyaml
+nvidia-ml-py3
 pandas

@@ -1,8 +1,6 @@
 import os
 import logging
 import pickle
-import shutil
-from google.protobuf.timestamp_pb2 import Timestamp
 import hashlib
 import nvidia_smi
 
@@ -31,21 +29,11 @@ class dotdict(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
-    
-grpc_ts = lambda ts: Timestamp(seconds=int(ts), nanos=int(ts % 1 * 1e9))
 
 def hashing(data):
     if type(data) is not bytes:
         data = pickle.dumps(data)
     return hashlib.sha256(data).hexdigest()
-    
-def parse_config(section: str) -> dotdict:
-        with open("/config/{}".format(section), 'r') as f:
-            config_str = f.readlines()
-        result = {}
-        for item in map(lambda x: x.split("="), config_str):
-            result[item[0]] = item[1]
-        return dotdict(result)
 
 def MessageToDict(message):
     message_dict = {}
@@ -72,21 +60,6 @@ def MessageToDict(message):
     
     return message_dict
 
-def csv_has_header(path):
-    import csv
-    with open(path, 'rb') as csvfile:
-        sniffer = csv.Sniffer()
-        has_header = sniffer.has_header(csvfile.read(2048))
-        csvfile.seek(0)
-        return has_header
-    
-def copyfile(src, dst):
-    assert os.path.exists(src)
-    base_dir = '/'.join(dst.split('/')[:-1])
-    if not os.path.exists(base_dir):
-        os.system('mkdir -p {}'.format(base_dir))
-    shutil.copy(src, dst)
-
 
 def get_cpu_free_mem():
     total, used, free, shared, cache, available = map(int, os.popen('free -t -m').readlines()[1].split()[1:])
@@ -108,17 +81,3 @@ def get_gpu_free_mem():
         return total_free
     except:
         return 0
-
-def val(key: str, logger: logging.Logger=None):
-    v = os.environ.get(key)
-    if v is None:
-        logger.error("environment variable %s is unset".format(key))
-        raise Exception
-    return v
-
-def read_secret(arg):
-    path = '/secret/{}'.format(arg)
-    assert os.path.exists(path)
-    with open(path, 'r') as f:
-        data = f.read().strip()
-    return data

@@ -168,8 +168,8 @@ class Manager():
             chunks.append(info)
         return chunks
     
-    def check_resources(self, chunks, node_sequence):
-        """Check if the cluster has sufficient resource to accomadate the chunks
+    def acquire_resources(self, chunks, node_sequence):
+        """Acquire resources to deploy the chunks
 
         Args:
             chunks (List[dict]): a list of chunk objects
@@ -216,8 +216,31 @@ class Manager():
         return True
     
     def cost_aware_lrfu(self, chunks, require: float):
-        pass
-    
+        scores = []
+        for i, chunk in enumerate(chunks):
+            init_time, ref_times, cost = chunk['InitTime'], chunk['References'], chunk['Cost']
+            crf = 0
+            for ref in ref_times:
+                dur = (ref.as_datetime() - init_time.as_datetime()).total_seconds()
+                crf += cost/dur * pow(1/self.managerconf['attenuationFactor'], self.managerconf['stepFactor']*dur)
+            scores.append((i, crf))
+        scores.sort(key=lambda x: x[1])
+        rmchunks = []
+        for i, _ in scores:
+            if require <= 0:
+                break
+            rmchunks.append(chunks[i]['ChunkETags'])
+            path = '/{}/{}'.format(chunks[i]['Location'], chunks[i]['ChunkETag'])
+            if os.path.exists(path):
+                if os.path.isdir(path):
+                    os.rmdir(path)
+                else:
+                    os.remove(path)
+        self.dataset_col.delete_many({"ChunkETag": {"$in": rmchunks}})
+        if require <= 0:
+            return 0
+        return require
+            
     # Hybrid Data Eviction: evict dataobj from a specific NFS server
     # 1. data objs without any binding running jobs are first removed based on the LFU policy.
     # 2. regarding the datasets being used, we adopt the LRU policy
@@ -514,10 +537,10 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                                     raws[i]['Status'] = {"code": CHUNK_STATUS.PENDING, "active_count": 1, "cool_down_init": -1}
                             raw_chunks.extend(raws)
                     
-                    # check if the job is deployable
-                    if not self.manager.check_resources(raw_chunks, node_seq):
+                    # try to acquire resources for the job
+                    if not self.manager.acquire_resources(raw_chunks, node_seq):
                         return pb.RegisterResponse(rc=pb.RC.FAILED, regerr=pb.RegisterError(error="failed to register the jod, disk resource is under pressure"))
-                     
+                    
                     # downloading ...
                     for chunk in raw_chunks:
                         if not chunk['Exist']:
