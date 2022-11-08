@@ -191,8 +191,10 @@ class Client(object):
                 "Status.code": CHUNK_STATUS.COOL_DOWN
             },
             {
-                "Status.code": CHUNK_STATUS.INACTIVE,
-                "Status.active_count": 0
+                "$set":{
+                    "Status.code": CHUNK_STATUS.INACTIVE,
+                    "Status.active_count": 0   
+                }
             }
         )
     
@@ -273,7 +275,7 @@ class Client(object):
                 elif topic == "expireCache":
                     if self.cool_down_proc is not None and self.cool_down_proc.is_alive():
                         self.cool_down_proc.terminate()
-                    self.cool_down_proc = multiprocessing.Process(self.expireChunks, daemon=True)
+                    self.cool_down_proc = multiprocessing.Process(target=self.expireChunks, daemon=True)
                     self.cool_down_proc.start()
 
 

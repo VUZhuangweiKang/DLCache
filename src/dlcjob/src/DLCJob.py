@@ -79,7 +79,7 @@ class DLCJobDataset(Dataset):
                     "Jobs": {"$elemMatch": {"$eq": job_meta['jobId']}},
                     "Category": {"$eq": self.dtype}
                 },{
-                    "Status.code": CHUNK_STATUS.ACTIVE,
+                    "$set": {"Status.code": CHUNK_STATUS.ACTIVE},
                     "$inc": {"Status.active_count": 1}
                 }
             )
@@ -488,20 +488,23 @@ class DLCJobDataLoader(object):
                                   prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
 
             # update chunk status to ACTIVE
-            sample_etags = [chunk['ChunkETag'] for chunk in self.dataset.sample_chunks]
-            target_etags = [chunk['ChunkETag'] for chunk in self.dataset.target_chunks]
-            etags = sample_etags.extend(target_etags)
+            etags = []
+            tmp = self.dataset.sample_chunks.copy()
+            tmp.extend(self.dataset.target_chunks)
+            for part in tmp:
+                for chunk in part:
+                    etags.append(chunk['ChunkETag'])
             now = datetime.utcnow().timestamp()
             self.dataset.dataset_col.update_many(
                 {
                     "ChunkETag": {"$in": etags},
                     "Status.code": {"$ne": CHUNK_STATUS.ACTIVE}
                 }, 
-                [
-                    {"$set": { "Status.code": CHUNK_STATUS.ACTIVE}},
-                    {"$inc": {"Status.active_count": 1}},
-                    {"$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}}
-                ]
+                {
+                    "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
+                    "$inc": {"Status.active_count": 1},
+                    "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
+                }
             )
                 
             file_paths = np.array(self.dataset.nfsFilePaths)
@@ -540,6 +543,7 @@ class DLCJobDataLoader(object):
     def __len__(self):
         return self.loader.__len__()
     
+    # TODO: try 总是抛出异常，可能是数据为下载的原因，也可能是其他原因
     def __next__(self):
         try:
             if self.loader._send_idx == self.num_batches-1:
@@ -563,30 +567,36 @@ class DLCJobDataLoader(object):
                 self.partition_index = 0
                     
                 # update chunk status to COOL_DOWN
-                all_chunks = self.dataset.sample_chunks.extend(self.dataset.target_chunks)
-                etags = [chunk['ChunkETag'] for chunk in all_chunks]
+                etags = []
+                all_chunks = self.dataset.sample_chunks.copy()
+                all_chunks.extend(self.dataset.target_chunks)
+                for part in all_chunks:
+                    for chunk in part:
+                        etags.append(chunk['ChunkETag'])
                 now = datetime.utcnow().timestamp()
                 self.dataset.dataset_col.update_many(
                     {
-                        "ChunkETag": {"$in": etags}
+                        "ChunkETag": {"$in": etags},
+                        "Status.active_count": 1
                     },
-                    [
-                        {"$inc": {"Status.active_count": -1}},
-                        {"$set": {
-                            "Status.code": {
-                                "$cond": {
-                                    "if": {"Status.active_count": 0},
-                                    "then": CHUNK_STATUS.INACTIVE
-                                }
-                            },
-                            "Status.cool_down_init": {
-                                "$cond": {
-                                    "if": {"Status.active_count": 0},
-                                    "then": bson.timestamp.Timestamp(int(now), inc=1)
-                                }
-                            }
-                        }}
-                    ]
+                    {"$set": {
+                        "Status.code": CHUNK_STATUS.INACTIVE,
+                        "Status.active_count": 0,
+                        "Status.cool_down_init": bson.timestamp.Timestamp(int(now), inc=1)}
+                    }
+                )
+                self.dataset.dataset_col.update_many(
+                    {
+                        "ChunkETag": {"$in": etags},
+                        "Status.active_count": {"$gt": 1}
+                    },
+                    {
+                        "$inc": {"Status.active_count": -1},
+                        "$set": {
+                            "Status.code": CHUNK_STATUS.INACTIVE,
+                            "Status.cool_down_init": bson.timestamp.Timestamp(int(now), inc=1)
+                        }
+                    }
                 )
                 self.socket_pub.send_multipart([b'expireCache', b''])
                 raise StopIteration
