@@ -255,21 +255,12 @@ class Client(object):
                 elif topic == "releaseCache":
                     batch_idx = int(data)
                     if batch_idx < len(self.nfs_paths):
-                        for sample_path, target_path in self.nfs_paths[batch_idx]:
-                            def release(path):
+                        def release(path):
+                            if path:
                                 tmpfspath = '/runtime' + path
-                                if not os.path.exists(tmpfspath): return
-                                etag = tmpfspath.split('/')[-1]
-                                now = datetime.datetime.now().timestamp()
-                                self.dataset_col.update_one(
-                                    {"ETag": etag}, 
-                                    {
-                                        "$set": {"LastAccessTime": bson.timestamp.Timestamp(int(now), inc=1)},
-                                        "$inc": {"TotalAccessTime": 1}
-                                    })
                                 if os.path.exists(tmpfspath):
                                     os.remove(tmpfspath)
-                            
+                        for sample_path, target_path in self.nfs_paths[batch_idx]:            
                             release(sample_path)
                             release(target_path)
                 elif topic == "expireCache":

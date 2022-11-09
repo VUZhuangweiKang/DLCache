@@ -2,5 +2,6 @@ grpcio
 protobuf
 pickle-mixin
 numpy
+nvidia-ml-py3
 pymongo
 zmq

@@ -7,7 +7,6 @@
         "Key": {"bsonType": "string"},
         "ETag": {"bsonType": "string"},
         "ChunkETag": {"bsonType": "string"},
-        "Part": {"bsonType": "int"},
         "Location": {"bsonType": "string"},
         "Size": {"bsonType": ["long", "int"]},
         "ChunkSize": {"bsonType": ["long", "int"]},
@@ -27,7 +26,6 @@
         },
         "LastModified": {"bsonType": "timestamp"},
         "InitTime": {"bsonType": "timestamp"},
-        "TotalAccessTime": {"bsonType": "int"},
         "References": {
             "bsonType": "array",
             "items": {"bsonType": "timestamp"}

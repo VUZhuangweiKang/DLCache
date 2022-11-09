@@ -478,6 +478,7 @@ class DLCJobDataLoader(object):
         self.socket_pub = context.socket(zmq.PUB)
         self.socket_pub.connect(ipc_channel)
         
+        self.curr_batch = -1
         self._init_loader(first_iter=True)
         Process(target=self.handle_miss, daemon=True).start()
     
@@ -543,12 +544,14 @@ class DLCJobDataLoader(object):
     def __len__(self):
         return self.loader.__len__()
     
-    # TODO: try 总是抛出异常，可能是数据为下载的原因，也可能是其他原因
     def __next__(self):
         try:
-            if self.loader._send_idx == self.num_batches-1:
+            if self.curr_batch == 0:
                 self._init_loader(first_iter=False)
-
+            elif self.curr_batch == self.num_batches:
+                raise StopIteration
+            
+            self.curr_batch += 1
             # prefetch the next batch
             pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
             pre_idx = [str(idx) for idx in pre_idx]
@@ -562,6 +565,8 @@ class DLCJobDataLoader(object):
             data = next(self.loader)
         except StopIteration:
             print('raise StopIteration Exception....')
+            self.curr_batch = 0
+            
             # epoch is down
             if self.partition_index == len(self.dataset.sample_chunks)-1:
                 self.partition_index = 0

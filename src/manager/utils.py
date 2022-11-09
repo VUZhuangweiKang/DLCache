@@ -81,3 +81,14 @@ def get_gpu_free_mem():
         return total_free
     except:
         return 0
+
+def zcat(fpath):
+    import subprocess
+    ftype = fpath.split('.')[-1]
+    if ftype in ['tar', 'gz', 'bz2']:
+        s = subprocess.check_output("zcat {} | wc -c".format(fpath), shell=True)
+    elif ftype in ["zip"]:
+        s = subprocess.check_output("unzip -l {} | tail -n 1 | awk '{print $1}'".format(fpath), shell=True)
+    else:
+        s = os.path.getsize(fpath)
+    return int(s)

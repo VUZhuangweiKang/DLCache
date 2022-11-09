@@ -19,8 +19,10 @@ from utils import *
 logger = get_logger(name=__name__, level='debug') 
 manager_uri = "dlcpod-manager:50051"
 
+BANDWIDTH = 100*1e6/8  # 100Mbps
 API_PRICE = 0.004/1e4
 TRANSFER_PRICE = 0.09 # per GB
+MAX_CHUNK_SIZE = 1e9
 
 class CHUNK_STATUS:
     PREPARE = 0
@@ -91,52 +93,154 @@ class Manager():
         s3_client = s3_session.client('s3')
         return s3_client
     
-    def download_file(self, client, bucket, key, path):
-        """Download and extract file from S3
-
-        Cost = a*(L_download + L_extraction) + (1-a)*(C_API + C_transport) 
-        
+    def download_file(self, client, bucket, key, etag):
+        """Download file from S3
         Args:
             client (Client): s3 client
             bucket (str): s3 bucket name
             key (str): object key
-            path (str): destination path
+            etag (str): entity tag
 
         Returns:
-            float: cost of data preparation
+            (str, float, float): destination path, file size, download time
         """
-        if os.path.exists(path):
+        tmp_file = '/tmp/{}'.format(etag)
+        logger.info("downloading file {} ...".format(key))
+        if os.path.exists(tmp_file):
+            size = os.path.getsize(tmp_file)
+            cost = size / BANDWIDTH
+        else:
+            start = time.time()
+            try:
+                client.download_file(bucket, key, tmp_file)
+            except botocore.exceptions.ClientError as e:
+                if e.response["Error"]["Code"] == "404":
+                    logger.error("Object {} does not exist".format(key))
+                return -1
+            cost = time.time() - start
+            size = os.path.getsize(tmp_file)
+        return tmp_file, size, cost
+
+    def extract_file(self, src, dst):
+        """Decompress file from src to dst
+
+        Args:
+            src (str): compressed file path
+            dst (str): decompression folder/file
+
+        Returns:
+            float: time used for extracting the file
+        """
+        import tarfile, zipfile
+        start = time.time()
+        if tarfile.is_tarfile(src) or zipfile.is_zipfile(src):
+            if not os.path.exists(dst):
+                os.makedirs(dst)
+            os.system('tar --use-compress-program="pigz --best --recursive" --overwrite -xf {} -C {}'.format(src, dst))
+            os.remove(src)
+        else:
+            if not os.path.exists(dst):
+                shutil.move(src, dst)
             return 0
         
-        tmp_file = '/tmp/{}'.format(path.split('/')[-1])
-        logger.info("downloading file {} ...".format(key))
-        
-        l_download = l_extract = 0
-        cost_transport = 0
-        
-        start = time.time()
-        try:
-            client.download_file(bucket, key, tmp_file)
-            l_download = time.time() - start
-            cost_transport = TRANSFER_PRICE * os.path.getsize(tmp_file)
-        except botocore.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] == "404":
-                logger.error("Object {} does not exist".format(key))
-            return -1
-
-        start = time.time()
-        if key.endswith("tar.gz") or key.endswith('tgz'):
-            if not os.path.exists(path):
-                os.makedirs(path)
-            os.system("tar --use-compress-program=pigz -xf {} -C {}".format(tmp_file, path))
-            l_extract = time.time() - start
-            os.remove(tmp_file)
-        else:
-            shutil.move(tmp_file, path)
-        
-        cost = self.managerconf['costFactor']*(l_download + l_extract) + (1-self.managerconf['costFactor'])*(API_PRICE+TRANSFER_PRICE*cost_transport)
+        cost = time.time() - start
         return cost
+    
+    def calculate_cost(self, download_latency, extract_latency, compressed_file_size):
+        """Cost = a*(L_download + L_extraction) + (1-a)*(C_API + C_transport) 
 
+        Args:
+            download_latency (float): time cost of downloading the chunk
+            extract_latency (float): time cost of extracting files in the chunk
+            compressed_file_size (float): 
+
+        Returns:
+            float: total eviction cost
+        """
+        transport_cost = TRANSFER_PRICE * compressed_file_size
+        cf = float(self.managerconf['costFactor'])
+        total_cost = cf*(download_latency + extract_latency) + (1-cf)*(API_PRICE+TRANSFER_PRICE*transport_cost)
+        return total_cost
+                
+    # Segment a file if it's greater than the max_part_size
+    @staticmethod
+    def assign_node(node_sequence, chunk_size):
+        while True:
+            for node in node_sequence:
+                free_space = shutil.disk_usage("/{}".format(node))[-1]
+                if free_space >= chunk_size:
+                    return node
+                    
+    def seg_tabular_chunk(self, etag, file_type, file_path, node_sequence):        
+        segments = []
+        if file_type in ['csv', 'parquet']:
+            from dask import dataframe as DF
+            if file_type == 'csv':
+                chunks = DF.read_csv(file_path, index=False)
+            elif file_type == 'parquet':
+                chunks = DF.read_parquet(file_path)
+            chunks = chunks.repartition(partition_size=MAX_CHUNK_SIZE)
+            for part, chunk_part in enumerate(chunks.partitions):
+                chunk_etag = "{}-{}".format(etag, part)
+                chunk_size = chunk_part.memory_usage_per_partition(deep=True).compute()
+                loc = self.assign_node(node_sequence, chunk_size)
+                seg_path = "/%s/%s" % (loc, chunk_etag)
+                
+                if file_type == 'csv':
+                    chunk_part.to_csv(seg_path, index=False)
+                elif file_type == 'parquet':
+                    chunk_part.to_parquet(path='/', write_metadata_file=False, name_function=lambda _: seg_path)
+                
+                segments.append([chunk_etag, chunk_size, loc, part])
+        elif file_type == 'npy':
+            import numpy as np
+            with open(file_path, 'rb') as f:
+                major, minor = np.lib.format.read_magic(f)
+                shape, fortran, dtype = np.lib.format.read_array_header_1_0(f)
+                assert not fortran, "Fortran order arrays not supported"
+                # Get the number of elements in one 'row' by taking a product over all other dimensions.
+                row_size = np.prod(shape[1:])
+                start_row = 0
+                num_rows = MAX_CHUNK_SIZE/(row_size*dtype.itemsize)
+                part = 0
+                while start_row < shape[0]:
+                    start_byte = start_row * row_size * dtype.itemsize
+                    f.seek(start_byte, 1)
+                    if start_row+num_rows > shape[0]:
+                        num_rows = shape[0]-start_row+1
+                    n_items = row_size * num_rows
+                    value = np.fromfile(f, count=n_items, dtype=dtype)
+                    value = value.reshape((-1,) + shape[1:])
+                    
+                    chunk_etag = "{}-{}".format(etag, part)
+                    chunk_size = value.nbytes
+                    loc = self.assign_node(node_sequence, chunk_size)
+                    seg_path = "/{}/{}".format(loc, chunk_etag)
+                    
+                    np.save(seg_path, value)
+                    
+                    segments.append([chunk_etag, chunk_size, loc, part])
+                    start_row += num_rows
+                    part += 1
+        else:
+            with open(file_path, 'rb') as f:
+                f.seek(0)
+                value = f.read(MAX_CHUNK_SIZE)
+                part = 0
+                while value:
+                    chunk_etag = "{}-{}".format(etag, part)
+                    chunk_size = sys.getsizeof(value)
+                    loc = self.assign_node(node_sequence, chunk_size)
+                    
+                    seg_path = "/{}/{}".format(loc, chunk_size)
+                    with open(seg_path, 'wb') as f:
+                        f.write(value)
+
+                    segments.append([chunk_etag, chunk_size, loc, part])
+                    value = f.read(MAX_CHUNK_SIZE)
+                    part += 1
+        return segments
+        
     def filter_chunks(self, page):
         """Set the Exist and ChunkETag fields for s3 returned objects
 
@@ -159,7 +263,8 @@ class Manager():
         for info in page:
             if info['Size'] == 0: continue
             lastModified = bson.timestamp.Timestamp(int(info['LastModified'].timestamp()), inc=1)
-            if info['ETag'] not in existing_etags or lastModified > existing_etags[info['ETag']]['LastModified']:
+            if info['ETag'] not in existing_etags or \
+                lastModified > existing_etags[info['ETag']]['LastModified']:
                 info['Exist'] = False
             else:
                 info = existing_etags[info['ETag']]
@@ -201,7 +306,6 @@ class Manager():
         if extra_space > 0:
             # calculate preemptible space
             preempt_space = self.dataset_col.aggregate([
-                # {"$match": {"Status": {"$in": [CHUNK_STATUS.INACTIVE, CHUNK_STATUS.COOL_DOWN, CHUNK_STATUS.PENDING]}}},
                 {"$match": {"Status": CHUNK_STATUS.INACTIVE}},
                 {"$group": {"PreemptibleSpace": {"$sum": "$ChunkSize"}}}
             ])['PreemptibleSpace']
@@ -222,7 +326,8 @@ class Manager():
             crf = 0
             for ref in ref_times:
                 dur = (ref.as_datetime() - init_time.as_datetime()).total_seconds()
-                crf += cost/dur * pow(1/self.managerconf['attenuationFactor'], self.managerconf['stepFactor']*dur)
+                af = float(self.managerconf['attenuationFactor']) + 1e-9
+                crf += cost/dur * pow(1/af, af*dur)
             scores.append((i, crf))
         scores.sort(key=lambda x: x[1])
         rmchunks = []
@@ -241,169 +346,93 @@ class Manager():
             return 0
         return require
 
-    # Hybrid Data Eviction: evict dataobj from a specific NFS server
-    # 1. data objs without any binding running jobs are first removed based on the LFU policy.
-    # 2. regarding the datasets being used, we adopt the LRU policy
-    # def data_eviction(self, node=None, require=None):
-    #     def helper(pipeline):
-    #         nonlocal require
-    #         if node:
-    #             pipeline.append({"$match": {"Location": node}})
-    #         rmobjs = self.dataset_col.aggregate(pipeline)
-    #         for obj in rmobjs:
-    #             if require <= 0: break
-    #             path = '/{}/{}'.format(obj['Location'], obj['ChunkETag'])
-    #             if os.path.exists(path):
-    #                 if os.path.isdir(path):
-    #                     os.rmdir(path)
-    #                 else:
-    #                     os.remove(path)
-    #                 require -= obj['ChunkSize']
-    #         self.dataset_col.delete_many({"ChunkETag": [obj['ChunkETag'] for obj in rmobjs]})
-            
-    #     lfu_pipeline = [{"$project": {'Location': 1, 'ChunkETag': 1, 'TotalAccessTime': 1, 'ChunkSize': 1, 'Jobs': 1, 'num_jobs': {'$size': '$Jobs'}}},
-    #                     {"$match": {"num_jobs": {"$eq": 0}}},
-    #                     {"$sort": {"TotalAccessTime": 1}}]
-    #     helper(lfu_pipeline)
-        
-    #     if require > 0:
-    #         lru_pipline = [{"$project": {'Location': 1, 'ChunkETag': 1, 'LastAccessTime': 1, 'ChunkSize': 1, 'Jobs': 1, 'num_jobs': {'$size': '$Jobs'}}}, 
-    #                        {"$match": {"num_jobs": {"$gt": 0}}},
-    #                        {"$sort": {"LastAccessTime": 1}}]
-    #         helper(lru_pipline)
-
     # Dataset Rebalance: if some data objects from a dataset is already existing
     def move_chunk(self, chunk, node_sequence):
         while True:
             for node in node_sequence:
-                # if shutil.disk_usage("/{}".format(node))[-1] >= dataobj['ChunkSize']:
                 try:
                     if node != chunk['Location']:
                         src_path = '/{}/{}'.format(chunk['Location'], chunk['ChunkETag'])
                         dst_path = '/{}/{}'.format(node, chunk['ChunkETag'])
                         if not os.path.exists(dst_path):
-                            os.rename(src=src_path, dst=dst_path)
+                            shutil.move(src=src_path, dst=dst_path)
                         self.dataset_col.update_one({"ChunkETag": chunk['ChunkETag']}, {"$set": {"Location": node}})
                         chunk['Location'] = node
                     return [chunk]
                 except OSError:  # handle the case that the node is out of space
                     continue
-            # self.data_eviction(node=node_sequence[0], require=chunk['ChunkSize'])
 
-    def clone_chunk(self, chunk: dict, s3_client, bucket_name, chunk_size, node_sequence, part=None, miss=False):
+    def clone_chunk(self, chunk: dict, s3_client, bucket_name, node_sequence):
         key = chunk['Key']
-        chunk["Bucket"] = bucket_name
-        if not miss:
-            chunk['LastModified'] = bson.timestamp.Timestamp(int(chunk['LastModified'].timestamp()), inc=1)
-            chunk['TotalAccessTime'] = 0
-        now = datetime.utcnow().timestamp()
-        chunk['InitTime'] = bson.timestamp.Timestamp(int(now), inc=1)
         file_type = key.split('.')[-1].lower()
         
-        def assignLocation(obj):
-            # try to assign the object follow the node sequence
-            # if failed, evict data
-            while True:
-                for node in node_sequence:
-                    free_space = shutil.disk_usage("/{}".format(node))[-1]
-                    if free_space >= obj['ChunkSize']:
-                        obj['Location'] = node
-                        return obj
-                # self.data_eviction(node=node_sequence[0], require=obj['ChunkSize'])
-
-        chunk_size *= 1e6 # Mill bytes --> bytes
-        if chunk['Size'] <= chunk_size:
-            if 'ETag' in chunk:
-                etag = chunk['ETag'].strip("\"")
-            else:
-                value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
-                etag = hashing(value)
-            chunk["Part"] = 0
-            chunk['ChunkETag'] = etag
-            chunk['ChunkSize'] = chunk['Size']
-            if not miss:
-                chunk = assignLocation(chunk)
-            path = "/{}/{}".format(chunk['Location'], etag)
-            cost = self.download_file(s3_client, bucket_name, key, path)
-            chunk['Cost'] = str(cost)
-            obj_chunks = [chunk]
+        if 'ETag' in chunk:
+            etag = chunk['ETag'].strip('"')
         else:
-            # large file
+            # TODO: this probably overflow memory, we can only read the first 1MB (say)
+            value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
+            etag = hashing(value)
+        
+        def extend_chunk_info(raw:dict, chunk_etag, chunk_size, loc):
+            now = datetime.utcnow().timestamp()            
+            cost = self.calculate_cost(download_latency, extract_latency, df_size)
+            cost = str((chunk_size/raw['Size']) * cost)
+            raw.update({
+                "ETag": etag,
+                "Bucket": bucket_name,
+                "ChunkETag": chunk_etag,
+                "ChunkSize": chunk_size,
+                "InitTime": bson.timestamp.Timestamp(int(now), inc=1),
+                "LastModified": bson.timestamp.Timestamp(int(chunk['LastModified'].timestamp()), inc=1),
+                "Location": loc,
+                "Cost": cost
+            })
+        
+        # process a chunk which is a file after being downloaded/extracted
+        def process_chunk_file(chunk_etag, file_path):
             obj_chunks = []
-            path = '/tmp/{}'.format(key)
-            cost = self.download_file(s3_client, bucket_name, key, path)
-            if file_type in ['csv', 'parquet']:
-                from dask import dataframe as DF
-                if file_type == 'csv':
-                    chunks = DF.read_csv(path, index=False)
-                elif file_type == 'parquet':
-                    chunks = DF.read_parquet(path)
-
-                chunks = chunks.repartition(partition_size=chunk_size)
-                for i, chunk_part in enumerate(chunks.partitions):
-                    if part is None or part == i:
-                        etag = hashing(chunk_part.compute())
-                        chunk['ChunkSize'] = chunk_part.memory_usage_per_partition(deep=True).compute()
-                        chunk = assignLocation(chunk)
-                        path = "/%s/%s" % (chunk['Location'], etag)
-                        if file_type == 'csv':
-                            chunk_part.to_csv(path, index=False)
-                        elif file_type == 'parquet':
-                            chunk_part.to_parquet(path='/', write_metadata_file=False, name_function=lambda _: path)
-                        chunk['ChunkETag'] = etag
-                        chunk['Part'] = i
-                        chunk['Cost'] = str(cost*chunk['ChunkSize']/chunk['Size'])
-                        obj_chunks.append(chunk)
-            elif file_type == 'npy':
-                import numpy as np
-                with open(path, 'rb') as f:
-                    major, minor = np.lib.format.read_magic(f)
-                    shape, fortran, dtype = np.lib.format.read_array_header_1_0(f)
-                    assert not fortran, "Fortran order arrays not supported"
-                    # Get the number of elements in one 'row' by taking a product over all other dimensions.
-                    row_size = np.prod(shape[1:])
-                    start_row = 0
-                    num_rows = chunk_size/(row_size*dtype.itemsize)
-                    p = 0
-                    while start_row < shape[0]:
-                        if part is None or part == p:
-                            start_byte = start_row * row_size * dtype.itemsize
-                            f.seek(start_byte, 1)
-                            if start_row+num_rows > shape[0]:
-                                num_rows = shape[0]-start_row+1
-                            n_items = row_size * num_rows
-                            value = np.fromfile(f, count=n_items, dtype=dtype)
-                            value = value.reshape((-1,) + shape[1:])
-                            etag = hashing(value)
-                            chunk['ChunkSize'] = value.nbytes
-                            chunk = assignLocation(chunk)
-                            path = "/{}/{}".format(chunk['Location'], etag)
-                            np.save(path, value)
-                            chunk['ChunkETag'] = etag
-                            chunk['Part'] = p
-                            chunk['Cost'] = str(cost*chunk['ChunkSize']/chunk['Size'])
-                            obj_chunks.append(chunk)
-                        start_row += num_rows
-                        p += 1
+            if os.path.getsize(file_path) < MAX_CHUNK_SIZE:
+                loc = self.assign_node(node_sequence, chunk['Size'])
+                extend_chunk_info(chunk, chunk_etag, chunk['Size'], loc)
+                obj_chunks.append(chunk)
             else:
-                with open(path, 'rb') as f:
-                    f.seek(0)
-                    value = f.read(chunk_size)
-                    p = 0
-                    while value:
-                        if part is None or part == p:
-                            etag = hashing(value)
-                            chunk['ChunkSize'] = sys.getsizeof(value)
-                            chunk['Cost'] = str(cost*chunk['ChunkSize']/chunk['Size'])
-                            chunk = assignLocation(chunk)
-                            path = "/{}/{}".format(chunk['Location'], etag)
-                            with open(path, 'wb') as f:
-                                f.write(value)
-                            chunk['ChunkETag'] = etag
-                            chunk['Part'] = p
-                            obj_chunks.append(chunk)
-                        value = f.read(chunk_size)
-                        p += 1
+                segments = self.seg_tabular_chunk(chunk_etag, file_type, file_path, node_sequence)
+                for segment in segments:
+                    extend_chunk_info(chunk, *segment)
+                    obj_chunks.append(chunk)
+                # the old file has been partitioned, so delete it
+                os.remove(file_path)
+            return obj_chunks
+        
+        # download file
+        tmp_path, df_size, download_latency = self.download_file(s3_client, bucket_name, key, etag)
+        loc = self.assign_node(node_sequence, zcat(tmp_path))
+        dst = "/{}/{}".format(loc, etag)
+        
+        # extract file
+        extract_latency = 0
+        if file_type in ['tar', 'bz2', 'zip', 'gz']:
+            # TODO: 貌似这里有bug，查看如何重写文件
+            extract_latency = self.extract_file(tmp_path, dst)
+            
+            # walk through extracted files
+            if os.path.isdir(dst):
+                '''!!! If the extacted entity is a folder, we currently assume any individual 
+                file in the folder is smaller than the MAX_CHUNK_SIZE
+                '''
+                extend_chunk_info(chunk, etag, chunk['Size'], loc)
+                obj_chunks = [chunk]
+            else:
+                # compressed chunk (file-based/tabular)
+                obj_chunks = process_chunk_file(etag, dst)
+        else:
+            # uncompressed chunk (file-based/tabular)
+            if not os.path.exists(dst):
+                shutil.move(tmp_path, dst)
+            else:
+                os.remove(tmp_path)
+            obj_chunks = process_chunk_file(etag, dst)
+
         return obj_chunks
 
 
@@ -437,11 +466,11 @@ class ConnectionService(pb_grpc.ConnectionServicer):
                 resp = pb.ConnectResponse(rc=pb.RC.FAILED, resp = "not found user {}".format(cred.username))
         elif rc == pb.RC.DISCONNECTED:
             result = self.manager.client_col.update_one(
-                filter={
+                {
                     "Username": cred.username,
                     "Password": cred.password,
                 },
-                update={"$set": {"Status": True, "Jobs": []}}
+                {"$set": {"Status": True, "Jobs": []}}
             )
             if result['modified_count'] == 0:
                 resp = pb.ConnectResponse(rc=pb.RC.FAILED, resp="connection error")
@@ -514,8 +543,8 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             chunks = []
             node_seq = request.nodesequence
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = []
+            futures = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 for l1 in ['train', 'validation', 'test']:
                     raw_chunks  = []
                     for l2 in ['samples', 'targets', 'manifests']:
@@ -543,12 +572,12 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     # downloading ...
                     for chunk in raw_chunks:
                         if not chunk['Exist']:
-                            futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, request.qos.MaxPartMill, node_seq))
+                            futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, node_seq))
                         elif chunk['Location'] != node_seq[0]:
                             # move the data to a node in nodesequence
                             futures.append(executor.submit(self.manager.move_chunk, chunk, node_seq))
-                for future in concurrent.futures.as_completed(futures):
-                    chunks.extend(future.result())
+            for future in concurrent.futures.as_completed(futures):
+                chunks.extend(future.result())
             
             # write job_col and dataset_col collections
             jobInfo = {
@@ -566,11 +595,15 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             for chunk in chunks:
                 if 'References' not in chunk:
                     chunk['References'] = []
-                if not chunk['Exist']:
+                if 'Jobs' not in chunk:
                     chunk['Jobs'] = [jobId]
-                    self.manager.dataset_col.insert_one(chunk)
                 else:
                     chunk['Jobs'].append(jobId)
+                
+                if not chunk['Exist']:
+                    chunk['Exist'] = True
+                    self.manager.dataset_col.insert_one(chunk)
+                else:
                     self.manager.dataset_col.replace_one({"ChunkETag": chunk['ChunkETag']}, chunk)
 
             return pb.RegisterResponse(rc=pb.RC.REGISTERED, regsucc=pb.RegisterSuccess(
@@ -614,8 +647,7 @@ class DataMissService(pb_grpc.DataMissServicer):
         def download(etag):
             chunk = self.manager.dataset_col.find_one({"ChunkETag": etag})
             s3_client = self.manager.get_s3_client(cred)
-            self.manager.clone_chunk(dataobj=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], 
-                                       chunk_size=chunk['ChunkSize'], node_sequence=[chunk['Location']], part=chunk['Part'], miss=True)
+            self.manager.clone_chunk(dataobj=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], chunk_size=chunk['ChunkSize'], node_sequence=[chunk['Location']])
         download(request.etag)
         return pb.DataMissResponse(response=True)
 

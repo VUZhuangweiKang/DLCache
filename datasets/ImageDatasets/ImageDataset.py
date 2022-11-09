@@ -10,16 +10,15 @@ class ImageDataset(DLCJobDataset):
         self.transform = transform
     
     def process(self):
-        sample_paths = {k.split('/')[-1]: self.samples[k] for k in self.samples}        
         cls_names = self.manifest['target'].unique()
         cls_idx = {cls_names[i]: i for i in range(len(cls_names))}
         
         samples = []
         targets = []
-        
+
         for _, row in self.manifest.iterrows():
-            if row['sample'] not in sample_paths: continue
-            samples.append(sample_paths[row['sample']])
+            if row['sample'] not in self.samples: continue
+            samples.append(self.samples[row['sample']])
             targets.append(cls_idx[row["target"]])
         return samples, targets
     
