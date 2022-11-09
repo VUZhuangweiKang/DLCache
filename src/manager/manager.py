@@ -121,6 +121,7 @@ class Manager():
             size = os.path.getsize(tmp_file)
         return tmp_file, size, cost
 
+    # TODO: 解压速度依旧很慢
     def extract_file(self, src, dst):
         """Decompress file from src to dst
 
@@ -412,7 +413,6 @@ class Manager():
         # extract file
         extract_latency = 0
         if file_type in ['tar', 'bz2', 'zip', 'gz']:
-            # TODO: 貌似这里有bug，查看如何重写文件
             extract_latency = self.extract_file(tmp_path, dst)
             
             # walk through extracted files
