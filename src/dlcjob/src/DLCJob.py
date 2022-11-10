@@ -478,11 +478,11 @@ class DLCJobDataLoader(object):
         self.socket_pub = context.socket(zmq.PUB)
         self.socket_pub.connect(ipc_channel)
         
+        self.torch_loader = None
         self.curr_batch = -1
-        self._init_loader(first_iter=True)
         Process(target=self.handle_miss, daemon=True).start()
     
-    def _init_loader(self, first_iter=False):      
+    def _init_loader(self, first_iter=False): 
         if first_iter or self.shuffle:
             self.torch_loader = DataLoader(self.dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
                                   self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
@@ -497,10 +497,7 @@ class DLCJobDataLoader(object):
                     etags.append(chunk['ChunkETag'])
             now = datetime.utcnow().timestamp()
             self.dataset.dataset_col.update_many(
-                {
-                    "ChunkETag": {"$in": etags},
-                    "Status.code": {"$ne": CHUNK_STATUS.ACTIVE}
-                }, 
+                {"ChunkETag": {"$in": etags}}, 
                 {
                     "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
                     "$inc": {"Status.active_count": 1},
@@ -531,6 +528,7 @@ class DLCJobDataLoader(object):
         socket = context.socket(zmq.PUB)
         socket.connect(ipc_channel)
         while True:
+            if self.torch_loader is None: continue
             info = self.torch_loader.dataset.miss_queue.get()
             if info is not None:
                 miss_idx, miss_etag = info[0]
@@ -546,12 +544,13 @@ class DLCJobDataLoader(object):
     
     def __next__(self):
         try:
-            if self.curr_batch == 0:
+            if self.curr_batch == -1:
+                self._init_loader(first_iter=True)
+            elif self.curr_batch == 0:
                 self._init_loader(first_iter=False)
             elif self.curr_batch == self.num_batches:
                 raise StopIteration
             
-            self.curr_batch += 1
             # prefetch the next batch
             pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
             pre_idx = [str(idx) for idx in pre_idx]
@@ -563,6 +562,7 @@ class DLCJobDataLoader(object):
                 self.socket_pub.send_multipart([b'releaseCache', str(self.loader._rcvd_idx-1).encode('utf-8')])
             
             data = next(self.loader)
+            self.curr_batch += 1
         except StopIteration:
             print('raise StopIteration Exception....')
             self.curr_batch = 0
@@ -570,7 +570,7 @@ class DLCJobDataLoader(object):
             # epoch is down
             if self.partition_index == len(self.dataset.sample_chunks)-1:
                 self.partition_index = 0
-                    
+                
                 # update chunk status to COOL_DOWN
                 etags = []
                 all_chunks = self.dataset.sample_chunks.copy()
