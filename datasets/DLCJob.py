@@ -163,7 +163,7 @@ class DLCJobDataset(Dataset):
                         self.unused_idx.remove(read_idx)
                     return read_val
                 
-                sample = helper(self.samples[idx], self.__sample_reader__)
+                sample = helper(self.samples[idx], self.sample_reader)
                 
                 """ for supervised learning, there might be two cases:
                 1. targets are derived while parsing samples
@@ -199,7 +199,7 @@ class DLCJobDataset(Dataset):
         def helper(etags):
             chunk_groups = []
             if etags:
-                chunks = self.dataset_col.find({"ChunkETag": {"$in": etags}})
+                chunks = self.dataset_col.find({"ETag": {"$in": etags}})
                 total_size = 0
                 chunk_groups.append([])
                 for chunk in chunks:
@@ -299,7 +299,7 @@ class DLCJobDataset(Dataset):
                     nfs_path.append(None)
             return data, nfs_path
             
-        self.samples, sample_fpaths = helper(self.sample_chunks, self.__sample_reader__)
+        self.samples, sample_fpaths = helper(self.sample_chunks, self.sample_reader)
         target_fpaths = []
         if self.target_chunks:
             self.targets, target_fpaths = helper(self.target_chunks, self.__target_reader__)
@@ -323,7 +323,8 @@ class DLCJobDataset(Dataset):
         assert len(sample_fpaths) == len(target_fpaths)
         self.nfsFilePaths = list(zip(sample_fpaths, target_fpaths))
         self.samples, self.targets = self.process()
-        assert len(self.samples) == len(self.targets)
+        if self.targets:
+            assert len(self.samples) == len(self.targets)
 
     def sample_reader(self, path: str = None, raw_bytes: bytes = None):
         """this function defines the logic of reading sample data (X) from a file

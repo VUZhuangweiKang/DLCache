@@ -1,0 +1,8 @@
+torch
+boto3
+pymongo
+zmq
+numpy
+pillow
+pandas
+tqdm

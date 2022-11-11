@@ -25,7 +25,7 @@ class ImageDataset(DLCJobDataset):
     def __getitem__(self, index: int):
         return self.try_get_item(index)
 
-    def __sample_reader__(self, path: str = None, raw_bytes: bytes = None):
+    def sample_reader(self, path: str = None, raw_bytes: bytes = None):
         img = Image.open(path)
         img = img.convert("RGB")
         img = self.transform(img)

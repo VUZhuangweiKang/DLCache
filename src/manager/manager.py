@@ -7,6 +7,7 @@ import boto3, botocore
 import json, bson
 import configparser
 import multiprocessing
+import subprocess
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from datetime import datetime
@@ -105,11 +106,11 @@ class Manager():
             (str, float, float): destination path, file size, download time
         """
         tmp_file = '/tmp/{}'.format(etag)
-        logger.info("downloading file {} ...".format(key))
         if os.path.exists(tmp_file):
             size = os.path.getsize(tmp_file)
             cost = size / BANDWIDTH
         else:
+            logger.info("downloading file {} ...".format(key))
             start = time.time()
             try:
                 client.download_file(bucket, key, tmp_file)
@@ -121,7 +122,7 @@ class Manager():
             size = os.path.getsize(tmp_file)
         return tmp_file, size, cost
 
-    # TODO: 解压速度依旧很慢
+    # TODO: decompression is still slow
     def extract_file(self, src, dst):
         """Decompress file from src to dst
 
@@ -137,7 +138,8 @@ class Manager():
         if tarfile.is_tarfile(src) or zipfile.is_zipfile(src):
             if not os.path.exists(dst):
                 os.makedirs(dst)
-            os.system('tar --use-compress-program="pigz --best --recursive" --overwrite -xf {} -C {}'.format(src, dst))
+            logger.info("extracting {} ...".format(src))
+            os.system('tar --use-compress-program="pigz -d -p {}" --overwrite -xf {} -C {}'.format(multiprocessing.cpu_count(), src, dst))
             os.remove(src)
         else:
             if not os.path.exists(dst):
@@ -168,7 +170,8 @@ class Manager():
     def assign_node(node_sequence, chunk_size):
         while True:
             for node in node_sequence:
-                free_space = shutil.disk_usage("/{}".format(node))[-1]
+                free_space = subprocess.check_output("df /%s | awk '{print $4}' | tail -n 1" % node, shell=True)
+                free_space = int(free_space) * 1e3
                 if free_space >= chunk_size:
                     return node
                     
@@ -177,22 +180,28 @@ class Manager():
         if file_type in ['csv', 'parquet']:
             from dask import dataframe as DF
             if file_type == 'csv':
-                chunks = DF.read_csv(file_path, index=False)
+                chunks = DF.read_csv(file_path)
             elif file_type == 'parquet':
                 chunks = DF.read_parquet(file_path)
+                
+            logger.info("repartitioning file {}".format(file_path))
+            # this process is time-consuming, depends on the partition size
             chunks = chunks.repartition(partition_size=MAX_CHUNK_SIZE)
+            partition_size = chunks.memory_usage_per_partition(deep=True).compute().values
             for part, chunk_part in enumerate(chunks.partitions):
                 chunk_etag = "{}-{}".format(etag, part)
-                chunk_size = chunk_part.memory_usage_per_partition(deep=True).compute()
+                chunk_size = partition_size[part].item()
                 loc = self.assign_node(node_sequence, chunk_size)
                 seg_path = "/%s/%s" % (loc, chunk_etag)
                 
-                if file_type == 'csv':
-                    chunk_part.to_csv(seg_path, index=False)
-                elif file_type == 'parquet':
-                    chunk_part.to_parquet(path='/', write_metadata_file=False, name_function=lambda _: seg_path)
+                logger.info("create partition {}".format(seg_path))
+                if not os.path.exists(seg_path):
+                    if file_type == 'csv':
+                        chunk_part.to_csv(seg_path, index=False)
+                    elif file_type == 'parquet':
+                        chunk_part.to_parquet(path='/', write_metadata_file=False, name_function=lambda _: seg_path)
                 
-                segments.append([chunk_etag, chunk_size, loc, part])
+                segments.append([chunk_etag, chunk_size, loc])
         elif file_type == 'npy':
             import numpy as np
             with open(file_path, 'rb') as f:
@@ -220,7 +229,7 @@ class Manager():
                     
                     np.save(seg_path, value)
                     
-                    segments.append([chunk_etag, chunk_size, loc, part])
+                    segments.append([chunk_etag, chunk_size, loc])
                     start_row += num_rows
                     part += 1
         else:
@@ -237,7 +246,7 @@ class Manager():
                     with open(seg_path, 'wb') as f:
                         f.write(value)
 
-                    segments.append([chunk_etag, chunk_size, loc, part])
+                    segments.append([chunk_etag, chunk_size, loc])
                     value = f.read(MAX_CHUNK_SIZE)
                     part += 1
         return segments
@@ -373,9 +382,14 @@ class Manager():
             # TODO: this probably overflow memory, we can only read the first 1MB (say)
             value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
             etag = hashing(value)
+            
+        now = datetime.utcnow().timestamp()
+        chunk.update({
+            "InitTime": bson.timestamp.Timestamp(int(now), inc=1),
+            "LastModified": bson.timestamp.Timestamp(int(chunk['LastModified'].timestamp()), inc=1)
+        })
         
-        def extend_chunk_info(raw:dict, chunk_etag, chunk_size, loc):
-            now = datetime.utcnow().timestamp()            
+        def extend_chunk_info(raw:dict, chunk_etag, chunk_size, loc):     
             cost = self.calculate_cost(download_latency, extract_latency, df_size)
             cost = str((chunk_size/raw['Size']) * cost)
             raw.update({
@@ -383,8 +397,6 @@ class Manager():
                 "Bucket": bucket_name,
                 "ChunkETag": chunk_etag,
                 "ChunkSize": chunk_size,
-                "InitTime": bson.timestamp.Timestamp(int(now), inc=1),
-                "LastModified": bson.timestamp.Timestamp(int(chunk['LastModified'].timestamp()), inc=1),
                 "Location": loc,
                 "Cost": cost
             })
@@ -427,10 +439,12 @@ class Manager():
                 obj_chunks = process_chunk_file(etag, dst)
         else:
             # uncompressed chunk (file-based/tabular)
+            # if not os.path.exists(dst):
+            #     shutil.move(tmp_path, dst)
+            # else:
+            #     os.remove(tmp_path)
             if not os.path.exists(dst):
-                shutil.move(tmp_path, dst)
-            else:
-                os.remove(tmp_path)
+                shutil.copyfile(tmp_path, dst)
             obj_chunks = process_chunk_file(etag, dst)
 
         return obj_chunks
