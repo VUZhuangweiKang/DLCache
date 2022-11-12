@@ -198,8 +198,7 @@ class DLCJobDataset(Dataset):
             chunk_groups = []
             if etags:
                 chunks = self.dataset_col.find({"ETag": {"$in": etags}})
-                for chunk in chunks:
-                    chunk_groups.append(chunk)
+                chunk_groups = [[chunk] for chunk in chunks]
             return chunk_groups
     
         self.sample_chunks = helper(chunk_etags['samples'])
@@ -223,9 +222,11 @@ class DLCJobDataset(Dataset):
             if keys:
                 pages = load_pages(keys)
                 for i in range(len(pages)):
+                    tmp = []
                     for j in range(len(pages[i]['Contents'])):
                         dataobj = pages[i]["Contents"][j]
-                        chunk_groups.append(dataobj)
+                        tmp.append(dataobj)
+                    chunk_groups.append(tmp)
             return chunk_groups
         
         self.sample_chunks = helper(keys['samples'])
@@ -253,29 +254,31 @@ class DLCJobDataset(Dataset):
         
         def helper(chunks, reader):
             data = {}
-            nfs_path = []
-            chunk = chunks[partition_index]
-            key, loc = chunk['Key'], chunk['Location']
-            if self.usecache:
-                if not chunk:
+            
+            nfs_path = []  # 3 dimensions: part, chunk, sample/target
+            for chunk in chunks[partition_index]:
+                if not chunk: 
                     nfs_path.append(None)
-                etag = chunk['ChunkETag']
-                chunk_path = '/{}/{}'.format(loc, etag)
-                # decompressed folder, so key has the .tar.gz extension
-                if os.path.isdir(chunk_path):
-                    # We assume data won't be immediately deleted after being downloaded by Manager.
-                    for root, dirs, files in os.walk(chunk_path):
-                        for name in files:
-                            fpath = os.path.join(root, name)
-                            nfs_path.append(fpath)
-                            dummy_key = key + fpath.replace(chunk_path, '')
-                            data[dummy_key] = fpath if self.lazy else reader(fpath)
+                    continue
+                key, loc = chunk['Key'], chunk['Location']
+                if self.usecache:
+                    chunk_path = '/{}/{}'.format(loc, chunk['ChunkETag'])
+                    # decompressed folder, so key has the .tar.gz extension
+                    if os.path.isdir(chunk_path):
+                        # We assume data won't be immediately deleted after being downloaded by Manager.
+                        for root, dirs, files in os.walk(chunk_path):
+                            for name in files:
+                                p = os.path.join(root, name)
+                                nfs_path.append(p)
+                                dummy_key = key + p.replace(chunk_path, '')
+                                data[dummy_key] = p if self.lazy else reader(p)
+                    else:
+                        nfs_path.append(chunk_path)
+                        data[key] = chunk_path if self.lazy else reader(chunk_path)
                 else:
-                    nfs_path.append(chunk_path)
-                    data[key] = chunk_path if self.lazy else reader(chunk_path)
-            else:
-                data[key] = key
-                nfs_path.append(None)
+                    data[key] = key
+                    nfs_path.append(None)
+            
             return data, nfs_path
             
         self.samples, sample_fpaths = helper(self.sample_chunks, self.sample_reader)
@@ -469,9 +472,12 @@ class DLCJobDataLoader(object):
                                   prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
 
             # update chunk status to ACTIVE
+            etags = []
             tmp = self.dataset.sample_chunks.copy()
             tmp.extend(self.dataset.target_chunks)
-            etags = [part['ChunkETag'] for part in tmp]
+            for part in tmp:
+                for chunk in part:
+                    etags.append(chunk['ChunkETag'])
             now = datetime.utcnow().timestamp()
             self.dataset.dataset_col.update_many(
                 {"ChunkETag": {"$in": etags}}, 
@@ -482,8 +488,11 @@ class DLCJobDataLoader(object):
                 }
             )
                 
-            file_paths = np.array(self.dataset.nfsFilePaths)
-            self.batchedNfsPaths = [file_paths[idx].tolist() for idx in iter(self.torch_loader._index_sampler)]
+            if self.lazy:
+                file_paths = np.array(self.dataset.nfsFilePaths)
+                self.batchedNfsPaths = [file_paths[idx].tolist() for idx in self.torch_loader._index_sampler]
+            else:
+                self.batchedNfsPaths = [[item] for item in self.dataset.nfsFilePaths]
             # client will copy the first batch when receive init msg
             self.socket_req.send_multipart([b'init', json.dumps({
                 "paths": self.batchedNfsPaths,
@@ -528,8 +537,10 @@ class DLCJobDataLoader(object):
             elif self.curr_batch == self.num_batches:
                 raise StopIteration
             
+            # TODO: 表格数据的切分方式不是按照batch，所以preftch这里是按照max_chunk_size进行的，但是release是按照batch
             # prefetch the next batch
-            pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
+            pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), 
+                                 min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
             pre_idx = [str(idx) for idx in pre_idx]
             if len(pre_idx) > 0:
                 self.socket_pub.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])

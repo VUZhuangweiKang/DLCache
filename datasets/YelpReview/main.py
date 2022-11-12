@@ -60,7 +60,15 @@ def predict_rating(review, classifier, vectorizer, decision_threshold=0.5):
 
     return vectorizer.rating_vocab.lookup_index(index)
     
-    
+
+def generate_batches(dataloader, device="cpu"):
+    for data_dict in dataloader:
+        out_data_dict = {}
+        for name, tensor in data_dict.items():
+            out_data_dict[name] = data_dict[name].to(device)
+        yield out_data_dict
+        
+        
 def main():
     with open("config.json") as f:
         configs = json.load(f)
@@ -114,7 +122,9 @@ def main():
                 train_state['epoch_index'] = epoch_index
                 
                 dataset.set_split('train')
-                batch_generator = generate_batches(dataset, batch_size=args.batch_size, device=args.device)
+                train_loader = DLCJobDataLoader(dataset=dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
+                                                drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
+                batch_generator = generate_batches(train_loader, device=args.device)
                 
                 running_loss = 0.0
                 running_acc = 0.0
@@ -142,9 +152,9 @@ def main():
 
 
                 dataset.set_split('val')
-                batch_generator = generate_batches(dataset, 
-                                                batch_size=args.batch_size, 
-                                                device=args.device)
+                val_loader = DLCJobDataLoader(dataset=dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
+                                              drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
+                batch_generator = generate_batches(val_loader, device=args.device)
                 running_loss = 0.
                 running_acc = 0.
                 classifier.eval()
@@ -187,7 +197,9 @@ def main():
         classifier = classifier.to(args.device)
 
         dataset.set_split('test')
-        batch_generator = generate_batches(dataset, batch_size=args.batch_size, device=args.device)
+        test_loader = DLCJobDataLoader(dataset=dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
+                                       drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
+        batch_generator = generate_batches(test_loader, device=args.device)
         running_loss = 0.
         running_acc = 0.
         classifier.eval()
