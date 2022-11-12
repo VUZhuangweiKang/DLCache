@@ -6,3 +6,4 @@ numpy
 pillow
 pandas
 tqdm
+ipywidgets

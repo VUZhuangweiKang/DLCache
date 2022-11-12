@@ -101,7 +101,7 @@ def main():
 
         train_state = make_train_state(args)
 
-        epoch_bar = tqdm_notebook(desc='training routine',  total=args.num_epochs, sposition=0)
+        epoch_bar = tqdm_notebook(desc='training routine',  total=args.num_epochs, position=0)
 
         dataset.set_split('train')
         train_bar = tqdm_notebook(desc='split=train', total=dataset.get_num_batches(args.batch_size), position=1, leave=True)

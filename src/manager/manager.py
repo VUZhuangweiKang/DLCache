@@ -14,10 +14,10 @@ from datetime import datetime
 import concurrent.futures
 from collections import defaultdict
 from pymongo.mongo_client import MongoClient
-from utils import * 
+from utils import *
 
 
-logger = get_logger(name=__name__, level='debug') 
+logger = get_logger(name=__name__, level='debug')
 manager_uri = "dlcpod-manager:50051"
 
 BANDWIDTH = 100*1e6/8  # 100Mbps
@@ -37,16 +37,16 @@ class Manager():
     def __init__(self):
         parser = configparser.ConfigParser()
         parser.read('/configs/manager/manager.conf')
-        
+
         try:
             self.managerconf = parser['manager']
             mconf = parser['mongodb']
         except KeyError as err:
             logger.error(err)
-        
+
         self.mongoUri = "mongodb://{}:{}@{}:{}".format(mconf['username'], mconf['password'], mconf['host'], mconf['port'])
-        mongo_client = MongoClient(self.mongoUri)        
-        
+        mongo_client = MongoClient(self.mongoUri)
+
         def load_collection(name, schema):
             collections = mongo_client.Cacher.list_collection_names()
             with open(schema, 'r') as f:
@@ -72,17 +72,17 @@ class Manager():
                     rc = pb.RC.CONNECTED
             else:
                 rc = pb.RC.WRONG_PASSWORD
-        
+
         # check whether to update s3auth information
         if rc == pb.RC.CONNECTED and s3auth is not None and result['S3Auth'] != s3auth:
             result = self.client_col.update_one(
-                filter={"Username": cred.username}, 
+                filter={"Username": cred.username},
                 update={"$set": {"S3Auth": s3auth}})
             if result.modified_count != 1:
                 logger.error("user {} is connected, but failed to update S3 authorization information.".format(cred.username))
                 rc = pb.RC.FAILED
         return rc
-    
+
     def get_s3_client(self, cred):
         result = self.client_col.find_one(filter={"$and": [{"Username": cred.username, "Password": cred.password}]})
         s3auth = result['S3Auth']
@@ -93,7 +93,7 @@ class Manager():
         )
         s3_client = s3_session.client('s3')
         return s3_client
-    
+
     def download_file(self, client, bucket, key, etag):
         """Download file from S3
         Args:
@@ -145,17 +145,17 @@ class Manager():
             if not os.path.exists(dst):
                 shutil.move(src, dst)
             return 0
-        
+
         cost = time.time() - start
         return cost
-    
+
     def calculate_cost(self, download_latency, extract_latency, compressed_file_size):
-        """Cost = a*(L_download + L_extraction) + (1-a)*(C_API + C_transport) 
+        """Cost = a*(L_download + L_extraction) + (1-a)*(C_API + C_transport)
 
         Args:
             download_latency (float): time cost of downloading the chunk
             extract_latency (float): time cost of extracting files in the chunk
-            compressed_file_size (float): 
+            compressed_file_size (float):
 
         Returns:
             float: total eviction cost
@@ -164,7 +164,7 @@ class Manager():
         cf = float(self.managerconf['costFactor'])
         total_cost = cf*(download_latency + extract_latency) + (1-cf)*(API_PRICE+TRANSFER_PRICE*transport_cost)
         return total_cost
-                
+
     # Segment a file if it's greater than the max_part_size
     @staticmethod
     def assign_node(node_sequence, chunk_size):
@@ -174,8 +174,8 @@ class Manager():
                 free_space = int(free_space) * 1e3
                 if free_space >= chunk_size:
                     return node
-                    
-    def seg_tabular_chunk(self, etag, file_type, file_path, node_sequence):        
+
+    def seg_tabular_chunk(self, etag, file_type, file_path, node_sequence):
         segments = []
         if file_type in ['csv', 'parquet']:
             from dask import dataframe as DF
@@ -183,7 +183,7 @@ class Manager():
                 chunks = DF.read_csv(file_path)
             elif file_type == 'parquet':
                 chunks = DF.read_parquet(file_path)
-                
+
             logger.info("repartitioning file {}".format(file_path))
             # this process is time-consuming, depends on the partition size
             chunks = chunks.repartition(partition_size=MAX_CHUNK_SIZE)
@@ -193,14 +193,14 @@ class Manager():
                 chunk_size = partition_size[part].item()
                 loc = self.assign_node(node_sequence, chunk_size)
                 seg_path = "/%s/%s" % (loc, chunk_etag)
-                
+
                 logger.info("create partition {}".format(seg_path))
                 if not os.path.exists(seg_path):
                     if file_type == 'csv':
-                        chunk_part.to_csv(seg_path, index=False)
+                        chunk_part.to_csv(seg_path, index=False, single_file=True)
                     elif file_type == 'parquet':
                         chunk_part.to_parquet(path='/', write_metadata_file=False, name_function=lambda _: seg_path)
-                
+
                 segments.append([chunk_etag, chunk_size, loc])
         elif file_type == 'npy':
             import numpy as np
@@ -221,14 +221,14 @@ class Manager():
                     n_items = row_size * num_rows
                     value = np.fromfile(f, count=n_items, dtype=dtype)
                     value = value.reshape((-1,) + shape[1:])
-                    
+
                     chunk_etag = "{}-{}".format(etag, part)
                     chunk_size = value.nbytes
                     loc = self.assign_node(node_sequence, chunk_size)
                     seg_path = "/{}/{}".format(loc, chunk_etag)
-                    
+
                     np.save(seg_path, value)
-                    
+
                     segments.append([chunk_etag, chunk_size, loc])
                     start_row += num_rows
                     part += 1
@@ -241,7 +241,7 @@ class Manager():
                     chunk_etag = "{}-{}".format(etag, part)
                     chunk_size = sys.getsizeof(value)
                     loc = self.assign_node(node_sequence, chunk_size)
-                    
+
                     seg_path = "/{}/{}".format(loc, chunk_size)
                     with open(seg_path, 'wb') as f:
                         f.write(value)
@@ -250,7 +250,7 @@ class Manager():
                     value = f.read(MAX_CHUNK_SIZE)
                     part += 1
         return segments
-        
+
     def filter_chunks(self, page):
         """Set the Exist and ChunkETag fields for s3 returned objects
 
@@ -265,7 +265,7 @@ class Manager():
             if page[i]['Size'] == 0: continue
             page[i]["ETag"] = page[i]["ETag"].strip('"')  # ETag value from S3 contains " sometimes
             etags[page[i]["ETag"]] = page[i]["LastModified"]
-            
+
         results = self.dataset_col.aggregate(pipeline=[{"$match": {"ETag": {"$in": list(etags.keys())}}}])
         existing_etags = {item['ETag']: item for item in results}
 
@@ -282,21 +282,21 @@ class Manager():
             info['ChunkETag'] = info['ETag']
             chunks.append(info)
         return chunks
-    
+
     def acquire_resources(self, chunks, node_sequence):
         """Acquire resources to deploy the chunks
 
         Args:
             chunks (List[dict]): a list of chunk objects
             node_sequence (List[str]): Node IPs in the cluster
-            
+
         Returns:
             bool: if the chunks are deployable
         """
         free_space = {}
         for node in node_sequence:
             free_space[node] = shutil.disk_usage("/{}".format(node))[-1]
-        
+
         remain_chunks = []
         extra_space = 0
         for chunk in chunks:
@@ -312,14 +312,14 @@ class Manager():
                     del free_space[node]
             else:
                 extra_space += s
-        
+
         if extra_space > 0:
             # calculate preemptible space
             preempt_space = self.dataset_col.aggregate([
                 {"$match": {"Status": CHUNK_STATUS.INACTIVE}},
                 {"$group": {"PreemptibleSpace": {"$sum": "$ChunkSize"}}}
             ])['PreemptibleSpace']
-            
+
             # the job is deployable
             if preempt_space >= extra_space:
                 candidates = self.dataset_col.find({'Status': CHUNK_STATUS.INACTIVE})
@@ -328,7 +328,7 @@ class Manager():
             else:
                 return False
         return True
-    
+
     def cost_aware_lrfu(self, chunks, require: float):
         scores = []
         for i, chunk in enumerate(chunks):
@@ -375,21 +375,21 @@ class Manager():
     def clone_chunk(self, chunk: dict, s3_client, bucket_name, node_sequence):
         key = chunk['Key']
         file_type = key.split('.')[-1].lower()
-        
+
         if 'ETag' in chunk:
             etag = chunk['ETag'].strip('"')
         else:
             # TODO: this probably overflow memory, we can only read the first 1MB (say)
             value = s3_client.get_object(Bucket=bucket_name, Key=key)['Body'].read()
             etag = hashing(value)
-            
+
         now = datetime.utcnow().timestamp()
         chunk.update({
             "InitTime": bson.timestamp.Timestamp(int(now), inc=1),
             "LastModified": bson.timestamp.Timestamp(int(chunk['LastModified'].timestamp()), inc=1)
         })
-        
-        def extend_chunk_info(raw:dict, chunk_etag, chunk_size, loc):     
+
+        def extend_chunk_info(raw:dict, chunk_etag, chunk_size, loc):
             cost = self.calculate_cost(download_latency, extract_latency, df_size)
             cost = str((chunk_size/raw['Size']) * cost)
             raw.update({
@@ -400,7 +400,7 @@ class Manager():
                 "Location": loc,
                 "Cost": cost
             })
-        
+
         # process a chunk which is a file after being downloaded/extracted
         def process_chunk_file(chunk_etag, file_path):
             obj_chunks = []
@@ -412,24 +412,24 @@ class Manager():
                 segments = self.seg_tabular_chunk(chunk_etag, file_type, file_path, node_sequence)
                 for segment in segments:
                     extend_chunk_info(chunk, *segment)
-                    obj_chunks.append(chunk)
+                    obj_chunks.append(chunk.copy())
                 # the old file has been partitioned, so delete it
                 os.remove(file_path)
             return obj_chunks
-        
+
         # download file
         tmp_path, df_size, download_latency = self.download_file(s3_client, bucket_name, key, etag)
         loc = self.assign_node(node_sequence, zcat(tmp_path))
         dst = "/{}/{}".format(loc, etag)
-        
+
         # extract file
         extract_latency = 0
         if file_type in ['tar', 'bz2', 'zip', 'gz']:
             extract_latency = self.extract_file(tmp_path, dst)
-            
+
             # walk through extracted files
             if os.path.isdir(dst):
-                '''!!! If the extacted entity is a folder, we currently assume any individual 
+                '''!!! If the extacted entity is a folder, we currently assume any individual
                 file in the folder is smaller than the MAX_CHUNK_SIZE
                 '''
                 extend_chunk_info(chunk, etag, chunk['Size'], loc)
@@ -454,7 +454,7 @@ class ConnectionService(pb_grpc.ConnectionServicer):
     def __init__(self, manager: Manager) -> None:
         super().__init__()
         self.manager = manager
-        
+
     def connect(self, request, context):
         cred, s3auth = request.cred, request.s3auth
         rc = self.manager.auth_client(cred=cred, s3auth=MessageToDict(s3auth))
@@ -501,7 +501,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
     def __init__(self, manager: Manager) -> None:
         super().__init__()
         self.manager = manager
-    
+
     def register(self, request, context):
         cred = request.cred
         rc = self.manager.auth_client(cred, conn_check=True)
@@ -512,7 +512,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             train = request.datasource.keys.train
             val = request.datasource.keys.validation
             test = request.datasource.keys.test
-            
+
             def load_chunks(l1, l2):
                 if l1 == 'train':
                     if l2 == "samples":
@@ -535,7 +535,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                         keys = test.targets
                     else:
                         keys = test.manifests
-                    
+
                 chunks = []
                 for prefix in keys:
                     paginator = s3_client.get_paginator('list_objects_v2')
@@ -550,13 +550,13 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                         chunks.extend(future.result())
                 chunks.sort(key=lambda x: x['Key'])
                 return chunks
-            
+
             # copy data from cloud to NFS, init the `ChunkSize`, `Location`, and `Files` fields
             # collect sample and target etags
             dataset_etags = defaultdict(dict)
             chunks = []
             node_seq = request.nodesequence
-            
+
             futures = []
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 for l1 in ['train', 'validation', 'test']:
@@ -578,11 +578,12 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                                 else:
                                     raws[i]['Status'] = {"code": CHUNK_STATUS.PENDING, "active_count": 1}
                             raw_chunks.extend(raws)
-                    
+
                     # try to acquire resources for the job
                     if not self.manager.acquire_resources(raw_chunks, node_seq):
                         return pb.RegisterResponse(rc=pb.RC.FAILED, regerr=pb.RegisterError(error="failed to register the jod, disk resource is under pressure"))
-                    
+
+
                     # downloading ...
                     for chunk in raw_chunks:
                         if not chunk['Exist']:
@@ -592,7 +593,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                             futures.append(executor.submit(self.manager.move_chunk, chunk, node_seq))
             for future in concurrent.futures.as_completed(futures):
                 chunks.extend(future.result())
-            
+
             # write job_col and dataset_col collections
             jobInfo = {
                 "Meta": {
@@ -613,7 +614,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     chunk['Jobs'] = [jobId]
                 else:
                     chunk['Jobs'].append(jobId)
-                
+
                 if not chunk['Exist']:
                     chunk['Exist'] = True
                     self.manager.dataset_col.insert_one(chunk)
@@ -634,7 +635,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
         jobId = request.jobId
         rc = self.manager.auth_client(cred)
         if rc in [pb.RC.CONNECTED, pb.RC.DISCONNECTED]:
-            result = self.manager.job_col.delete_one(filter={"JobId": jobId}) 
+            result = self.manager.job_col.delete_one(filter={"JobId": jobId})
             if result.acknowledged and result.deleted_count == 1:
                 resp = pb.DeregisterResponse("successfully deregister job {}".format(jobId))
                 logger.info('user {} deregister job {}'.format(cred.username, jobId))
@@ -643,19 +644,19 @@ class RegistrationService(pb_grpc.RegistrationServicer):
         else:
             resp = pb.DeregisterResponse(response="failed to deregister job {}".format(jobId))
         return resp
-      
+
 
 class DataMissService(pb_grpc.DataMissServicer):
     def __init__(self, manager: Manager) -> None:
         super().__init__()
         self.manager = manager
-        
+
     def call(self, request, context):
         cred = request.cred
         rc = self.manager.auth_client(cred, conn_check=True)
         if rc != pb.RC.CONNECTED:
             return
-        
+
         print('DataMissService Log: ', request.etag)
         # download data
         def download(etag):

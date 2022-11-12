@@ -56,10 +56,7 @@ class DLCJobDataset(Dataset):
         self.qos = job_meta["qos"]
         self.lazy = job_meta['qos']['LazyLoading']
         self.usecache = job_meta['qos']['UseCache']
-        self.maxpart = job_meta['qos']['MaxPartMill'] * 1e6
-        if self.maxpart == 0:
-            self.maxpart = math.inf
-        
+
         self.sample_chunks = []
         self.target_chunks = []
         
@@ -111,7 +108,8 @@ class DLCJobDataset(Dataset):
         self.load_data(partition_index=0)
         
         self.miss_queue = Queue()
-        self.unused_idx = set(list(range(self.__len__())))
+        if self.lazy:
+            self.unused_idx = set(list(range(self.__len__())))
 
     def try_get_item(self, idx):
         if self.lazy:
@@ -200,17 +198,8 @@ class DLCJobDataset(Dataset):
             chunk_groups = []
             if etags:
                 chunks = self.dataset_col.find({"ETag": {"$in": etags}})
-                total_size = 0
-                chunk_groups.append([])
                 for chunk in chunks:
-                    total_size += int(chunk['Size'])
-                    if total_size >= self.maxpart:
-                        chunk_groups.append([])
-                        total_size = 0
-                    elif int(chunk['Size']) > self.maxpart:
-                        raise Exception('File {} size is greater than assigned maxpartory.'.format(chunk['Key']))
-                    else:
-                        chunk_groups[-1].append(chunk)
+                    chunk_groups.append(chunk)
             return chunk_groups
     
         self.sample_chunks = helper(chunk_etags['samples'])
@@ -230,22 +219,13 @@ class DLCJobDataset(Dataset):
         keys = self.job_info['Datasource']['keys'][self.dtype]
         
         def helper(keys):
-            total_size = 0
             chunk_groups = []
             if keys:
                 pages = load_pages(keys)
                 for i in range(len(pages)):
                     for j in range(len(pages[i]['Contents'])):
                         dataobj = pages[i]["Contents"][j]
-                        s = int(dataobj['Size'])
-                        total_size += s
-                        if total_size > self.maxpart:
-                            chunk_groups.append([])
-                            total_size = 0
-                        elif s > self.maxpart:
-                            raise Exception('File {} size is greater than assigned maxpartory.'.format(dataobj['Key']))
-                        else:
-                            chunk_groups[-1].append(dataobj)
+                        chunk_groups.append(dataobj)
             return chunk_groups
         
         self.sample_chunks = helper(keys['samples'])
@@ -274,29 +254,28 @@ class DLCJobDataset(Dataset):
         def helper(chunks, reader):
             data = {}
             nfs_path = []
-            for chunk in chunks[partition_index]:
-                key, loc = chunk['Key'], chunk['Location']
-                if self.usecache:
-                    if not chunk:
-                        nfs_path.append(None)
-                        continue
-                    etag = chunk['ChunkETag']
-                    chunk_path = '/{}/{}'.format(loc, etag)
-                    # decompressed folder, so key has the .tar.gz extension
-                    if os.path.isdir(chunk_path):
-                        # We assume data won't be immediately deleted after being downloaded by Manager.
-                        for root, dirs, files in os.walk(chunk_path):
-                            for name in files:
-                                fpath = os.path.join(root, name)
-                                nfs_path.append(fpath)
-                                dummy_key = key + fpath.replace(chunk_path, '')
-                                data[dummy_key] = fpath if self.lazy else reader(fpath)
-                    else:
-                        nfs_path.append(chunk_path)
-                        data[key] = chunk_path if self.lazy else reader(chunk_path)
-                else:
-                    data[key] = key
+            chunk = chunks[partition_index]
+            key, loc = chunk['Key'], chunk['Location']
+            if self.usecache:
+                if not chunk:
                     nfs_path.append(None)
+                etag = chunk['ChunkETag']
+                chunk_path = '/{}/{}'.format(loc, etag)
+                # decompressed folder, so key has the .tar.gz extension
+                if os.path.isdir(chunk_path):
+                    # We assume data won't be immediately deleted after being downloaded by Manager.
+                    for root, dirs, files in os.walk(chunk_path):
+                        for name in files:
+                            fpath = os.path.join(root, name)
+                            nfs_path.append(fpath)
+                            dummy_key = key + fpath.replace(chunk_path, '')
+                            data[dummy_key] = fpath if self.lazy else reader(fpath)
+                else:
+                    nfs_path.append(chunk_path)
+                    data[key] = chunk_path if self.lazy else reader(chunk_path)
+            else:
+                data[key] = key
+                nfs_path.append(None)
             return data, nfs_path
             
         self.samples, sample_fpaths = helper(self.sample_chunks, self.sample_reader)
@@ -490,12 +469,9 @@ class DLCJobDataLoader(object):
                                   prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
 
             # update chunk status to ACTIVE
-            etags = []
             tmp = self.dataset.sample_chunks.copy()
             tmp.extend(self.dataset.target_chunks)
-            for part in tmp:
-                for chunk in part:
-                    etags.append(chunk['ChunkETag'])
+            etags = [part['ChunkETag'] for part in tmp]
             now = datetime.utcnow().timestamp()
             self.dataset.dataset_col.update_many(
                 {"ChunkETag": {"$in": etags}}, 
