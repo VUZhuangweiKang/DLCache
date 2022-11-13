@@ -493,6 +493,7 @@ class DLCJobDataLoader(object):
                 self.batchedNfsPaths = [file_paths[idx].tolist() for idx in self.torch_loader._index_sampler]
             else:
                 self.batchedNfsPaths = [[item] for item in self.dataset.nfsFilePaths]
+                
             # client will copy the first batch when receive init msg
             self.socket_req.send_multipart([b'init', json.dumps({
                 "paths": self.batchedNfsPaths,
@@ -537,18 +538,18 @@ class DLCJobDataLoader(object):
             elif self.curr_batch == self.num_batches:
                 raise StopIteration
             
-            # TODO: 表格数据的切分方式不是按照batch，所以preftch这里是按照max_chunk_size进行的，但是release是按照batch
-            # prefetch the next batch
-            pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), 
-                                 min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
-            pre_idx = [str(idx) for idx in pre_idx]
-            if len(pre_idx) > 0:
-                self.socket_pub.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])
-            
-            # release the last batch
-            if self.loader._rcvd_idx > 0:
-                self.socket_pub.send_multipart([b'releaseCache', str(self.loader._rcvd_idx-1).encode('utf-8')])
-            
+            if self.lazy:
+                # prefetch the next batch
+                pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), 
+                                    min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
+                pre_idx = [str(idx) for idx in pre_idx]
+                if len(pre_idx) > 0:
+                    self.socket_pub.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])
+                
+                # release the last batch
+                if self.loader._rcvd_idx > 0:
+                    self.socket_pub.send_multipart([b'releaseCache', str(self.loader._rcvd_idx-1).encode('utf-8')])
+
             data = next(self.loader)
             self.curr_batch += 1
         except StopIteration:
@@ -593,11 +594,12 @@ class DLCJobDataLoader(object):
                 )
                 self.socket_pub.send_multipart([b'expireCache', b''])
                 raise StopIteration
-            else:
-                # data in the current part have been consumed
+            else:                    
+                # data in the current part have been consumed    
                 self.partition_index += 1
                 self.clear()
                 self.dataset.load_data(self.partition_index)
                 self._init_loader(first_iter=True)
                 data = next(self.loader)
+                
         return data

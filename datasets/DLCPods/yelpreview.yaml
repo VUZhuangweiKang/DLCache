@@ -16,7 +16,13 @@ spec:
       keys:
         train:
           samples:
-            - YelpReview/train/review.csv
+            - YelpReview/train/train.csv
+        validation:
+          samples:
+            - YelpReview/val/val.csv
+        test:
+          samples:
+            - YelpReview/test/test.csv
     qos:
       usecache: true
       MaxPartMill: 10000

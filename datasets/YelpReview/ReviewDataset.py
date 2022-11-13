@@ -111,6 +111,7 @@ class ReviewVectorizer(object):
 class ReviewDataset(DLCJobDataset):
     def __init__(self, dtype):
         super().__init__(dtype)
+        self._vectorizer = None
         
         # split the dataframe to train, val and test
         self.train_df = self.samples[self.samples.split=='train']
@@ -131,7 +132,7 @@ class ReviewDataset(DLCJobDataset):
     def save_vectorizer(self, vectorizer_filepath):
         with open(vectorizer_filepath, "w") as fp:
             json.dump(self._vectorizer.to_serializable(), fp)
-
+ 
     def get_vectorizer(self):
         return self._vectorizer
 
@@ -142,20 +143,14 @@ class ReviewDataset(DLCJobDataset):
         return len(self) // batch_size  
     
     def process(self):
-        samples, self._vectorizer = list(self.samples.values())[0]
+        samples, vectorizer = list(self.samples.values())[0]
+        if self._vectorizer is None:
+            self._vectorizer = vectorizer
         return samples, None
     
     def sample_reader(self, path: str = None, raw_bytes: bytes = None):
-        review_df = pd.read_csv(path)
-        review_df = review_df.sample(frac=.003)
-        review_df['split'] = np.random.randn(len(review_df), 1)
-        review_df['split'] = review_df['split'].apply( lambda x : 'train' if x<.7 else ( 'val' if x<.85 else 'test' ))
-        review_df['rating'] = review_df['stars'].apply( lambda x : 1 if x>3 else 0 )
-        review_df['review'] = review_df['text']
-        review_df = review_df[['review','rating','split']]
-        print( review_df.info() )
-        train_review_df = review_df[review_df.split=='train']
-        return review_df, ReviewVectorizer.from_dataframe(train_review_df)
+        df = pd.read_csv(path)
+        return df, ReviewVectorizer.from_dataframe(df)
     
     def __getitem__(self, index):
         row = self._target_df.iloc[index]

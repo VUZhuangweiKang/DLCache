@@ -95,7 +95,7 @@ def main():
 
     print("Loading dataset and creating vectorizer")
     dataset = ReviewDataset(dtype='train')
-    dataset.save_vectorizer(args.vectorizer_file)    
+    dataset.save_vectorizer(args.vectorizer_file)
 
     vectorizer = dataset.get_vectorizer()
 
