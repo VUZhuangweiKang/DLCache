@@ -94,10 +94,9 @@ def main():
     handle_dirs(args.save_dir)
 
     print("Loading dataset and creating vectorizer")
-    dataset = ReviewDataset(dtype='train')
-    dataset.save_vectorizer(args.vectorizer_file)
-
-    vectorizer = dataset.get_vectorizer()
+    train_dataset = ReviewDataset(dtype='train')
+    vectorizer = train_dataset.get_vectorizer()    
+    val_dataset = ReviewDataset(dtype='validation')
 
     if not args.evaluate:
         classifier = ReviewClassifier(num_features=len(vectorizer.review_vocab))
@@ -111,18 +110,13 @@ def main():
 
         epoch_bar = tqdm_notebook(desc='training routine',  total=args.num_epochs, position=0)
 
-        dataset.set_split('train')
-        train_bar = tqdm_notebook(desc='split=train', total=dataset.get_num_batches(args.batch_size), position=1, leave=True)
-        
-        dataset.set_split('val')
-        val_bar = tqdm_notebook(desc='split=val', total=dataset.get_num_batches(args.batch_size), position=1, leave=True)
+        train_bar = tqdm_notebook(desc='split=train', total=train_dataset.get_num_batches(args.batch_size), position=1, leave=True)
+        val_bar = tqdm_notebook(desc='split=val', total=val_dataset.get_num_batches(args.batch_size), position=1, leave=True)
 
         try:
             for epoch_index in range(args.num_epochs):
                 train_state['epoch_index'] = epoch_index
-                
-                dataset.set_split('train')
-                train_loader = DLCJobDataLoader(dataset=dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
+                train_loader = DLCJobDataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
                                                 drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
                 batch_generator = generate_batches(train_loader, device=args.device)
                 
@@ -150,9 +144,7 @@ def main():
                 train_state['train_loss'].append(running_loss)
                 train_state['train_acc'].append(running_acc)
 
-
-                dataset.set_split('val')
-                val_loader = DLCJobDataLoader(dataset=dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
+                val_loader = DLCJobDataLoader(dataset=val_dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
                                               drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
                 batch_generator = generate_batches(val_loader, device=args.device)
                 running_loss = 0.
@@ -196,8 +188,8 @@ def main():
         classifier.load_state_dict(torch.load(train_state['model_filename']))
         classifier = classifier.to(args.device)
 
-        dataset.set_split('test')
-        test_loader = DLCJobDataLoader(dataset=dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
+        test_dataset = ReviewDataset(dtype='test') 
+        test_loader = DLCJobDataLoader(dataset=test_dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
                                        drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
         batch_generator = generate_batches(test_loader, device=args.device)
         running_loss = 0.

@@ -111,41 +111,15 @@ class ReviewVectorizer(object):
 class ReviewDataset(DLCJobDataset):
     def __init__(self, dtype):
         super().__init__(dtype)
-        self._vectorizer = None
         
-        # split the dataframe to train, val and test
-        self.train_df = self.samples[self.samples.split=='train']
-        self.train_size = len(self.train_df)
-
-        self.val_df = self.samples[self.samples.split=='val']
-        self.validation_size = len(self.val_df)
-
-        self.test_df = self.samples[self.samples.split=='test']
-        self.test_size = len(self.test_df)
-
-        self._lookup_dict = {'train': (self.train_df, self.train_size),
-                             'val': (self.val_df, self.validation_size),
-                             'test': (self.test_df, self.test_size)}
-
-        self.set_split('train')
-
-    def save_vectorizer(self, vectorizer_filepath):
-        with open(vectorizer_filepath, "w") as fp:
-            json.dump(self._vectorizer.to_serializable(), fp)
- 
     def get_vectorizer(self):
         return self._vectorizer
-
-    def set_split(self, split="train"):
-        self._target_df, self._target_size = self._lookup_dict[split]
 
     def get_num_batches(self, batch_size):
         return len(self) // batch_size  
     
     def process(self):
-        samples, vectorizer = list(self.samples.values())[0]
-        if self._vectorizer is None:
-            self._vectorizer = vectorizer
+        samples, self._vectorizer = list(self.samples.values())[0]
         return samples, None
     
     def sample_reader(self, path: str = None, raw_bytes: bytes = None):
@@ -153,10 +127,10 @@ class ReviewDataset(DLCJobDataset):
         return df, ReviewVectorizer.from_dataframe(df)
     
     def __getitem__(self, index):
-        row = self._target_df.iloc[index]
+        row = self.samples.iloc[index]
         review_vector = self._vectorizer.vectorize(row.review)
         rating_index = self._vectorizer.rating_vocab.lookup_token(row.rating)
         return {'x_data': review_vector, 'y_target': rating_index}
     
     def __len__(self):
-        return self._target_size
+        return len(self.samples)
