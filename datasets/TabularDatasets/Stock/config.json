@@ -1,0 +1,14 @@
+{
+    "model_state_file": "model.pth",
+    "save_dir": "models/",
+    "evaluate": false,
+    "batch_size": 128,
+    "drop_last": false,
+    "workers": 4,
+    "pin_memory": true,
+    "early_stopping_criteria": 5,
+    "learning_rate": 0.001,
+    "num_epochs": 100,
+    "seed": 1337,
+    "cuda": true
+}
