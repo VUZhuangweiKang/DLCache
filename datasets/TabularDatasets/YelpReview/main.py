@@ -7,44 +7,7 @@ import torch.optim as optim
 from ReviewDataset import *
 from tqdm import tqdm_notebook
 from utils import *
-from model import *
-
-
-def make_train_state(args):
-    return {'stop_early': False,
-            'early_stopping_step': 0,
-            'early_stopping_best_val': 1e8,
-            'learning_rate': args.learning_rate,
-            'epoch_index': 0,
-            'train_loss': [],
-            'train_acc': [],
-            'val_loss': [],
-            'val_acc': [],
-            'test_loss': -1,
-            'test_acc': -1,
-            'model_filename': args.model_state_file}
-
-
-def update_train_state(args, model, train_state):
-    if train_state['epoch_index'] == 0:
-        torch.save(model.state_dict(), train_state['model_filename'])
-        train_state['stop_early'] = False
-
-    elif train_state['epoch_index'] >= 1:
-        loss_tm1, loss_t = train_state['val_loss'][-2:]
-
-        if loss_t >= train_state['early_stopping_best_val']:
-            train_state['early_stopping_step'] += 1
-        else:
-            if loss_t < train_state['early_stopping_best_val']:
-                torch.save(model.state_dict(), train_state['model_filename'])
-
-            train_state['early_stopping_step'] = 0
-
-        train_state['stop_early'] = \
-            train_state['early_stopping_step'] >= args.early_stopping_criteria
-
-    return train_state
+from models import *
         
 
 def predict_rating(review, classifier, vectorizer, decision_threshold=0.5):
@@ -59,14 +22,6 @@ def predict_rating(review, classifier, vectorizer, decision_threshold=0.5):
         index = 0
 
     return vectorizer.rating_vocab.lookup_index(index)
-    
-
-def generate_batches(dataloader, device="cpu"):
-    for data_dict in dataloader:
-        out_data_dict = {}
-        for name, tensor in data_dict.items():
-            out_data_dict[name] = data_dict[name].to(device)
-        yield out_data_dict
         
         
 def main():
