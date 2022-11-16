@@ -7,7 +7,7 @@ class Model(nn.Module):
         self.layers = []
         
         h = input_features
-        for hidden in hidden[1:-1]:
+        for hidden in hiddens[1:-1]:
             self.layers.extend([
                 nn.BatchNorm2d(h),
                 nn.Linear(h, hidden),
@@ -17,7 +17,7 @@ class Model(nn.Module):
             h =  hidden
         
         self.layers.extend([
-            nn.Linear(h, hidden[-1]),
+            nn.Linear(h, hiddens[-1]),
             nn.Sigmoid()
         ])
         

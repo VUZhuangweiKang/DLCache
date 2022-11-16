@@ -1,17 +1,9 @@
 import pandas as pd
+import sys
+import torch
+from torch import tensor
+sys.path.insert(0, "../")
 from DLCJob import *
-
-
-def train_test_data(seq, steps):
-    X, Y = list(), list()
-    for i in range(len(seq)):
-        sample = i + steps
-        if sample > len(seq)-1:
-            break
-        x, y = seq[i:sample],seq[sample]
-        X.append(x)
-        Y.append(y)
-    return np.array(X), np.array(Y)
 
 
 class StockDataset(DLCJobDataset):
@@ -27,25 +19,27 @@ class StockDataset(DLCJobDataset):
         X, Y = list(), list()
         for i in range(len(samples)):
             sample = i + self.steps
-            if sample > len(sample)-1:
+            if sample > len(samples)-1:
                 break
-            x, y = sample[i:sample], sample[sample]
+            x, y = samples[i:sample], samples[sample]
             X.append(x)
             Y.append(y)            
         return X, Y
     
     def sample_reader(self, path: str = None, raw_bytes: bytes = None):
-        df = pd.read_csv(path)
-        return df
+        X = pd.read_csv(path, index_col='date')
+        X.fillna(method='ffill', inplace=True)
+        X = X.to_numpy()
+        if(np.isnan(X).any()):
+            print('Contains NaN....')
+        return tensor(X, dtype=torch.float32)
     
     def target_reader(self, path: str = None, raw_bytes: bytes = None):
-        labels = pd.read_csv(path)['Label'].to_list()
-        return labels
+        Y = pd.read_csv(path, index_col='date')['Label'].to_numpy()
+        return tensor(Y, dtype=torch.float32)
     
     def __getitem__(self, index):
-        x = self.samples.iloc[index]
-        y = self.targets[index]
-        return {'x_data': x, 'y_target': y}
+        return {'x_data': self.samples[index], 'y_target': self.targets[index]}
     
     def __len__(self):
         return len(self.samples)

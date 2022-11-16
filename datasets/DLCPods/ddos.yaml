@@ -1,7 +1,7 @@
 apiVersion: docgroup.com/v1alpha1
 kind: DLCPod
 metadata:
-  name: yelpreview
+  name: ddos
   namespace: default
 spec:
   secret:
@@ -11,18 +11,24 @@ spec:
     image: zhuangweikang/tabular-dev:latest
     command: ["bash"]
     datasource:
-      name: YelpReview
+      name: DDoS
       bucket: vuzhuangwei
       keys:
         train:
           samples:
-            - YelpReview/train/samples/train.csv
+            - DDoS/train/samples/train.csv
+          targets:
+            - DDoS/train/targets/train.csv
         validation:
           samples:
-            - YelpReview/val/samples/val.csv
+            - DDoS/val/samples/val.csv
+          targets:
+            - DDoS/val/targets/val.csv
         test:
           samples:
-            - YelpReview/test/samples/test.csv
+            - DDoS/test/samples/test.csv
+          targets:
+            - DDoS/test/targets/test.csv
     qos:
       usecache: true
       MaxPartMill: 10000

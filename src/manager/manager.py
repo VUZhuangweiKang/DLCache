@@ -583,7 +583,6 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     if not self.manager.acquire_resources(raw_chunks, node_seq):
                         return pb.RegisterResponse(rc=pb.RC.FAILED, regerr=pb.RegisterError(error="failed to register the jod, disk resource is under pressure"))
 
-
                     # downloading ...
                     for chunk in raw_chunks:
                         if not chunk['Exist']:

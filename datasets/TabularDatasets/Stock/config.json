@@ -9,6 +9,11 @@
     "early_stopping_criteria": 5,
     "learning_rate": 0.001,
     "num_epochs": 100,
+    "n_features": 89,
+    "hidden_size": 128, 
+    "num_layers": 2,
+    "dropout_rate": 0.3,
+    "steps": 10,
     "seed": 1337,
     "cuda": true
 }
