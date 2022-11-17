@@ -171,7 +171,7 @@ class DLCJobDataset(Dataset):
                 if len(self.targets) > 0:
                     target = self.targets[idx]
                     if os.path.exists(str(target)):
-                        target = helper(target, self.__target_reader__)
+                        target = helper(target, self.target_reader)
             else:
                 sample = self.client.get_object(Bucket=self.bucket, Key=self.samples[idx])['Body'].read()
                 target = None
@@ -284,7 +284,7 @@ class DLCJobDataset(Dataset):
         self.samples, sample_fpaths = helper(self.sample_chunks, self.sample_reader)
         target_fpaths = []
         if self.target_chunks:
-            self.targets, target_fpaths = helper(self.target_chunks, self.__target_reader__)
+            self.targets, target_fpaths = helper(self.target_chunks, self.target_reader)
         
         # build mappings between samples and targets if the dataset is file-based
         # and the manifest is specified
@@ -305,7 +305,7 @@ class DLCJobDataset(Dataset):
         assert len(sample_fpaths) == len(target_fpaths)
         self.nfsFilePaths = list(zip(sample_fpaths, target_fpaths))
         self.samples, self.targets = self.process()
-        if self.targets:
+        if self.targets is not None:
             assert len(self.samples) == len(self.targets)
 
     def sample_reader(self, path: str = None, raw_bytes: bytes = None):

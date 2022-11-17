@@ -17,18 +17,12 @@ spec:
         train:
           samples:
             - DDoS/train/samples/train.csv
-          targets:
-            - DDoS/train/targets/train.csv
         validation:
           samples:
             - DDoS/val/samples/val.csv
-          targets:
-            - DDoS/val/targets/val.csv
         test:
           samples:
             - DDoS/test/samples/test.csv
-          targets:
-            - DDoS/test/targets/test.csv
     qos:
       usecache: true
       MaxPartMill: 10000

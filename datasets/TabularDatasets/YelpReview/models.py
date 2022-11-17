@@ -13,3 +13,12 @@ class ReviewClassifier(nn.Module):
         if apply_sigmoid:
             y_out = torch.sigmoid(y_out)
         return y_out
+
+    def save(self, model_path):
+        torch.save(self, model_path)
+
+    def load(self, model_path):
+        model = torch.load(model_path)
+        self.load_state_dict(model)
+        self.eval()
+        return model

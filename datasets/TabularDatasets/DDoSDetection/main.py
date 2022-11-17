@@ -1,6 +1,7 @@
 import torch
 import json
 from argparse import Namespace
+import torch.optim as optim
 from models import *
 from tqdm.notebook import tqdm
 from DDoSDataset import *
@@ -24,10 +25,12 @@ def main():
 
     set_seed_everywhere(args.seed, args.cuda)
     
-    classifier = Model(input_features=args.input_features, hiddens=args.hiddens, dropout_rate=args.dropout_rate)
+    classifier = Model(input_features=args.input_features, 
+                       hiddens=args.hiddens, 
+                       dropout_rate=args.dropout_rate)
     loss_func = nn.BCELoss()
-    optim = torch.optim.Adam(classifier.parameters(), lr=args.learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optim, mode='min', factor=0.5, patience=1)
+    optimizer = optim.Adam(classifier.parameters(), lr=args.learning_rate)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, mode='min', factor=0.5, patience=1)
     
     if not args.evaluate:
         train_dataset = DDoSDataset(dtype='train')
@@ -40,7 +43,7 @@ def main():
                                                 drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
                 
                 batch_generator = generate_batches(train_loader, device=args.device)
-                optim.zero_grad()
+                optimizer.zero_grad()
                 running_loss = 0.0
                 running_acc = 0.0
                 
@@ -48,7 +51,7 @@ def main():
                 
                 with tqdm(desc='split=train', total=train_dataset.get_num_batches(args.batch_size), position=1, leave=True) as train_bar:
                     for batch_index, batch_dict in enumerate(batch_generator):
-                        optim.zero_grad()
+                        optimizer.zero_grad()
                         y_pred = classifier(batch_dict['x_data'])
 
                         loss = loss_func(y_pred, batch_dict['y_target'])
@@ -57,7 +60,7 @@ def main():
 
                         loss.backward()
 
-                        optim.step()
+                        optimizer.step()
                         acc_t = compute_accuracy(y_pred, batch_dict['y_target'])
                         running_acc += (acc_t - running_acc) / (batch_index + 1)
 
@@ -134,4 +137,7 @@ def main():
 
         print("Test loss: {:.3f}".format(train_state['test_loss']))
         print("Test Accuracy: {:.2f}".format(train_state['test_acc']))
-        
+    
+
+if __name__ == "__main__":
+    main()
