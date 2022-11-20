@@ -2,7 +2,8 @@ import pandas as pd
 import numpy as np
 import string
 from collections import Counter
-import json
+import sys
+sys.path.insert(0, '../')
 from DLCJob import *
 
 

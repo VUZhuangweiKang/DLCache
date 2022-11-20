@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: exp-motivation
+spec:
+  containers:
+  - name: app
+    image: zhuangweikang/motivation-dev:latest
+    tty: true
+    stdin: true
+    volumeMounts:
+    - name: runtime
+      mountPath: /runtime
+    - name: secret
+      mountPath: "/secret"
+  volumes:
+    - name: runtime
+      emptyDir:
+        medium: Memory
+    - name: secret
+      secret:
+        secretName: dlcpod-client-credentials
+

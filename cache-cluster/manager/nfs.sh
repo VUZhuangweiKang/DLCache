@@ -14,9 +14,8 @@ sudo exportfs -rv
 sudo systemctl restart nfs-kernel-server
 
 
-# sudo mkdir /129.59.234.238
-# sudo mkdir /129.59.234.236
-# sudo mkdir /129.59.234.240
-# sudo mount -t nfs 129.59.234.240:/nfs_storage /129.59.234.240
-# sudo mount -t nfs 129.59.234.238:/nfs_storage /129.59.234.238
-# sudo mount -t nfs 129.59.234.236:/nfs_storage /129.59.234.236
+machines=("129.59.234.236" "129.59.234.237" "129.59.234.238" "129.59.234.239" "129.59.234.240" "129.59.234.241")
+for mach in "${machines[@]}"; do
+    sudo mkdir /$mach
+    sudo mount -t nfs $mach:/nfs_storage /$mach
+done

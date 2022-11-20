@@ -1,0 +1,146 @@
+[
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 4,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 4,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 8,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 8,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 16,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 16,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 32,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 32,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 64,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 64,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 128,
+        "use_cache": false
+    },
+    {
+        "dataset": "/hdd/imagenet/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 128,
+        "use_cache": false
+    },
+    {
+        "dataset": "/runtime/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 4,
+        "use_cache": true
+    },
+    {
+        "dataset": "/runtime/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 8,
+        "use_cache": true
+    },
+    {
+        "dataset": "/runtime/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 16,
+        "use_cache": true
+    },
+    {
+        "dataset": "/runtime/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 32,
+        "use_cache": true
+    },
+    {
+        "dataset": "/runtime/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 64,
+        "use_cache": true
+    },
+    {
+        "dataset": "/runtime/imagenet/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 128,
+        "use_cache": true
+    },
+    {
+        "dataset": "imagenet/",
+        "enable_fscache": true,
+        "read_size": 4,
+        "use_cache": true
+    },
+    {
+        "dataset": "imagenet/",
+        "enable_fscache": true,
+        "read_size": 8,
+        "use_cache": true
+    },
+    {
+        "dataset": "imagenet/",
+        "enable_fscache": true,
+        "read_size": 16,
+        "use_cache": true
+    },
+    {
+        "dataset": "imagenet/",
+        "enable_fscache": true,
+        "read_size": 32,
+        "use_cache": true
+    },
+    {
+        "dataset": "imagenet/",
+        "enable_fscache": true,
+        "read_size": 64,
+        "use_cache": true
+    },
+    {
+        "dataset": "imagenet/",
+        "enable_fscache": true,
+        "read_size": 128,
+        "use_cache": true
+    }
+]

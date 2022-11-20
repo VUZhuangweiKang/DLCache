@@ -10,7 +10,8 @@ sudo usermod -aG docker $USER
 # install k8s
 curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add
 sudo apt-add-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main"
-sudo apt-get install -y --allow-downgrades kubeadm=1.18.0-00 kubelet=1.18.0-00 kubectl=1.18.0-00
+sudo apt update
+sudo apt-get install -y --allow-downgrades kubeadm=1.17.6-00 kubelet=1.17.6-00 kubectl=1.17.6-00
 sudo apt-mark hold kubeadm kubelet kubectl
 sudo kubeadm version
 sudo swapoff -a
