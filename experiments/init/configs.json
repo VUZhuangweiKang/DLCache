@@ -1,0 +1,74 @@
+[
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 4,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 4,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 8,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 8,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 16,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 16,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 32,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 32,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 64,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 64,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": false,
+        "read_size": 128,
+        "remote": false
+    },
+    {
+        "dataset": "/hdd/ILSVRC/Data/CLS-LOC/*/*/*.JPEG",
+        "enable_fscache": true,
+        "read_size": 128,
+        "remote": false
+    }
+]

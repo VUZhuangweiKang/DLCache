@@ -1,0 +1,32 @@
+apiVersion: docgroup.com/v1alpha1
+kind: DLCPod
+metadata:
+  name: cifar10
+  namespace: default
+spec:
+  secret:
+    name: dlcpod-client-credentials
+  jobs:
+  - name: job
+    image: zhuangweikang/imagedatasets-dev:latest
+    command: ["bash"]
+    datasource:
+      name: CIFAR10
+      bucket: vuzhuangwei
+      keys:
+        train:
+          samples:
+            - CIFAR10/train/samples
+          manifests: 
+            - CIFAR10/train/manifest.csv
+        validation:
+          samples:
+            - CIFAR10/test/samples
+          manifests: 
+            - CIFAR10/test/manifest.csv
+    qos:
+      usecache: true
+      MaxPartMill: 10000
+      lazyloading: true
+    tty: true
+    stdin: true

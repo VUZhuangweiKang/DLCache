@@ -195,13 +195,15 @@ class DLCJobDataset(Dataset):
         chunk_etags = self.job_info['ChunkETags'][self.dtype]
         
         def helper(etags):
-            chunk_groups = []
+            chunks = []
             if etags:
-                chunks = self.dataset_col.find({"ETag": {"$in": etags}})
-                chunk_groups = [[chunk] for chunk in chunks]
-            return chunk_groups
+                chunks_iter = self.dataset_col.find({"ETag": {"$in": etags}})
+                chunks = [chunk for chunk in chunks_iter]
+            return chunks
     
         self.sample_chunks = helper(chunk_etags['samples'])
+        if self.job_info['QoS']['LazyLoading']:
+            self.sample_chunks = [self.sample_chunks]
         self.target_chunks = helper(chunk_etags['targets'])
         
     # dataset shouldn't be compressed when using this function
@@ -218,7 +220,7 @@ class DLCJobDataset(Dataset):
         keys = self.job_info['Datasource']['keys'][self.dtype]
         
         def helper(keys):
-            chunk_groups = []
+            chunks = []
             if keys:
                 pages = load_pages(keys)
                 for i in range(len(pages)):
@@ -226,8 +228,8 @@ class DLCJobDataset(Dataset):
                     for j in range(len(pages[i]['Contents'])):
                         dataobj = pages[i]["Contents"][j]
                         tmp.append(dataobj)
-                    chunk_groups.append(tmp)
-            return chunk_groups
+                    chunks.append(tmp)
+            return chunks
         
         self.sample_chunks = helper(keys['samples'])
         self.target_chunks = helper(keys['targets'])  
@@ -487,7 +489,7 @@ class DLCJobDataLoader(object):
                     "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
                 }
             )
-                
+            
             if self.lazy:
                 file_paths = np.array(self.dataset.nfsFilePaths)
                 self.batchedNfsPaths = [file_paths[idx].tolist() for idx in self.torch_loader._index_sampler]

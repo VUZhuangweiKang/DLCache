@@ -1,7 +1,6 @@
 FROM pytorch/pytorch:latest
 RUN apt update 
-RUN apt install -y vmtouch python3-pip nano
-RUN mkdir hdd
+RUN apt install -y python3-pip
 RUN mkdir app
 WORKDIR /app
 COPY . ./

@@ -5,7 +5,7 @@ import shutil
 import time
 import warnings
 from enum import Enum
-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -18,22 +18,21 @@ import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.models as models
-from torch.utils.data import Subset
-from ImageDataset import *
-from DLCJob import *
+from torch.utils.data import Subset, DataLoader
+from ImageDataset import ImageDataset
 
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
-parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
+parser = argparse.ArgumentParser(description='PyTorch Image Dataset Training')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet18)')
-parser.add_argument('-d', '--dataset', default='cifar100', 
+parser.add_argument('-d', '--dataset', default='cifar10', 
                     choices=['cifar10', 'cifar100', 'imagenet', 'imagenet-mini', 'openimages'],
                     help='dataset name')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
@@ -223,14 +222,8 @@ def main_worker(gpu, ngpus_per_node, args):
         normalize,
     ])
     
-    if args.dataset == 'openimages':
-        from OpenImages.OpenImagesDataset import OpenImagesDataset
-        DatasetCls = OpenImagesDataset
-    else:
-        DatasetCls = ImageDataset
-    
     t = time.time()
-    val_dataset = DatasetCls(dtype='validation', transform=transform)
+    val_dataset = ImageDataset(manifest_path='val_manifest.csv', transform=transform)
     print('dataset init time: ', time.time()-t)
     
     if args.distributed:
@@ -239,7 +232,7 @@ def main_worker(gpu, ngpus_per_node, args):
         val_sampler = None
 
     t = time.time()
-    val_loader = DLCJobDataLoader(
+    val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
     print('dataloader init time: ', time.time()-t)
     
@@ -247,12 +240,12 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
     else:
-        train_dataset = DatasetCls(dtype='train', transform=transform)
+        train_dataset = ImageDataset(manifest_path='train_manifest.csv', transform=transform)
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         else:
             train_sampler = None
-        train_loader = DLCJobDataLoader(
+        train_loader = DataLoader(
             train_dataset, batch_size=args.batch_size,
             num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
@@ -289,8 +282,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
+    num_batches = math.ceil(len(train_loader.dataset) / train_loader.batch_size)
     progress = ProgressMeter(
-        train_loader.num_batches,
+        num_batches,
         [batch_time, data_time, losses, top1, top5],
         prefix="Epoch: [{}]".format(epoch))
 
