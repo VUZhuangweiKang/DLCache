@@ -18,17 +18,13 @@ class ImageDataset(Dataset):
     
     def __getitem__(self, index: int):
         path, target = self.samples[index], self.targets[index]
-        sample = self.loader(path)
-        if self.target_transform is not None:
-            target = self.target_transform(target)
-        return sample, target
-
-    def loader(self, path):
         img = Image.open(path)
         img = img.convert("RGB")
         if self.transform is not None:
             img = self.transform(img)
-        return img
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
     
     def __len__(self) -> int:
         return len(self.samples)

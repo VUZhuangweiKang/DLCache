@@ -52,3 +52,4 @@ spec:
       nfs: 
         server: 129.59.234.241
         path: /nfs_storage
+  nodeName: isislab28

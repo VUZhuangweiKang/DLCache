@@ -233,7 +233,7 @@ class Client(object):
                         """
                         To ensure the data is always available for DataLoader, the length of buffer should be:
                         s >= 2*B, if alpha >= beta; otherwise,
-                        s >= (N-k)*(1-alpha/beta) 
+                        s >= (N-k)*(1-alpha/beta)
                         """
                         reqIntervals = np.mean(np.diff(self.req_time)[1:])  # data consumption intervals
                         loadIntervals = np.mean(np.array(self.load_time))  # data loading intervals

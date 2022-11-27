@@ -23,6 +23,7 @@ from torch.utils.data import Subset, DataLoader
 from ImageDataset import ImageDataset
 
 
+
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
@@ -226,7 +227,7 @@ def main_worker(gpu, ngpus_per_node, args):
     ])
     
     t = time.time()
-    val_dataset = ImageDataset(manifest_path='val_manifest.csv', transform=transform)
+    val_dataset = ImageDataset(manifest_key='CIFAR10/test/manifest.csv', transform=transform)
     print('dataset init time: ', time.time()-t)
     
     if args.distributed:
@@ -243,7 +244,7 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
     else:
-        train_dataset = ImageDataset(manifest_path='train_manifest.csv', transform=transform)
+        train_dataset = ImageDataset(manifest_key='CIFAR10/train/manifest.csv', transform=transform)
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         else:
