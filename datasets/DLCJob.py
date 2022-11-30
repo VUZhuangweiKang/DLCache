@@ -2,6 +2,7 @@ import os
 import json
 import math
 import random
+import time
 import numpy as np
 from datetime import datetime
 import bson
@@ -104,7 +105,7 @@ class DLCJobDataset(Dataset):
             self.client = s3_session.client('s3')
             self.loadChunksFromCloud()
         
-        self.nfsFilePaths = []
+        self.nfs_file_paths = []
         self.load_data(partition_index=0)
         
         self.miss_queue = Queue()
@@ -130,7 +131,7 @@ class DLCJobDataset(Dataset):
                         # print("read tmpfs file {}".format(tmpfs_path))
                     elif os.path.exists(path):
                         read_val = reader(path)
-                        # print("miss tmpfs file {}".format(tmpfs_path))
+                        print("miss tmpfs file {}".format(tmpfs_path))
                     else:
                         """
                         Substitutable cache hit
@@ -144,7 +145,7 @@ class DLCJobDataset(Dataset):
                                 sub_idx = random.randint(0, self.__len__()-1)
                             else:
                                 sub_idx = random.choice(list(self.unused_idx))
-                                                            
+
                             sub_path = self.samples[sub_idx]
                             if os.path.exists(sub_path):
                                 etag = path.split('/')[1]
@@ -256,11 +257,8 @@ class DLCJobDataset(Dataset):
         
         def helper(chunks, reader):
             data = {}
-            
-            nfs_path = []  # 3 dimensions: part, chunk, sample/target
             for chunk in chunks[partition_index]:
                 if not chunk: 
-                    nfs_path.append(None)
                     continue
                 key, loc = chunk['Key'], chunk['Location']
                 if self.usecache:
@@ -271,44 +269,47 @@ class DLCJobDataset(Dataset):
                         for root, dirs, files in os.walk(chunk_path):
                             for name in files:
                                 p = os.path.join(root, name)
-                                nfs_path.append(p)
                                 dummy_key = key + p.replace(chunk_path, '')
                                 data[dummy_key] = p if self.lazy else reader(p)
                     else:
-                        nfs_path.append(chunk_path)
                         data[key] = chunk_path if self.lazy else reader(chunk_path)
                 else:
                     data[key] = key
-                    nfs_path.append(None)
-            
-            return data, nfs_path
-            
-        self.samples, sample_fpaths = helper(self.sample_chunks, self.sample_reader)
-        target_fpaths = []
+            return data
+        
+        '''self.samples and self.targets are dictionaries with format {'cloud_key': 'nfs_path'}
+        '''
+        self.samples = helper(self.sample_chunks, self.sample_reader)
         if self.target_chunks:
-            self.targets, target_fpaths = helper(self.target_chunks, self.target_reader)
+            self.targets = helper(self.target_chunks, self.target_reader)
         
         # build mappings between samples and targets if the dataset is file-based
         # and the manifest is specified
-        if self.lazy and len(self.targets)>0 and self.manifest is not None:
-            samples_ = {}
-            targets_ = {}
-            for _, row in self.manifest.iterrows():
-                samples_[row['sample']] = self.samples[row['sample']]
-                targets_[row['target']] = self.targets[row['target']]
-            self.samples = samples_
-            self.targets = targets_
-            sample_fpaths = list(self.samples.values())
-            target_fpaths = list(self.targets.values())
+        # if self.lazy and len(self.targets)>0 and self.manifest is not None:
+        #     samples_ = {}
+        #     targets_ = {}
+        #     sample_fpaths, target_fpaths = [], []
+        #     for _, row in self.manifest.iterrows():
+        #         samples_[row['sample']] = self.samples[row['sample']]
+        #         sample_fpaths.append(self.samples[row["sample"]])
+        #         targets_[row['target']] = self.targets[row['target']]
+        #         target_fpaths.append(self.targets[row["target"]])
+        #     self.samples = samples_
+        #     self.targets = targets_
+        # if not target_fpaths:
+        #     target_fpaths = [None] * len(sample_fpaths)
+        # self.nfs_file_paths = list(zip(sample_fpaths, target_fpaths))
         
-        if not target_fpaths:
-            target_fpaths = [None] * len(sample_fpaths)
-
-        assert len(sample_fpaths) == len(target_fpaths)
-        self.nfsFilePaths = list(zip(sample_fpaths, target_fpaths))
         self.samples, self.targets = self.process()
-        if self.targets is not None:
-            assert len(self.samples) == len(self.targets)
+
+        if self.usecache and self.lazy:
+            target_fpaths = []
+            for target in self.targets:
+                if os.path.exists(str(target)):
+                    target_fpaths.append(target)
+                else:
+                    target_fpaths.append(None)
+            self.nfs_file_paths = list(zip(self.samples, target_fpaths))
 
     def sample_reader(self, path: str = None, raw_bytes: bytes = None):
         """this function defines the logic of reading sample data (X) from a file
@@ -464,14 +465,16 @@ class DLCJobDataLoader(object):
         self.socket_pub.connect(ipc_channel)
         
         self.torch_loader = None
-        self.curr_batch = -1
+        self._rcvd_idx = -1
+        self._init_loader(first_epoch=True)
         Process(target=self.handle_miss, daemon=True).start()
     
-    def _init_loader(self, first_iter=False): 
-        if first_iter or self.shuffle:
+    def _init_loader(self, first_epoch=True): 
+        if first_epoch or self.shuffle:
+            # set the num_workers=0 to use the main process to load data
             self.torch_loader = DataLoader(self.dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
-                                  self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
-                                  prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
+                                           self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
+                                           prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
 
             # update chunk status to ACTIVE
             etags = []
@@ -491,14 +494,14 @@ class DLCJobDataLoader(object):
             )
             
             if self.lazy:
-                file_paths = np.array(self.dataset.nfsFilePaths)
-                self.batchedNfsPaths = [file_paths[idx].tolist() for idx in self.torch_loader._index_sampler]
+                file_paths = np.array(self.dataset.nfs_file_paths)
+                self.batched_nfs_paths = [file_paths[idx].tolist() for idx in iter(self.torch_loader._index_sampler)]
             else:
-                self.batchedNfsPaths = [[item] for item in self.dataset.nfsFilePaths]
-                
+                self.batched_nfs_paths = [[item] for item in self.dataset.nfs_file_paths]
+            
             # client will copy the first batch when receive init msg
             self.socket_req.send_multipart([b'init', json.dumps({
-                "paths": self.batchedNfsPaths,
+                "paths": self.batched_nfs_paths,
                 "batch_size": self.batch_size,
                 "num_workers": self.num_workers,
                 "prefetch_factor": self.prefetch_factor}).encode('utf-8')])
@@ -533,30 +536,36 @@ class DLCJobDataLoader(object):
     
     def __next__(self):
         try:
-            if self.curr_batch == -1:
-                self._init_loader(first_iter=True)
-            elif self.curr_batch == 0:
-                self._init_loader(first_iter=False)
-            elif self.curr_batch == self.num_batches:
+            if self._rcvd_idx == -1:
+                self._rcvd_idx = 0
+            elif self._rcvd_idx == 0:
+                self._init_loader(first_epoch=False)
+            elif self._rcvd_idx == self.num_batches:
                 raise StopIteration
             
             if self.lazy:
-                # prefetch the next batch
-                pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), 
-                                    min(self.loader._send_idx+self.prefetch_factor, len(self.batchedNfsPaths))))
-                pre_idx = [str(idx) for idx in pre_idx]
-                if len(pre_idx) > 0:
-                    self.socket_pub.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])
+                # # prefetch the next batch
+                # pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), 
+                #                     min(self.loader._send_idx+self.prefetch_factor, len(self.batched_nfs_paths))))
+                # pre_idx = [str(idx) for idx in pre_idx]
+                # rel_idx = self.loader._rcvd_idx-1
+                # if len(pre_idx) > 0:
+                #     self.socket_pub.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])
                 
-                # release the last batch
-                if self.loader._rcvd_idx > 0:
-                    self.socket_pub.send_multipart([b'releaseCache', str(self.loader._rcvd_idx-1).encode('utf-8')])
+                # torch DataLoader uses the main process to load data
+                # let the client decide how many batches needs to be preloaded and the num of workers
+                self.socket_pub.send_multipart([b'prefetch', str(time.time()).encode('utf-8')])
+                
+                # release the previous batch
+                _rel_idx = self._rcvd_idx-1 if self._rcvd_idx > 0 else -1
+                if _rel_idx > 0:
+                    self.socket_pub.send_multipart([b'releaseCache', str(_rel_idx).encode('utf-8')])
 
             data = next(self.loader)
-            self.curr_batch += 1
+            self._rcvd_idx += 1
         except StopIteration:
             print('raise StopIteration Exception....')
-            self.curr_batch = 0
+            self._rcvd_idx = 0
             
             # epoch is down
             if self.partition_index == len(self.dataset.sample_chunks)-1:
@@ -601,7 +610,7 @@ class DLCJobDataLoader(object):
                 self.partition_index += 1
                 self.clear()
                 self.dataset.load_data(self.partition_index)
-                self._init_loader(first_iter=True)
+                self._init_loader()
                 data = next(self.loader)
                 
         return data

@@ -22,4 +22,4 @@ spec:
     - name: aws-secret
       secret:
         secretName: dlcpod-client-credentials
-  nodeName: isislab28
+  nodeName: isislab30

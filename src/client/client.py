@@ -88,7 +88,12 @@ class Client(object):
         self.req_time = []
         self.load_time = []
         
-        self.prefetch_idx = 0
+        """
+        _rcvd_idx: the batch index will complete computation (not used)
+        _send_idx: the batch index will be sent to cache
+        """
+        self._rcvd_idx = -1
+        self._send_idx = 0
         self.nfs_paths = None
             
     def registerJob(self, stub):
@@ -140,42 +145,38 @@ class Client(object):
             logger.info('registered job {}, assigned jobId is {}'.format(job['name'], resp.jobId))
         return resp.mongoUri
 
-    def prefetch(self, idx):
+    def prefetch(self, idx=None):
         def docopy(nfs_path):
             if os.path.exists(nfs_path):
                 tmpfs_path = '/runtime{}'.format(nfs_path)
-                t = time.time()
-                shutil.copyfile(nfs_path, tmpfs_path, follow_symlinks=True)  # NFS --> tmpfs
-                if os.stat(nfs_path).st_size == os.stat(tmpfs_path).st_size:
-                    self.load_time.append(time.time()-t)
-                    # print('copy file {}'.format(nfs_path))
-                    assert os.path.exists(tmpfs_path)
-                    while os.stat(nfs_path).st_size != os.stat(tmpfs_path).st_size: pass
-                    return True, nfs_path
-            # print('failed to copy {}'.format(nfs_path))
+                root_folder = '/'.join(tmpfs_path.split('/')[:-1])
+                if not os.path.exists(root_folder):
+                    os.makedirs(root_folder)
+                shutil.copyfile(nfs_path, tmpfs_path)  # NFS --> tmpfs
+                assert os.stat(nfs_path).st_size == os.stat(tmpfs_path).st_size
+                return True, nfs_path
+            print('failed to copy {}'.format(nfs_path))
             return False, nfs_path
+        
+        if idx is None:
+            idx = self._send_idx
 
-        def create_path(nfs_path):
-            tmpfs_path = '/runtime{}'.format(nfs_path)
-            root_folder = '/'.join(tmpfs_path.split('/')[:-1])
-            if not os.path.exists(root_folder):
-                os.makedirs(root_folder)
-                        
         if idx < len(self.nfs_paths):
+            t = time.time()
             with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 futures = []
                 for sample_path, target_path in self.nfs_paths[idx]:
-                    create_path(sample_path)
                     futures.append(executor.submit(docopy, sample_path))
-                    if target_path:
-                        create_path(target_path)
+                    if target_path is not None:
                         futures.append(executor.submit(docopy, target_path))
 
-            for task in futures:
-                rc, miss_file = task.result()
+            for future in concurrent.futures.as_completed(futures):
+                rc, miss_file = future.result()
                 etag = miss_file.split('/')[-1]
                 if not rc:
                     self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
+            self._send_idx += 1
+            self.load_time.append(time.time()-t)
 
     def expireChunks(self):
         time.sleep(COOL_DOWN_SEC)
@@ -197,6 +198,18 @@ class Client(object):
             }
         )
     
+    def set_cache_size(self):
+        """
+        req: interval of two consecutive batch requests
+        load: time of loading one batch data
+        left_batch: # of unused batches
+        """
+        if len(self.req_time) > 2:
+            req = np.mean(np.diff(self.req_time)[1:])
+            load = np.mean(self.load_time)
+            left_batch = len(self.nfs_paths) - len(self.req_time)
+            self.cache_size = self.cache_size + max(0, math.ceil((load/req-1) * left_batch))
+    
     def processEvents(self):
         batch_size = None
         while True:
@@ -209,9 +222,10 @@ class Client(object):
                     data = json.loads(data)                
                     batch_size = data["batch_size"]
                     self.nfs_paths = data['paths']
-                    self.cache_size = data["num_workers"] * data["prefetch_factor"]                
-                    for i in range(self.cache_size):
-                        self.prefetch(i)
+                    # the minimum cache size
+                    self.cache_size = data["num_workers"] * data["prefetch_factor"]
+                    for _ in range(self.cache_size):
+                        self.prefetch()
                     self.socket_rep.send(b'')
 
             if self.socket_sub in socks and socks[self.socket_sub] == zmq.POLLIN:
@@ -219,32 +233,44 @@ class Client(object):
                 topic, data = topic.decode("utf-8"), data.decode("utf-8")
                 logger.info('recv msg: {} {}'.format(topic, data))
                 if topic == "prefetch":
-                    batch_idx = [int(idx) for idx in data.split(',') if len(idx) > 0]
-                    for idx in batch_idx:
-                        if idx >= self.prefetch_idx:
-                            self.prefetch(idx)
-                            self.prefetch_idx += 1
-                            self.req_time.append(time.time())
-                        else:
-                            break
+                    # batch_idx = [int(idx) for idx in data.split(',') if len(idx) > 0]
+                    # for idx in batch_idx:
+                    #     if idx >= self._send_idx:
+                    #         self.prefetch(idx)
+                    #         self._send_idx += 1
+                    #         self.req_time.append(time.time())
+                    #     else:
+                    #         break
                     
-                    # tune cache capacity
-                    if len(self.req_time) > 3:
-                        """
-                        To ensure the data is always available for DataLoader, the length of buffer should be:
-                        s >= 2*B, if alpha >= beta; otherwise,
-                        s >= (N-k)*(1-alpha/beta)
-                        """
-                        reqIntervals = np.mean(np.diff(self.req_time)[1:])  # data consumption intervals
-                        loadIntervals = np.mean(np.array(self.load_time))  # data loading intervals
-                        remainingBatches = len(self.nfs_paths) - len(self.req_time)  # remaining batches
-                        capacity = max(self.cache_size, math.ceil((1-reqIntervals/loadIntervals) * remainingBatches))
+                    # # tune cache capacity
+                    # if len(self.req_time) > 3:
+                    #     """
+                    #     To ensure the data is always available for DataLoader, the length of buffer should be:
+                    #     s >= 2*B, if alpha >= beta; otherwise,
+                    #     s >= (N-k)*(1-alpha/beta)
+                    #     """
+                    #     reqIntervals = np.mean(np.diff(self.req_time)[1:])  # data consumption intervals
+                    #     loadIntervals = np.mean(np.array(self.load_time))  # data loading intervals
+                    #     remainingBatches = len(self.nfs_paths) - len(self.req_time)  # remaining batches
+                    #     capacity = max(self.cache_size, math.ceil((1-reqIntervals/loadIntervals) * remainingBatches))
                         
-                        # expand the cache capacity
-                        for _ in range(self.cache_size, capacity+1):
-                            self.prefetch(self.prefetch_idx)
-                            self.prefetch_idx += 1
-                        self.cache_size = capacity
+                    #     # expand the cache capacity
+                    #     for _ in range(self.cache_size, capacity+1):
+                    #         self.prefetch(self._send_idx)
+                    #         self._send_idx += 1
+                    #     self.cache_size = capacity
+                    
+                    # prefetch the next batch
+                    self.req_time.append(float(data))
+                    self.prefetch()
+                    
+                    # expand cache size
+                    curr_size = self.cache_size
+                    self.set_cache_size()
+                    if self.cache_size > curr_size:
+                        logger.info("scaling cache size from {} to {}...".format(curr_size, self.cache_size))
+                    for _ in range(curr_size, self.cache_size):
+                        self.prefetch()
                 elif topic == "dataMiss":
                     miss_info, sub_idx = data.split(' ')
                     miss_idx, miss_etag = miss_info.split(":")
@@ -252,14 +278,14 @@ class Client(object):
                     self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size], self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size] = self.nfs_paths[sub_idx//batch_size][sub_idx%batch_size], self.nfs_paths[miss_idx//batch_size][miss_idx%batch_size]
                     self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
                 elif topic == "releaseCache":
-                    batch_idx = int(data)
-                    if batch_idx < len(self.nfs_paths):
+                    _rel_idx = int(data)
+                    if _rel_idx < len(self.nfs_paths):
                         def release(path):
                             if path:
                                 tmpfspath = '/runtime' + path
                                 if os.path.exists(tmpfspath):
                                     os.remove(tmpfspath)
-                        for sample_path, target_path in self.nfs_paths[batch_idx]:            
+                        for sample_path, target_path in self.nfs_paths[_rel_idx]:            
                             release(sample_path)
                             release(target_path)
                 elif topic == "expireCache":
