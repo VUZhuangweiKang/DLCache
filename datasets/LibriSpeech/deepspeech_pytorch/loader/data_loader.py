@@ -162,10 +162,10 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
         spect, transcript = self.try_get_item(index)
         return spect, transcript
     
-    def __sample_reader__(self, path: str = None, raw_bytes: bytes = None):
+    def sample_reader(self, path: str = None, raw_bytes: bytes = None):
         return self.parse_audio(path)
     
-    def __target_reader__(self, path: str = None, raw_bytes: bytes = None):
+    def target_reader(self, path: str = None, raw_bytes: bytes = None):
         return self.parse_transcript(path)
     
     def process(self):

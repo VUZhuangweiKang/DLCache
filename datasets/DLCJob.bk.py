@@ -1,23 +1,21 @@
 import os
 import json
-import bson
 import math
 import random
 import time
 import numpy as np
 from datetime import datetime
-import grpc
-import grpctool.dbus_pb2 as pb
-import grpctool.dbus_pb2_grpc as pb_grpc
-import concurrent
-import multiprocessing
+import bson
+import zmq
+from multiprocessing import Process, Queue
 from typing import Optional, Union, Sequence, Iterable, List, Tuple
-import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 
+jobinfo = "/share/{}.json".format(os.environ.get('JOBNAME'))
+init_channel = 'ipc:///share/init.ipc'
+ipc_channel = 'ipc:///share/runtime.ipc'
 
-COOL_DOWN_SEC = 600
 class CHUNK_STATUS:
     PREPARE = 0
     ACTIVE = 1
@@ -25,45 +23,32 @@ class CHUNK_STATUS:
     COOL_DOWN = 3
     INACTIVE = 4
 
-def read_secret(arg):
-    path = '/secret/{}'.format(arg)
-    assert os.path.exists(path)
-    with open(path, 'r') as f:
-        data = f.read().strip()
-    return data
-
-def clear():
-    for svr in os.listdir('/runtime/'):
-        p = '/runtime/{}'.format(svr)
-        if os.path.exists(p) and len(os.listdir(p)) > 0:
-            os.system('rm -r {}/*'.format(p))
-
 
 class DLCJobDataset(Dataset):
     def __init__(self, dtype='train'):
         """An abstract class subclassing the torch.utils.data.Dataset class
-
+        
         All datasets that represent a map from keys to data samples should subclass
-        it. All subclasses should overwrite :meth:`process`, supporting pre-processing loaded data.
+        it. All subclasses should overwrite :meth:`process`, supporting pre-processing loaded data. 
         Subclasses should also overwrite meth:`__getitem__`, supporting fetching a
         data sample for a given key. Subclasses could also optionally overwrite
         :meth:`__len__`, which is expected to return the size of the dataset by many
         :class:`~torch.utils.data.Sampler` implementations and the default options
         of :class:`~DLCJobDataLoader`.
-
+        
         .. note::
         Subclassing ~DLCJobDataset will load data under provided keys from DLCache to var:`self.samples` as Map<Key, Value>.
         Overwriting meth:`process` allows you to replace var:`self.samples` and var:`self.targets` with
         iteratable variables that can be iterated in meth:`__get_item__`.
-
+        
         Args:
             dtype: dataset type, train/validation/test for supervised and unsupervised training/testing
         """
         if dtype not in ["train", "validation", "test"]:
             raise ValueError("invalid dataset type".format(dtype))
-
+        
         self.dtype = dtype
-        jobinfo = "/share/{}.json".format(os.environ.get('JOBNAME'))
+        
         while not os.path.exists(jobinfo): pass
         with open(jobinfo, 'rb') as f:
             job_meta = json.load(f)
@@ -75,17 +60,17 @@ class DLCJobDataset(Dataset):
 
         self.sample_chunks = []
         self.target_chunks = []
-
+        
         self.samples = {}
         self.targets = {}
-
+        
         if self.usecache:
             from pymongo.mongo_client import MongoClient
             import pandas as pd
             mongo_client = MongoClient(job_meta['mongoUri'])
             self.job_info = mongo_client.Cacher.Job.find_one({"Meta.JobId": job_meta['jobId']})
             self.dataset_col = mongo_client.Cacher.Datasets
-
+            
             # update chunk status
             self.dataset_col.update_many(
                 {
@@ -96,7 +81,7 @@ class DLCJobDataset(Dataset):
                     "$inc": {"Status.active_count": 1}
                 }
             )
-
+            
             mfst_etags = self.job_info["ChunkETags"][self.dtype]["manifests"]
             self.manifest = None
             for mfst_etag in mfst_etags:
@@ -108,39 +93,41 @@ class DLCJobDataset(Dataset):
                     self.manifest = pd.concat([self.manifest, pd.read_csv(mfst_fpath)])
             self.loadChunksFromDLCache()
         else:
-            import boto3
-            cloudSecret = {
-                "aws_access_key_id": read_secret('aws_access_key_id'),
-                "aws_secret_access_key": read_secret('aws_secret_access_key'),
-                "region_name": read_secret('region_name')
-            }
-            s3_session = boto3.Session(**cloudSecret)
+            import configparser, boto3
+            parser = configparser.ConfigParser()
+            parser.read('/secret/client.conf')
+            s3auth = parser['AWS']
+            s3_session = boto3.Session(
+                aws_access_key_id=s3auth['aws_access_key_id'],
+                aws_secret_access_key=s3auth['aws_secret_access_key'],
+                region_name=s3auth['region_name']
+            )
             self.client = s3_session.client('s3')
             self.loadChunksFromCloud()
-
+        
         self.nfs_file_paths = []
         self.load_data(partition_index=0)
-
-        self.miss_queue = multiprocessing.Queue()
+        
+        self.miss_queue = Queue()
         if self.lazy:
             self.unused_idx = set(list(range(self.__len__())))
 
     def try_get_item(self, idx):
         if self.lazy:
             if len(self.unused_idx) == 0:
-                self.unused_idx = set(list(range(self.__len__())))
+                self.unused_idx = set(list(range(self.__len__())))            
             if self.usecache:
                 def helper(path, reader):
                     if path is None:
                         return None
                     tmpfs_path = '/runtime{}'.format(path)
-
+                    
                     read_idx = idx
                     read_val = None
-
+                    
                     # 3-level data hit
                     if os.path.exists(tmpfs_path):
-                        read_val = torch.load(tmpfs_path)
+                        read_val = reader(tmpfs_path)
                         # print("read tmpfs file {}".format(tmpfs_path))
                     elif os.path.exists(path):
                         read_val = reader(path)
@@ -168,15 +155,15 @@ class DLCJobDataset(Dataset):
                             else:
                                 sub_etag = sub_path.split("/")[1]
                                 self.miss_queue.put([[sub_idx, sub_etag], sub_idx])
-
+                        
                         read_val = self.try_get_item(sub_idx)
-
+                    
                     if read_idx is not None and read_idx in self.unused_idx:
                         self.unused_idx.remove(read_idx)
                     return read_val
-
+                
                 sample = helper(self.samples[idx], self.sample_reader)
-
+                
                 """ for supervised learning, there might be two cases:
                 1. targets are derived while parsing samples
                 2. targets are saved as individual samples
@@ -192,14 +179,14 @@ class DLCJobDataset(Dataset):
                 if len(self.targets) > 0:
                     target = self.targets[idx]
                     if os.path.exists(str(target)):
-                        target = self.client.get_object(Bucket=self.bucket, Key=self.targets[idx])['Body'].read()
+                        target = self.client.get_object(Bucket=self.bucket, Key=self.targets[idx])['Body'].read()            
             return (sample, target) if target is not None else sample
         else:
             return (self.samples[idx], self.targets[idx]) if self.targets else self.samples[idx]
 
     def loadChunksFromDLCache(self):
-        """Load all chunks (MongoDB query result) of the given dataset.
-
+        """Load all chunks (MongoDB query result) of the given dataset. 
+        
         In the LazyLoading mode, there is only 1 group because no memory pressure.
         Otherwise, we group chunks to make them fit the MaxPartMill constraint.
 
@@ -207,22 +194,22 @@ class DLCJobDataset(Dataset):
             None: initialize the self.sample_chunks and self.target_chunks
         """
         chunk_etags = self.job_info['ChunkETags'][self.dtype]
-
+        
         def helper(etags):
             chunks = []
             if etags:
                 chunks_iter = self.dataset_col.find({"ETag": {"$in": etags}})
                 chunks = [chunk for chunk in chunks_iter]
             return chunks
-
+    
         self.sample_chunks = helper(chunk_etags['samples'])
         if self.job_info['QoS']['LazyLoading']:
             self.sample_chunks = [self.sample_chunks]
         self.target_chunks = helper(chunk_etags['targets'])
-
+        
     # dataset shouldn't be compressed when using this function
     def loadChunksFromCloud(self):
-        paginator = self.client.get_paginator('list_objects_v2')
+        paginator = self.client.get_paginator('list_objects_v2')       
         def load_pages(keys):
             if keys:
                 pages = []
@@ -232,7 +219,7 @@ class DLCJobDataset(Dataset):
             return None
 
         keys = self.job_info['Datasource']['keys'][self.dtype]
-
+        
         def helper(keys):
             chunks = []
             if keys:
@@ -244,34 +231,34 @@ class DLCJobDataset(Dataset):
                         tmp.append(dataobj)
                     chunks.append(tmp)
             return chunks
-
+        
         self.sample_chunks = helper(keys['samples'])
-        self.target_chunks = helper(keys['targets'])
+        self.target_chunks = helper(keys['targets'])  
 
     def load_data(self, partition_index):
         """Load file paths or actual data in the given partition
-
+        
         Initialize the self.samples and self.targets, where self.samples is a dict with format {key: file_path/data}
         user performs data (X and y) processing in the process function, that convert self.samples ans self.targets
         from dict to iteratable X, y
-
+        
         If a chunk is a compressed, we generate a dummy key for individual files.
         We start operating on individual data items from this function. Before this, all operations are on chunks.
-
-        Samples are matched with corresponding targets based on the manifest file provided by user, which specifies the
+        
+        Samples are matched with corresponding targets based on the manifest file provided by user, which specifies the 
         mappings between X and y.
-
+        
         Only file-based datasets might have the manifest file.
-
+        
         Args:
             partition_index (int): file-based (LazyLoading) dataset only has one partition, so the partition_index = 0
                              tabular dataset might split file to multiple partitions
         """
-
+        
         def helper(chunks, reader):
             data = {}
             for chunk in chunks[partition_index]:
-                if not chunk:
+                if not chunk: 
                     continue
                 key, loc = chunk['Key'], chunk['Location']
                 if self.usecache:
@@ -289,13 +276,30 @@ class DLCJobDataset(Dataset):
                 else:
                     data[key] = key
             return data
-
+        
         '''self.samples and self.targets are dictionaries with format {'cloud_key': 'nfs_path'}
         '''
         self.samples = helper(self.sample_chunks, self.sample_reader)
         if self.target_chunks:
             self.targets = helper(self.target_chunks, self.target_reader)
-
+        
+        # build mappings between samples and targets if the dataset is file-based
+        # and the manifest is specified
+        # if self.lazy and len(self.targets)>0 and self.manifest is not None:
+        #     samples_ = {}
+        #     targets_ = {}
+        #     sample_fpaths, target_fpaths = [], []
+        #     for _, row in self.manifest.iterrows():
+        #         samples_[row['sample']] = self.samples[row['sample']]
+        #         sample_fpaths.append(self.samples[row["sample"]])
+        #         targets_[row['target']] = self.targets[row['target']]
+        #         target_fpaths.append(self.targets[row["target"]])
+        #     self.samples = samples_
+        #     self.targets = targets_
+        # if not target_fpaths:
+        #     target_fpaths = [None] * len(sample_fpaths)
+        # self.nfs_file_paths = list(zip(sample_fpaths, target_fpaths))
+        
         self.samples, self.targets = self.process()
 
         if self.usecache and self.lazy:
@@ -313,12 +317,12 @@ class DLCJobDataset(Dataset):
         Args:
             path (string): read from a file
             raw_bytes (bytes): read from raw bytes
-
+            
         Raises:
             NotImplementedError: _description_
         """
         raise NotImplementedError
-
+    
     def target_reader(self, path: str = None, raw_bytes: bytes = None):
         """this function defines the logic of reading target data (Y) from a file
 
@@ -327,17 +331,17 @@ class DLCJobDataset(Dataset):
             raw_bytes (bytes): read from raw bytes
         """
         return
-
+    
     def process(self) -> Tuple[List, List]:
         """process self.samples ans self.target
 
         Return iteratable X, y that can be indexed by __get_item__
-
+        
         Raises:
             NotImplementedError: _description_
         """
         raise NotImplementedError
-
+    
     def __getitem__(self, index: int):
         """get the sample and target at the given index
         Args:
@@ -350,10 +354,10 @@ class DLCJobDataset(Dataset):
 
     def __len__(self) -> int:
         raise NotImplementedError
-
-
+    
+    
 class DLCJobDataLoader(object):
-    def __init__(self, dataset: DLCJobDataset,
+    def __init__(self, dataset: DLCJobDataset, 
                  batch_size: Optional[int] = 1, shuffle: bool = False, sampler: Union[Sampler, Iterable, None] = None,
                  batch_sampler: Union[Sampler[Sequence], Iterable[Sequence], None] = None,
                  num_workers: int = 0, collate_fn: Optional[_collate_fn_t] = None,
@@ -432,7 +436,7 @@ class DLCJobDataLoader(object):
         .. warning:: See :ref:`reproducibility`, and :ref:`dataloader-workers-random-seed`, and
                     :ref:`data-loading-randomness` notes for random seed related questions.
         """
-
+        
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -449,33 +453,27 @@ class DLCJobDataLoader(object):
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
         self.num_batches = math.ceil(len(self.dataset.samples)/batch_size)
-
+        
         self.lazy = self.dataset.qos['LazyLoading']
         self.partition_index = 0
-        clear()
-
+        self.clear()
+        
+        context = zmq.Context()
+        self.socket_req = context.socket(zmq.REQ)
+        self.socket_req.connect(init_channel)
+        self.socket_pub = context.socket(zmq.PUB)
+        self.socket_pub.connect(ipc_channel)
+        
         self.torch_loader = None
-        self._send_idx = 0
         self._rcvd_idx = -1
-        self.req_time = []
-        self.load_time = []
-        self._prefetch_queue = multiprocessing.Queue()
-        self._release_queue = multiprocessing.Queue()
-
-        # the minimum cache size
-        self.cache_size = self.num_workers * self.prefetch_factor
         self._init_loader(first_epoch=True)
-
-        multiprocessing.Process(target=self.prefetch, daemon=True).start()
-        multiprocessing.Process(target=self.handle_miss, daemon=True).start()
-        multiprocessing.Process(target=self.release_cache, daemon=True).start()
-        self.cool_down_proc = None
-
-    def _init_loader(self, first_epoch=True):
+        Process(target=self.handle_miss, daemon=True).start()
+    
+    def _init_loader(self, first_epoch=True): 
         if first_epoch or self.shuffle:
             # set the num_workers=0 to use the main process to load data
-            self.torch_loader = DataLoader(self.dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn,
-                                           self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator,
+            self.torch_loader = DataLoader(self.dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, self.num_workers, self.collate_fn, 
+                                           self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
                                            prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
 
             # update chunk status to ACTIVE
@@ -487,128 +485,55 @@ class DLCJobDataLoader(object):
                     etags.append(chunk['ChunkETag'])
             now = datetime.utcnow().timestamp()
             self.dataset.dataset_col.update_many(
-                {"ChunkETag": {"$in": etags}},
+                {"ChunkETag": {"$in": etags}}, 
                 {
                     "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
                     "$inc": {"Status.active_count": 1},
                     "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
                 }
             )
-
+            
             if self.lazy:
                 file_paths = np.array(self.dataset.nfs_file_paths)
                 self.batched_nfs_paths = [file_paths[idx].tolist() for idx in iter(self.torch_loader._index_sampler)]
             else:
                 self.batched_nfs_paths = [[item] for item in self.dataset.nfs_file_paths]
-
-            # load the initial batches into cache
-            with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-                futures = []
-                for _ in range(self.cache_size):
-                    futures.append(executor.submit(self.load_cache, self.batched_nfs_paths[self._send_idx]))
-                    self._send_idx += 1
-                concurrent.futures.wait(futures)
-
+            
+            # client will copy the first batch when receive init msg
+            self.socket_req.send_multipart([b'init', json.dumps({
+                "paths": self.batched_nfs_paths,
+                "batch_size": self.batch_size,
+                "num_workers": self.num_workers,
+                "prefetch_factor": self.prefetch_factor}).encode('utf-8')])
+            self.socket_req.recv()
         self.loader = iter(self.torch_loader)
-
+    
+    @staticmethod
+    def clear():
+        for svr in os.listdir('/runtime/'):
+            p = '/runtime/{}'.format(svr)
+            if os.path.exists(p) and len(os.listdir(p)) > 0:
+                os.system('rm -r {}/*'.format(p))
+    
     def handle_miss(self):
-        manager_uri = "dlcpod-manager:50051"
-        self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
-        channel = grpc.insecure_channel(manager_uri)
-        stub = pb_grpc.DataMissStub(channel)
+        context = zmq.Context()
+        socket = context.socket(zmq.PUB)
+        socket.connect(ipc_channel)
         while True:
-            info = self.dataset.miss_queue.get(block=True)
-            miss_idx, miss_etag = info[0]
-            miss_idx_batch, miss_idx = miss_idx//self.batch_size, miss_idx%self.batch_size
-            sub_idx = info[1]
-            sub_idx_batch, sub_idx = sub_idx//self.batch_size, sub_idx%self.batch_size
-            self.batched_nfs_paths[miss_idx_batch][miss_idx], self.batched_nfs_paths[sub_idx_batch][sub_idx] = self.batched_nfs_paths[sub_idx_batch][sub_idx], self.batched_nfs_paths[miss_idx_batch][miss_idx]
-            stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
-
-    def load_cache(self, batch):
-        def move(nfs_path, reader):
-            tmpfs_path = '/runtime{}'.format(nfs_path)
-            root_folder = '/'.join(tmpfs_path.split('/')[:-1])
-            if not os.path.exists(root_folder):
-                os.makedirs(root_folder)
-            data = reader(nfs_path)
-            torch.save(data, tmpfs_path) # NFS --> tmpfs
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-            futures = []
-            for sample_path, target_path in batch:
-                futures.append(executor.submit(move, sample_path, self.dataset.sample_reader))
-                if target_path is not None:
-                    futures.append(executor.submit(move, target_path, self.dataset.target_reader))
-            concurrent.futures.wait(futures)
-
-    def prefetch(self):
-        def set_cache_size():
-            """
-            req: interval of two consecutive batch requests
-            load: time of loading one batch data
-            left_batch: # of unused batches
-            """
-            if len(self.req_time) > 2:
-                req = np.mean(np.diff(self.req_time)[1:])
-                load = np.mean(self.load_time)
-                left_batch = len(self.nfs_paths) - len(self.req_time)
-                self.cache_size = self.cache_size + max(0, math.ceil((load/req-1) * left_batch))
-
-        while True:
-            idx = self._prefetch_queue.get(block=True)
-            if idx < len(self.batched_nfs_paths):
-                t = time.time()
-                self.load_cache(self.batched_nfs_paths[idx])
-                self.load_time.append(time.time()-t)
-
-            # expand cache size
-            curr_size = self.cache_size
-            set_cache_size()
-            if self.cache_size > curr_size:
-                print('expanding cache from {} to {}'.format(curr_size, self.cache_size))
-            for _ in range(curr_size, self.cache_size):
-                self._prefetch_queue.put(self._send_idx)
-                self._send_idx += 1
-
-    def release_cache(self):
-        def worker(path):
-            if path:
-                tmpfspath = '/runtime' + path
-                if os.path.exists(tmpfspath):
-                    os.remove(tmpfspath)
-        while True:
-            idx = self._release_queue.get(block=True)
-            for sample_path, target_path in self.batched_nfs_paths[idx]:
-                worker(sample_path)
-                worker(target_path)
-
-    def expire_cache(self):
-        time.sleep(COOL_DOWN_SEC)
-        etags = []
-        for sample_path, target_path in self.dataset.nfs_file_paths:
-            etags.append(sample_path.split('/')[-1])
-            if target_path:
-                etags.append(target_path.split("/")[-1])
-        self.dataset.dataset_col.update_many(
-            {
-                "ChunkETag": {"$in": etags},
-                "Status.code": CHUNK_STATUS.COOL_DOWN
-            },
-            {
-                "$set":{
-                    "Status.code": CHUNK_STATUS.INACTIVE,
-                    "Status.active_count": 0
-                }
-            }
-        )
-
+            if self.torch_loader is None: continue
+            info = self.torch_loader.dataset.miss_queue.get()
+            if info is not None:
+                miss_idx, miss_etag = info[0]
+                sub_idx = info[1]
+                msg = "{}:{} {}".format(miss_idx, miss_etag, sub_idx)
+                socket.send_multipart([b'dataMiss', msg.encode('utf-8')])
+    
     def __iter__(self):
         return self
-
+    
     def __len__(self):
         return self.loader.__len__()
-
+    
     def __next__(self):
         try:
             if self._rcvd_idx == -1:
@@ -617,25 +542,35 @@ class DLCJobDataLoader(object):
                 self._init_loader(first_epoch=False)
             elif self._rcvd_idx == self.num_batches:
                 raise StopIteration
-
+            
             if self.lazy:
-                if self._send_idx < self.num_batches:
-                    self._prefetch_queue.put(self._send_idx)
-                    self._send_idx += 1
-                if self._rcvd_idx > 0:
-                    self._release_queue.put(self._rcvd_idx-1)
+                # # prefetch the next batch
+                # pre_idx = list(range(self.loader._send_idx+(self.loader._rcvd_idx != 0), 
+                #                     min(self.loader._send_idx+self.prefetch_factor, len(self.batched_nfs_paths))))
+                # pre_idx = [str(idx) for idx in pre_idx]
+                # rel_idx = self.loader._rcvd_idx-1
+                # if len(pre_idx) > 0:
+                #     self.socket_pub.send_multipart([b'prefetch', ','.join(pre_idx).encode('utf-8')])
+                
+                # torch DataLoader uses the main process to load data
+                # let the client decide how many batches needs to be preloaded and the num of workers
+                self.socket_pub.send_multipart([b'prefetch', str(time.time()).encode('utf-8')])
+                
+                # release the previous batch
+                _rel_idx = self._rcvd_idx-1 if self._rcvd_idx > 0 else -1
+                if _rel_idx > 0:
+                    self.socket_pub.send_multipart([b'releaseCache', str(_rel_idx).encode('utf-8')])
 
-            self.req_time.append(time.time())
             data = next(self.loader)
             self._rcvd_idx += 1
         except StopIteration:
             print('raise StopIteration Exception....')
             self._rcvd_idx = 0
-
+            
             # epoch is down
             if self.partition_index == len(self.dataset.sample_chunks)-1:
                 self.partition_index = 0
-
+                
                 # update chunk status to COOL_DOWN
                 etags = []
                 all_chunks = self.dataset.sample_chunks.copy()
@@ -643,7 +578,6 @@ class DLCJobDataLoader(object):
                 for part in all_chunks:
                     for chunk in part:
                         etags.append(chunk['ChunkETag'])
-
                 now = datetime.utcnow().timestamp()
                 self.dataset.dataset_col.update_many(
                     {
@@ -669,18 +603,14 @@ class DLCJobDataLoader(object):
                         }
                     }
                 )
-
-                if self.cool_down_proc is not None and self.cool_down_proc.is_alive():
-                    self.cool_down_proc.terminate()
-                self.cool_down_proc = multiprocessing.Process(target=self.expire_cache, daemon=True)
-                self.cool_down_proc.start()
+                self.socket_pub.send_multipart([b'expireCache', b''])
                 raise StopIteration
-            else:
-                # data in the current part have been consumed
+            else:                    
+                # data in the current part have been consumed    
                 self.partition_index += 1
                 self.clear()
                 self.dataset.load_data(self.partition_index)
                 self._init_loader()
                 data = next(self.loader)
-
+                
         return data

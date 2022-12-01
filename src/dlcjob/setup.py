@@ -15,6 +15,8 @@ setup(
     keywords='DLCache',
     install_requires=[
           'torch',
-          'pickle-mixin'
+          'pickle-mixin',
+          'grpcio',
+          'protobuf'
       ],
 )
