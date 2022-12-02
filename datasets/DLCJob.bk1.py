@@ -9,9 +9,9 @@ from datetime import datetime
 import grpc
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
-import concurrent
-from collections import OrderedDict, defaultdict
-import multiprocessing
+from collections import defaultdict
+from multiprocessing import Process, Queue, Lock
+import threading
 from typing import Optional, Union, Sequence, Iterable, List, Tuple
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
@@ -120,26 +120,75 @@ class DLCJobDataset(Dataset):
             self.loadChunksFromCloud()
 
         self.load_data(partition_index=0)
-        self.item_to_worker = defaultdict(int)
-        self.cache = OrderedDict(List)
+        
+        if self.lazy:
+            self.unused_idx = set(list(range(self.__len__())))
+            self._miss_queue = Queue()
+        Process(target=self.handle_miss, daemon=True).start()
 
     def try_get_item(self, idx):
-        if self.lazy:
-            if len(self.unused_idx) == 0:
-                self.unused_idx = set(list(range(self.__len__())))            
+        if self.lazy:         
             if self.usecache:
-                X, Y = self.cache[self.item_to_worker[idx]].get()
+                sample = self.samples[idx]
+                try:
+                    X = self.sample_reader(sample)
+                    Y = None
+                    if len(self.targets) > 0:
+                        Y = self.targets[idx]
+                        if os.path.exists(str(Y)):
+                            Y = self.target_reader(Y)
+                except FileNotFoundError:
+                    print('miss nfs file {}'.format(sample))
+                    while True:
+                        if len(self.unused_idx) == 0:
+                            sub_idx = random.randint(0, self.__len__() - 1)
+                        else:
+                            sub_idx = random.choice(list(self.unused_idx))
+
+                        sub_sample, sub_target = self.samples[sub_idx], self.targets[sub_idx]
+                        if os.path.exists(sub_sample):
+                            etag = sample.split('/')[-1]
+                            self._miss_queue.put([[idx, etag], sub_idx])
+                            break
+                        else:
+                            sub_etag = sub_sample.split("/")[-1]
+                            self._miss_queue.put([[sub_idx, sub_etag], sub_idx])
+                    read_idx = sub_idx
+                    X, Y = self.try_get_item(sub_idx)
+                
+                self.unused_idx.remove(read_idx)
             else:
                 X = self.client.get_object(Bucket=self.bucket, Key=self.samples[idx])['Body'].read()
-                target = None
+                Y = None
                 if len(self.targets) > 0:
                     Y = self.targets[idx]
-                    if os.path.exists(str(target)):
-                        target = self.client.get_object(Bucket=self.bucket, Key=self.targets[idx])['Body'].read()            
+                    if 'Contents' in self.client.list_objects(Bucket=self.bucket, Prefix=str(Y)):
+                        Y = self.client.get_object(Bucket=self.bucket, Key=Y)['Body'].read()            
             return (X, Y) if Y is not None else X
         else:
             return (self.samples[idx], self.targets[idx]) if self.targets else self.samples[idx]
 
+    def handle_miss(self):
+        manager_uri = "dlcpod-manager:50051"
+        self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
+        channel = grpc.insecure_channel(manager_uri)
+        stub = pb_grpc.DataMissStub(channel)
+        def swap(x, y):
+            x, y = y, x
+            
+        try:
+            while True:
+                info = self._miss_queue.get(block=True)
+                miss_idx, miss_etag = info[0]
+                sub_idx = info[1]
+                swap(self.samples[miss_idx], self.samples[sub_idx])
+                swap(self.targets[miss_idx], self.targets[sub_idx])
+                stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
+        except KeyboardInterrupt:
+            self._miss_queue.cancel_join_thread()
+            self._miss_queue.close()
+            channel.close()
+            
     def loadChunksFromDLCache(self):
         """Load all chunks (MongoDB query result) of the given dataset. 
         
@@ -393,44 +442,46 @@ class DLCJobDataLoader(object):
         self._rcvd_idx = -1
         self.req_time = []
         self.load_time = []
-        self._idx_queues = []
-        self._miss_queue = multiprocessing.Queue()
-        self.lock = multiprocessing.Lock()
+        self._idx_queues = defaultdict(Queue)
+        self.lock = Lock()
+        
         self._active_workers = 0
-        if self.lazy:
-            self.unused_idx = set(list(range(len(self.dataset.samples))))
-            self.batched_idx = [idx for idx in iter(self.torch_loader._index_sampler)]
-
         self._init_loader(first_epoch=True)
-        
-        self._prefetch_workers = []
-        for _ in range(self.num_batches):
-            self._add_worker()
-        
-        multiprocessing.Process(target=self.cache_controller, daemon=True).start()
-        multiprocessing.Process(target=self.handle_miss, daemon=True).start()
+
+        self.batch_to_worker = defaultdict(int)
+        self._data_queue = defaultdict(Queue)
+        self.cache_controller_proc = Process(target=self.cache_controller, daemon=True, name="cache controller")
         self.cool_down_proc = None
-        
+
     def _add_worker(self):
-        proc = multiprocessing.Process(target=self.worker, daemon=True)
-        idx_queue = multiprocessing.Queue()
-        self._prefetch_workers.append(proc)
-        self._idx_queues.append(idx_queue)
-        proc.start()
         with self.lock:
+            self._idx_queues[self._active_workers] = Queue()
+            threading.Thread(target=self._worker_loop, args=(self._active_workers,), daemon=True).start()
+            print('add worker: {}'.format(self._active_workers))
             self._active_workers += 1
     
     def _rm_worker(self):
         with self.lock:
+            print('remove worker {}'.format(self._active_workers))
             self._active_workers -= 1
 
+    def _purge_worker(self, worker_id):
+        self._idx_queues[worker_id].cancel_join_thread()
+        self._data_queue[worker_id].cancel_join_thread()
+        self._idx_queues[worker_id].close()
+        self._data_queue[worker_id].close()
+        del self._data_queue[worker_id]
+        del self._idx_queues[worker_id]
+        
     def _init_loader(self, first_epoch=True): 
         if first_epoch or self.shuffle:
             # set the num_workers=0 to use the main process to load data
             self.torch_loader = DataLoader(self.dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, 0, self.collate_fn, 
                                            self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
                                            prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
-
+            self._index_sampler = [idx for idx in iter(self.torch_loader._index_sampler)]
+            self._idx_iter = iter(list(range(self.num_batches)))
+            
             # update chunk status to ACTIVE
             etags = []
             tmp = self.dataset.sample_chunks.copy()
@@ -447,107 +498,66 @@ class DLCJobDataLoader(object):
                     "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
                 }
             )
-            
-            count = 0
-            while count < self.num_workers:
-                for worker in self.dataset.cache:
-                    if self.dataset.cache[worker].qsize() >= self.batch_size:
-                        count += 1
-                            
-        self.loader = iter(self.torch_loader)
     
-    def handle_miss(self):
-        manager_uri = "dlcpod-manager:50051"
-        self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
-        channel = grpc.insecure_channel(manager_uri)
-        stub = pb_grpc.DataMissStub(channel)
-        def swap(x, y):
-            x, y = y, x
-            
+    def _get_data(self, batch_idx):
+        data = []
+        for item_idx in self._index_sampler[batch_idx]:
+            data.append(self.torch_loader.dataset.try_get_item(item_idx))
+        return torch.tensor(data)
+    
+    def _worker_loop(self, worker_id):
+        if worker_id not in self._data_queue:
+            self._data_queue[worker_id] = Queue(maxsize=self.num_batches)
         while True:
-            info = self._miss_queue.get(block=True)
-            miss_idx, miss_etag = info[0]
-            sub_idx = info[1]
-            swap(self.dataset.samples[miss_idx], self.dataset.samples[sub_idx])
-            swap(self.dataset.targets[miss_idx], self.dataset.targets[sub_idx])
-            
-            miss_idx_batch, miss_idx = miss_idx//self.batch_size, miss_idx%self.batch_size
-            sub_idx_batch, sub_idx = sub_idx//self.batch_size, sub_idx%self.batch_size
-            swap(self.batched_idx[miss_idx_batch][miss_idx], self.batched_idx[sub_idx_batch][sub_idx])
-            stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
- 
-    def worker(self, worker_id):
-        def load(idx, reader):
-            sample, target = self.dataset.samples[idx], self.dataset.targets[idx]
+            batch_idx = self._idx_queues[worker_id].get(block=True)
+            print('worker {} get batch {}'.format(worker_id, batch_idx))
             try:
-                read_idx = idx
-                X = self.dataset.sample_reader(sample)
-                if target is not None:
-                    Y = self.dataset.target_reader(target)
-            except FileNotFoundError:
-                print('miss nfs file {}, {}'.format(sample, target))
-                while True:
-                    if len(self.unused_idx) == 0:
-                        sub_idx = random.randint(0, len(self.dataset.samples) - 1)
-                    else:
-                        sub_idx = random.choice(list(self.unused_idx))
-
-                    sub_sample, sub_target = self.dataset.samples[sub_idx], self.dataset.targets[sub_idx]
-                    if os.path.exists(sub_sample):
-                        etag = sample.split('/')[-1]
-                        self._miss_queue.put([[idx, etag], sub_idx])
-                        break
-                    else:
-                        sub_etag = sub_sample.split("/")[-1]
-                        self._miss_queue.put([[sub_idx, sub_etag], sub_idx])
-                read_idx = sub_idx
-                X, Y = load(sub_idx, reader)
+                t = time.time()
+                data = self._get_data(batch_idx)
+                self._data_queue[worker_id].put(data, block=True)
+                self.batch_to_worker[batch_idx] = worker_id
+                self.load_time.append(time.time()-t)
+            except StopIteration:
+                break
             
-            self.unused_idx.remove(read_idx)
-            return X, Y
+            if worker_id >= self._active_workers:
+                print('terminating worker {}...'.format(worker_id))
+                break
 
-        while True:
-            t = time.time()
-            with self.lock:
-                if worker_id <= self._active_workers:
-                    break
-            idx = self._idx_queues[worker_id].get(block=True)
-            if worker_id not in self.dataset.cache:
-                self.dataset.cache[worker_id] = multiprocessing.Queue()
-            if idx < self.batch_size:
-                for i in self.batched_idx[idx]:
-                    X, Y = load(i)
-                    self.dataset.item_to_worker[i] = worker_id
-                    self.dataset.cache[worker_id].put((X, Y))
-            self.load_time.append(time.time()-t)
-        
-        while not self.dataset.cache[worker_id].empty():
+        while not self._data_queue[worker_id].empty():
             pass
-        del self.dataset.cache[worker_id]
+        self._purge_worker(worker_id)
         
     def cache_controller(self):
-        while True:
-            # delete dead workers
-            while len(self._prefetch_workers) > self._active_workers:
-                if not self._prefetch_workers[-1].is_alive:
-                    self._prefetch_workers.pop(-1)
+        opt_workers = self.num_workers
+        try:
+            while True:
+                if self._send_idx >= self.num_batches:
+                    continue
+
+                # tune num_workers
+                if len(self.req_time) > 2:
+                    req = np.mean(np.diff(self.req_time)[1:])
+                    load = np.mean(self.load_time)
+                    opt_workers = math.ceil(load/req)
+                if self._active_workers < opt_workers:
+                    self._add_worker()
+                elif self._active_workers > opt_workers:
+                    self._rm_worker()
+
+                # fill empty worker queues
+                for worker in list(self.torch_loader.dataset.cache.keys()):
+                    if self.torch_loader.dataset.cache[worker].empty():
+                        try:
+                            self._idx_queues[worker].put_nowait(self._send_idx)
+                            print('assign batch {} to worker {}'.format(self._send_idx, worker))
+                            self._send_idx += 1
+                        except:
+                            pass
+        except KeyboardInterrupt:
+            for i in self._active_workers:
+                self._purge_worker(i)
             
-            # fill empty worker queues
-            for worker in self.dataset.cache:
-                if self.dataset.cache[worker].qsize() == 0:
-                    self._idx_queues[worker].put(self._send_idx)
-                    self._send_idx += 1
-        
-            # tune cache capacity
-            if len(self.req_time) > 2:
-                req = np.mean(np.diff(self.req_time)[1:])
-                load = np.mean(self.load_time)
-                opt_workers = math.ceil(load/req)
-            if self._active_workers < opt_workers:
-                self._add_worker()
-            elif self._active_workers > opt_workers:
-                self._rm_worker()
-        
     def expire_cache(self):
         time.sleep(COOL_DOWN_SEC)
         etags = []
@@ -573,20 +583,33 @@ class DLCJobDataLoader(object):
         return self
     
     def __len__(self):
-        return self.loader.__len__()
+        return self.num_batches
+    
+    def _load_data_from_cache(self):
+        batch_idx = next(self._idx_iter)
+        while True:
+            if batch_idx not in self.batch_to_worker:
+                continue
+            worker = self.batch_to_worker[batch_idx]
+            if worker not in self._data_queue:
+                continue
+            data = self._data_queue[worker]
+            break
+        self._rcvd_idx += 1
+        return data
     
     def __next__(self):
         try:
             if self._rcvd_idx == -1:
                 self._rcvd_idx = 0
+                self.cache_controller_proc.start()
             elif self._rcvd_idx == 0:
                 self._init_loader(first_epoch=False)
             elif self._rcvd_idx == self.num_batches:
                 raise StopIteration
 
             self.req_time.append(time.time())
-            data = next(self.loader)
-            self._rcvd_idx += 1
+            data = self._load_data_from_cache()
         except StopIteration:
             print('raise StopIteration Exception....')
             self._rcvd_idx = 0
@@ -594,6 +617,7 @@ class DLCJobDataLoader(object):
             # epoch is down
             if self.partition_index == len(self.dataset.sample_chunks)-1:
                 self.partition_index = 0
+                self._send_idx = 0
                 
                 # update chunk status to COOL_DOWN
                 etags = []
@@ -631,7 +655,7 @@ class DLCJobDataLoader(object):
                 
                 if self.cool_down_proc is not None and self.cool_down_proc.is_alive():
                     self.cool_down_proc.terminate()
-                self.cool_down_proc = multiprocessing.Process(target=self.expire_cache, daemon=True)
+                self.cool_down_proc = Process(target=self.expire_cache, daemon=True)
                 self.cool_down_proc.start()
                 raise StopIteration
             else:                    
@@ -640,6 +664,6 @@ class DLCJobDataLoader(object):
                 self.clear()
                 self.dataset.load_data(self.partition_index)
                 self._init_loader()
-                data = next(self.loader)
+                data = self._load_data_from_cache()
                 
         return data

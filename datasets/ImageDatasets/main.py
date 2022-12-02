@@ -231,7 +231,6 @@ def main_worker(gpu, ngpus_per_node, args):
     
     t = time.time()
     val_dataset = DatasetCls(dtype='validation', transform=transform)
-    print('dataset init time: ', time.time()-t)
     
     if args.distributed:
         val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False, drop_last=True)
@@ -241,7 +240,6 @@ def main_worker(gpu, ngpus_per_node, args):
     t = time.time()
     val_loader = DLCJobDataLoader(
         val_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
-    print('dataloader init time: ', time.time()-t)
     
     if args.evaluate:
         validate(val_loader, model, criterion, args)
