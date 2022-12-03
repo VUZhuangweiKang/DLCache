@@ -10,7 +10,7 @@ import grpc
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from collections import defaultdict
-from multiprocessing import Process, Queue, Lock
+from multiprocessing import Process, Queue, Lock, Manager
 import threading
 from typing import Optional, Union, Sequence, Iterable, List, Tuple
 import torch
@@ -137,6 +137,7 @@ class DLCJobDataset(Dataset):
                         Y = self.targets[idx]
                         if os.path.exists(str(Y)):
                             Y = self.target_reader(Y)
+                    read_idx = idx
                 except FileNotFoundError:
                     print('miss nfs file {}'.format(sample))
                     while True:
@@ -448,16 +449,17 @@ class DLCJobDataLoader(object):
         self._active_workers = 0
         self._init_loader(first_epoch=True)
 
-        self.batch_to_worker = defaultdict(int)
-        self._data_queue = defaultdict(Queue)
-        self.cache_controller_proc = Process(target=self.cache_controller, daemon=True, name="cache controller")
+        self.batch_to_worker = Manager().dict()
+        self._data_queue = Manager().dict()
+        self.cache_controller_proc = Process(target=self.cache_controller, daemon=True)
         self.cool_down_proc = None
 
     def _add_worker(self):
         with self.lock:
-            self._idx_queues[self._active_workers] = Queue()
-            threading.Thread(target=self._worker_loop, args=(self._active_workers,), daemon=True).start()
-            print('add worker: {}'.format(self._active_workers))
+            self._idx_queues[self._active_workers] = Queue(maxsize=1)
+            worker_id = 'w_{}'.format(self._active_workers)
+            threading.Thread(target=self._worker_loop, args=(worker_id, self.batch_to_worker, self._data_queue), daemon=True).start()
+            print('add worker: {}'.format(worker_id))
             self._active_workers += 1
     
     def _rm_worker(self):
@@ -498,33 +500,29 @@ class DLCJobDataLoader(object):
                     "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
                 }
             )
+            
     
-    def _get_data(self, batch_idx):
+    def _iter_batch(self, batch_idx):
         data = []
         for item_idx in self._index_sampler[batch_idx]:
-            data.append(self.torch_loader.dataset.try_get_item(item_idx))
-        return torch.tensor(data)
+            data.append(self.dataset.try_get_item(item_idx))
+        return data
     
-    def _worker_loop(self, worker_id):
-        if worker_id not in self._data_queue:
-            self._data_queue[worker_id] = Queue(maxsize=self.num_batches)
-        while True:
+    def _worker_loop(self, worker_id, batch_to_worker, _data_queue):
+        worker_idx = int(worker_id.split('_')[1])
+        while worker_idx < self._active_workers:
             batch_idx = self._idx_queues[worker_id].get(block=True)
-            print('worker {} get batch {}'.format(worker_id, batch_idx))
+            # print('worker {} get batch {}'.format(worker_id, batch_idx))
             try:
                 t = time.time()
-                data = self._get_data(batch_idx)
-                self._data_queue[worker_id].put(data, block=True)
-                self.batch_to_worker[batch_idx] = worker_id
+                _data_queue[worker_id] = self._iter_batch(batch_idx)
+                # print('put batch {} into worker {} queue'.format(batch_idx, worker_id))
+                batch_to_worker[batch_idx] = worker_id
                 self.load_time.append(time.time()-t)
             except StopIteration:
                 break
-            
-            if worker_id >= self._active_workers:
-                print('terminating worker {}...'.format(worker_id))
-                break
-
-        while not self._data_queue[worker_id].empty():
+        print('terminating worker {}...'.format(worker_id))
+        while len(_data_queue[worker_id]) > 0:
             pass
         self._purge_worker(worker_id)
         
@@ -532,9 +530,6 @@ class DLCJobDataLoader(object):
         opt_workers = self.num_workers
         try:
             while True:
-                if self._send_idx >= self.num_batches:
-                    continue
-
                 # tune num_workers
                 if len(self.req_time) > 2:
                     req = np.mean(np.diff(self.req_time)[1:])
@@ -544,18 +539,15 @@ class DLCJobDataLoader(object):
                     self._add_worker()
                 elif self._active_workers > opt_workers:
                     self._rm_worker()
-
+                
                 # fill empty worker queues
-                for worker in list(self.torch_loader.dataset.cache.keys()):
-                    if self.torch_loader.dataset.cache[worker].empty():
-                        try:
-                            self._idx_queues[worker].put_nowait(self._send_idx)
-                            print('assign batch {} to worker {}'.format(self._send_idx, worker))
-                            self._send_idx += 1
-                        except:
-                            pass
+                for worker in list(self._idx_queues.keys()):
+                    if worker in self._data_queue and self._send_idx < self.num_batches:
+                        self._idx_queues[worker].put(self._send_idx)
+                        # print('assign batch {} to worker {}'.format(self._send_idx, worker))
+                        self._send_idx += 1
         except KeyboardInterrupt:
-            for i in self._active_workers:
+            for i in range(self._active_workers):
                 self._purge_worker(i)
             
     def expire_cache(self):
@@ -588,17 +580,20 @@ class DLCJobDataLoader(object):
     def _load_data_from_cache(self):
         batch_idx = next(self._idx_iter)
         while True:
-            if batch_idx not in self.batch_to_worker:
+            if (batch_idx not in self.batch_to_worker):
                 continue
             worker = self.batch_to_worker[batch_idx]
             if worker not in self._data_queue:
                 continue
             data = self._data_queue[worker]
+            self._data_queue[worker] = []
+            print(data)
             break
         self._rcvd_idx += 1
         return data
     
     def __next__(self):
+        print('get into iterator...')
         try:
             if self._rcvd_idx == -1:
                 self._rcvd_idx = 0
@@ -661,7 +656,7 @@ class DLCJobDataLoader(object):
             else:                    
                 # data in the current part have been consumed    
                 self.partition_index += 1
-                self.clear()
+                clear()
                 self.dataset.load_data(self.partition_index)
                 self._init_loader()
                 data = self._load_data_from_cache()
