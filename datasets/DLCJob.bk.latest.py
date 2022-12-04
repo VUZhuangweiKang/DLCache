@@ -131,9 +131,9 @@ class DLCJobDataset(Dataset):
             if self.usecache:
                 sample = self.samples[idx]
                 try:
-                    # t = time.time()
+                    t = time.time()
                     X = self.sample_reader(sample)
-                    # print('read x use: {}'.format(time.time()-t))
+                    print('read x use: {}'.format(time.time()-t))
                     Y = None
                     if len(self.targets) > 0:
                         Y = self.targets[idx]
@@ -455,7 +455,7 @@ class DLCJobDataLoader(object):
         self.send_idx_to_worker = manager.dict()
         self.data_queue = manager.dict()
         
-        self.cache_controller_proc = Process(target=self.cache_controller, args=(self.send_idx_to_worker, self.data_queue))
+        Process(target=self.cache_controller, args=(self.send_idx_to_worker, self.data_queue)).start()
         self.cool_down_proc = None
 
     def _purge_worker(self, worker_id):
@@ -491,6 +491,7 @@ class DLCJobDataLoader(object):
             
     def _worker_loop(self, worker_id, send_idx_to_worker, data_queue):
         worker_idx = int(worker_id.split('_')[1])
+        data_queue[worker_id] = []
         while True:
             batch_idx = self._idx_queues[worker_id].get(block=True)
             t = time.time()
@@ -500,19 +501,15 @@ class DLCJobDataLoader(object):
                 item = self.dataset.try_get_item(item_idx)
                 samples.append(item[0])
                 targets.append(item[1])
-            while worker_id in data_queue and data_queue[worker_id] is not None:
-                pass
             data_queue[worker_id] = (samples, targets)
             send_idx_to_worker[batch_idx] = worker_id
-            # print('worker {} load batch {}'.format(worker_id, batch_idx))
             self.load_time.append(time.time()-t)
 
             # this worker has been deleted
             if worker_idx >= self._active_workers:
                 break
-        
-        print('terminating worker {}'.format(worker_id))
-        while data_queue[worker_id] is not None:
+
+        while len(data_queue[worker_id]) > 0:
             pass
         self._purge_worker(worker_id)
         
@@ -521,7 +518,6 @@ class DLCJobDataLoader(object):
         opt_workers = self.num_workers
         worker_processes = []
         try:
-            worker = -1
             while True:
                 # tune num_workers
                 if len(self.req_time) > 1:
@@ -532,25 +528,19 @@ class DLCJobDataLoader(object):
                     with self.lock:
                         worker_id = 'w_{}'.format(self._active_workers)
                         self._idx_queues[worker_id] = Queue()
-                        self._active_workers += 1
                         proc = Process(target=self._worker_loop, args=(worker_id, send_idx_to_worker, data_queue))
                         worker_processes.append(proc)
                         proc.start()
-                        print('add worker')
+                        self._active_workers += 1
                 elif self._active_workers > opt_workers:
                     with self.lock:
                         self._active_workers -= 1
-                        print('delete worker')
-                
-                worker = (worker+1) % self._active_workers
                 
                 # fill empty worker queues
-                w = 'w_{}'.format(worker)
-                if send_idx < self.num_batches and self._idx_queues[w].qsize() == 0:
-                    self._idx_queues[w].put(send_idx)
-                    # print('assign batch {} to worker {}'.format(send_idx, w))
-                    send_idx += 1
-                
+                for worker in list(self._idx_queues.keys()):
+                    if send_idx < self.num_batches and self._idx_queues[worker].qsize() == 0:
+                        self._idx_queues[worker].put(send_idx)
+                        send_idx += 1
         except KeyboardInterrupt:
             for i in range(self._active_workers):
                 worker_id = 'w_{}'.format(i)
@@ -588,20 +578,19 @@ class DLCJobDataLoader(object):
     def _load_data_from_cache(self):
         batch_idx = next(self._idx_iter)
         while True:
-            try:
+            if batch_idx in self.send_idx_to_worker and self.send_idx_to_worker[batch_idx] in self.data_queue:
                 worker = self.send_idx_to_worker[batch_idx]
                 data = self.data_queue[worker]
+                if len(data) == 0:
+                    continue
                 break
-            except:
-                pass
-        self.data_queue[worker] = None
+        self.data_queue[worker] = []
         return data
     
     def __next__(self):
         try:
             if self._rcvd_idx == -1:
                 self._rcvd_idx = 0
-                self.cache_controller_proc.start()
             elif self._rcvd_idx == 0:
                 self._init_loader(first_epoch=False)
             elif self._rcvd_idx == self.num_batches:
