@@ -10,6 +10,8 @@ import grpc
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from collections import defaultdict
+import ray
+import psutil
 from multiprocessing import Process, Queue, Lock, Manager
 import threading
 from typing import Optional, Union, Sequence, Iterable, List, Tuple
@@ -337,7 +339,8 @@ class DLCJobDataset(Dataset):
     def __len__(self) -> int:
         raise NotImplementedError
     
-    
+
+@ray.remote
 class DLCJobDataLoader(object):
     def __init__(self, dataset: DLCJobDataset, 
                  batch_size: Optional[int] = 1, shuffle: bool = False, sampler: Union[Sampler, Iterable, None] = None,
@@ -450,18 +453,10 @@ class DLCJobDataLoader(object):
         self._init_loader(first_epoch=True)
         print('init loader time: {}'.format(time.time() - t))
         
-        self._idx_queues = defaultdict(Queue)
-        manager = Manager()
-        self.send_idx_to_worker = manager.dict()
-        self.data_queue = manager.dict()
-        
-        self.cache_controller_proc = Process(target=self.cache_controller, args=(self.send_idx_to_worker, self.data_queue))
-        self.cool_down_proc = None
+        self.data_queue = Queue()
 
-    def _purge_worker(self, worker_id):
-        self._idx_queues[worker_id].cancel_join_thread()
-        self._idx_queues[worker_id].close()
-        del self._idx_queues[worker_id]
+        self.cache_controller_proc = Process(target=self.cache_controller)
+        self.cool_down_proc = None
         
     def _init_loader(self, first_epoch=True):
         if first_epoch or self.shuffle:
@@ -488,76 +483,31 @@ class DLCJobDataLoader(object):
                     "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
                 }
             )
-            
-    def _worker_loop(self, worker_id, send_idx_to_worker, data_queue):
-        worker_idx = int(worker_id.split('_')[1])
-        while True:
-            batch_idx = self._idx_queues[worker_id].get(block=True)
-            t = time.time()
-            samples = []
-            targets = []
-            for item_idx in self._index_sampler[batch_idx]:
-                item = self.dataset.try_get_item(item_idx)
-                samples.append(item[0])
-                targets.append(item[1])
-            while worker_id in data_queue and data_queue[worker_id] is not None:
-                pass
-            data_queue[worker_id] = (samples, targets)
-            send_idx_to_worker[batch_idx] = worker_id
-            # print('worker {} load batch {}'.format(worker_id, batch_idx))
-            self.load_time.append(time.time()-t)
+    
+    def _worker_loop(self, batch_idx):
+        samples = []
+        targets = []
+        for item_idx in self._index_sampler[batch_idx]:
+            print(item_idx)
+            item = self.dataset.try_get_item(item_idx)
+            samples.append(item[0])
+            targets.append(item[1])
+        data = (samples, targets)
+        return data
 
-            # this worker has been deleted
-            if worker_idx >= self._active_workers:
-                break
-        
-        print('terminating worker {}'.format(worker_id))
-        while data_queue[worker_id] is not None:
-            pass
-        self._purge_worker(worker_id)
-        
-    def cache_controller(self, send_idx_to_worker, data_queue):
+    def cache_controller(self):
         send_idx = 0
-        opt_workers = self.num_workers
-        worker_processes = []
-        try:
-            worker = -1
-            while True:
-                # tune num_workers
-                if len(self.req_time) > 1:
-                    req = np.mean(self.req_time)
-                    load = np.mean(self.load_time)
-                    opt_workers = math.ceil(load/req)
-                if self._active_workers < opt_workers:
-                    with self.lock:
-                        worker_id = 'w_{}'.format(self._active_workers)
-                        self._idx_queues[worker_id] = Queue()
-                        self._active_workers += 1
-                        proc = Process(target=self._worker_loop, args=(worker_id, send_idx_to_worker, data_queue))
-                        worker_processes.append(proc)
-                        proc.start()
-                        print('add worker')
-                elif self._active_workers > opt_workers:
-                    with self.lock:
-                        self._active_workers -= 1
-                        print('delete worker')
-                
-                worker = (worker+1) % self._active_workers
-                
-                # fill empty worker queues
-                w = 'w_{}'.format(worker)
-                if send_idx < self.num_batches and self._idx_queues[w].qsize() == 0:
-                    self._idx_queues[w].put(send_idx)
-                    # print('assign batch {} to worker {}'.format(send_idx, w))
-                    send_idx += 1
-                
-        except KeyboardInterrupt:
-            for i in range(self._active_workers):
-                worker_id = 'w_{}'.format(i)
-                self._purge_worker(worker_id)
-            for proc in worker_processes:
-                proc.terminate()
-            
+        while send_idx < self.num_batches:
+            if send_idx - self._rcvd_idx >= self.num_workers:
+                continue
+            futures = []
+            for _ in range(self.num_workers):
+                futures.append(self._worker_loop.remote(send_idx))
+                send_idx += 1
+            print(futures)
+            for data in ray.get(futures):
+                self.data_queue.put(ray.put(data))
+
     def expire_cache(self):
         time.sleep(COOL_DOWN_SEC)
         etags = []
@@ -587,14 +537,8 @@ class DLCJobDataLoader(object):
     
     def _load_data_from_cache(self):
         batch_idx = next(self._idx_iter)
-        while True:
-            try:
-                worker = self.send_idx_to_worker[batch_idx]
-                data = self.data_queue[worker]
-                break
-            except:
-                pass
-        self.data_queue[worker] = None
+        obj_ref = self.data_queue.get()
+        data = ray.get(obj_ref)
         return data
     
     def __next__(self):

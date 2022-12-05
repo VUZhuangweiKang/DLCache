@@ -5,7 +5,8 @@ import shutil
 import time
 import warnings
 from enum import Enum
-
+import ray
+import psutil
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -126,6 +127,8 @@ def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
 
+    ray.init(num_cpus=psutil.cpu_count(logical=False), local_mode=True)
+    
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
