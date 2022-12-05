@@ -528,20 +528,21 @@ class DLCJobDataLoader(object):
         # the worker will be reset to available in the next epoch.
         self._workers_status = [True for i in range(self.num_workers)]
 
+        self._last_iter_time = None
+        
         # prime the prefetch loop
         for _ in range(self.prefetch_factor * self.num_workers):
             self._try_put_index()
     
     def _fetch_data(self, batch):
-        t = time.time()
-        samples = []
-        targets = []
+        # t = time.time()
+        data = []
         for item_idx in batch:
             item = self.dataset.try_get_item(item_idx)
-            samples.append(item[0])
-            targets.append(item[1])
+            data.append(item)
+        data = zip(*data)
         # print('worker load 1 batch data: {}'.format(time.time() - t))
-        return (samples, targets)
+        return data
 
     def worker_loop(self, worker_id, index_queue, idx_to_worker, data_queue, done_event):
         try:
@@ -554,9 +555,8 @@ class DLCJobDataLoader(object):
                 # print('worker {} get batch {} from queue'.format(worker_id, idx))
                 t = time.time()
                 data = self._fetch_data(batch)
-                data_queue.put((idx, data))
+                data_queue.put((idx, data, time.time()-t))
                 idx_to_worker[idx] = worker_id
-                self._load_time.append(time.time()-t)
                 del idx, batch, data  # save memory
         except KeyboardInterrupt:
             pass
@@ -566,23 +566,31 @@ class DLCJobDataLoader(object):
             data_queue.close()
 
     def _try_put_index(self):
-        assert self._tasks_outstanding < self.prefetch_factor * self.num_workers
+        # assert self._tasks_outstanding < self.prefetch_factor * self.num_workers
 
-        try:
-            batched_idxs = next(self._index_sampler)
-        except StopIteration:
-            return
+        # calculate the # of index should be put
+        n = 1
+        if len(self._req_time) > 0 and len(self._load_time) > 0:
+            mean_req_interval = np.mean(self._req_time)
+            mean_load_interval = np.mean(self._load_time)
+            n = math.ceil(mean_load_interval/mean_req_interval)
         
-        for _ in range(self.num_workers):
-            worker_queue_idx = next(self._worker_queue_idx_cycle)
-            if self._workers_status[worker_queue_idx]:
-                # print('batch {} to worker {}'.format(self._send_idx, worker_queue_idx))
-                break
+        for _ in range(n):
+            try:
+                batched_idxs = next(self._index_sampler)
+            except StopIteration:
+                return
+            
+            for _ in range(self.num_workers):
+                worker_queue_idx = next(self._worker_queue_idx_cycle)
+                if self._workers_status[worker_queue_idx]:
+                    # print('batch {} to worker {}'.format(self._send_idx, worker_queue_idx))
+                    break
 
-        self._index_queues[worker_queue_idx].put((self._send_idx, batched_idxs))
-        self._task_info[self._send_idx] = (worker_queue_idx,)
-        self._tasks_outstanding += 1
-        self._send_idx += 1
+            self._index_queues[worker_queue_idx].put((self._send_idx, batched_idxs))
+            self._task_info[self._send_idx] = (worker_queue_idx,)
+            self._tasks_outstanding += 1
+            self._send_idx += 1
 
     def expire_cache(self):
         time.sleep(COOL_DOWN_SEC)
@@ -617,33 +625,34 @@ class DLCJobDataLoader(object):
         return data
     
     def _next_data(self):
+        # If the worker responsible for `self._rcvd_idx` has already ended
+        # and was unable to fulfill this task (due to exhausting an `IterableDataset`),
+        # we try to advance `self._rcvd_idx` to find the next valid index.
+        #
+        # This part needs to run in the loop because both the `self._get_data()`
+        # call and `_IterableDatasetStopIteration` check below can mark
+        # extra worker(s) as dead.
+        while self._rcvd_idx < self._send_idx:
+            info = self._task_info[self._rcvd_idx]
+            worker_id = info[0]
+            if len(info) == 2 or self._workers_status[worker_id]:  # has data or is still active
+                break
+            del self._task_info[self._rcvd_idx]
+            self._rcvd_idx += 1
+        else:
+            raise StopIteration
+
+        # Now `self._rcvd_idx` is the batch index we want to fetch
+
         while True:
-            # If the worker responsible for `self._rcvd_idx` has already ended
-            # and was unable to fulfill this task (due to exhausting an `IterableDataset`),
-            # we try to advance `self._rcvd_idx` to find the next valid index.
-            #
-            # This part needs to run in the loop because both the `self._get_data()`
-            # call and `_IterableDatasetStopIteration` check below can mark
-            # extra worker(s) as dead.
-            while self._rcvd_idx < self._send_idx:
-                info = self._task_info[self._rcvd_idx]
-                worker_id = info[0]
-                if len(info) == 2 or self._workers_status[worker_id]:  # has data or is still active
-                    break
-                del self._task_info[self._rcvd_idx]
-                self._rcvd_idx += 1
-            else:
-                raise StopIteration
-
-            # Now `self._rcvd_idx` is the batch index we want to fetch
-
             # Check if the next sample has already been generated
             if len(self._task_info[self._rcvd_idx]) == 2:
                 data = self._task_info.pop(self._rcvd_idx)[1]
                 return self._process_data(data)
 
             assert self._tasks_outstanding > 0
-            idx, data = self.data_queue.get()
+            idx, data, dur = self.data_queue.get(block=True)
+            self._load_time.append(dur)
             self._tasks_outstanding -= 1
 
             if idx != self._rcvd_idx:
@@ -663,8 +672,11 @@ class DLCJobDataLoader(object):
                 raise StopIteration
             
             t = time.time()
+            if self._last_iter_time is not None:
+                self._req_time.append(t-self._last_iter_time)
+            self._last_iter_time = t
+            
             data = self._next_data()
-            self._req_time.append(time.time()-t)
         except StopIteration:
             print('raise StopIteration Exception....')
             self._rcvd_idx = 0
