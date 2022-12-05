@@ -5,8 +5,6 @@ import shutil
 import time
 import warnings
 from enum import Enum
-import ray
-import psutil
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -126,8 +124,6 @@ def main():
 def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
-
-    ray.init(num_cpus=psutil.cpu_count(logical=False), local_mode=True)
     
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
@@ -232,31 +228,40 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         DatasetCls = ImageDataset
     
-    t = time.time()
-    val_dataset = DatasetCls(dtype='validation', transform=transform)
+    # t = time.time()
+    # val_dataset = DatasetCls(dtype='validation', transform=transform)
     
+    # if args.distributed:
+    #     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False, drop_last=True)
+    # else:
+    #     val_sampler = None
+
+    # t = time.time()
+    # val_loader = DLCJobDataLoader(
+    #     val_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
+    
+    # if args.evaluate:
+    #     validate(val_loader, model, criterion, args)
+    #     return
+    # else:
+    #     train_dataset = DatasetCls(dtype='train', transform=transform)
+    #     if args.distributed:
+    #         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    #     else:
+    #         train_sampler = None
+    #     train_loader = DLCJobDataLoader(
+    #         train_dataset, batch_size=args.batch_size,
+    #         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+
+    train_dataset = DatasetCls(dtype='train', transform=transform)
     if args.distributed:
-        val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False, drop_last=True)
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
-        val_sampler = None
-
-    t = time.time()
-    val_loader = DLCJobDataLoader(
-        val_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
+        train_sampler = None
+    train_loader = DLCJobDataLoader(
+        train_dataset, batch_size=args.batch_size,
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
     
-    if args.evaluate:
-        validate(val_loader, model, criterion, args)
-        return
-    else:
-        train_dataset = DatasetCls(dtype='train', transform=transform)
-        if args.distributed:
-            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-        else:
-            train_sampler = None
-        train_loader = DLCJobDataLoader(
-            train_dataset, batch_size=args.batch_size,
-            num_workers=args.workers, pin_memory=True, sampler=train_sampler)
-
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
@@ -264,24 +269,24 @@ def main_worker(gpu, ngpus_per_node, args):
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, args)
 
-        # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        # # evaluate on validation set
+        # acc1 = validate(val_loader, model, criterion, args)
         
-        scheduler.step()
-        # remember best acc@1 and save checkpoint
-        is_best = acc1 > best_acc1
-        best_acc1 = max(acc1, best_acc1)
+        # scheduler.step()
+        # # remember best acc@1 and save checkpoint
+        # is_best = acc1 > best_acc1
+        # best_acc1 = max(acc1, best_acc1)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_acc1': best_acc1,
-                'optimizer' : optimizer.state_dict(),
-                'scheduler' : scheduler.state_dict()
-            }, is_best)
+        # if not args.multiprocessing_distributed or (args.multiprocessing_distributed
+        #         and args.rank % ngpus_per_node == 0):
+        #     save_checkpoint({
+        #         'epoch': epoch + 1,
+        #         'arch': args.arch,
+        #         'state_dict': model.state_dict(),
+        #         'best_acc1': best_acc1,
+        #         'optimizer' : optimizer.state_dict(),
+        #         'scheduler' : scheduler.state_dict()
+        #     }, is_best)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
