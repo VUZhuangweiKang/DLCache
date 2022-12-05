@@ -489,7 +489,6 @@ class DLCJobDataLoader(object):
             
     def _worker_loop(self, worker_id, send_idx_to_worker, data_queue):
         worker_idx = int(worker_id.split('_')[1])
-        data_queue[worker_id] = []
         while True:
             batch_idx = self.idx_queues[worker_id].get(block=True)
             t = time.time()
@@ -499,6 +498,10 @@ class DLCJobDataLoader(object):
                 item = self.dataset.try_get_item(item_idx)
                 samples.append(item[0])
                 targets.append(item[1])
+            
+            # wait for data loader to consume the data
+            while worker_id in data_queue and data_queue[worker_id] is not None:
+                pass
             data_queue[worker_id] = (samples, targets)
             send_idx_to_worker[batch_idx] = worker_id
             self.load_time.append(time.time()-t)
@@ -507,7 +510,7 @@ class DLCJobDataLoader(object):
             if worker_idx >= self._active_workers:
                 break
 
-        while len(data_queue[worker_id]) > 0:
+        while data_queue[worker_id] is not None:
             pass
         self._purge_worker(worker_id)
         
@@ -582,6 +585,7 @@ class DLCJobDataLoader(object):
             try:
                 worker = self.send_idx_to_worker[batch_idx]
                 data = self.data_queue[worker]
+                assert data is not None
                 break
             except:
                 pass
