@@ -10,13 +10,13 @@ import grpc
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from collections import defaultdict
-from multiprocessing import Process, Queue, Lock, Manager, Event
+from multiprocessing import Process, Queue, Lock, Manager, Event, Condition
 import threading
 import queue
 import itertools
 from typing import Optional, Union, Sequence, Iterable, List, Tuple
 import torch
-from torch.utils.data import Dataset, DataLoader, Sampler
+from torch.utils.data import Dataset, DataLoader, Sampler, BatchSampler, RandomSampler, SequentialSampler
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 
 
@@ -336,8 +336,8 @@ class DLCJobDataset(Dataset):
 
     def __len__(self) -> int:
         raise NotImplementedError
-    
-    
+
+
 class DLCJobDataLoader(object):
     def __init__(self, dataset: DLCJobDataset, 
                  batch_size: Optional[int] = 1, shuffle: bool = False, sampler: Union[Sampler, Iterable, None] = None,
@@ -443,35 +443,99 @@ class DLCJobDataLoader(object):
         self._req_time = []
         self._load_time = []
         self.lock = Lock()
-        
-        self._active_workers = 0
+
         manager = Manager()
         self.idx_to_worker = manager.dict()
         self._index_queues = []
-        self._worker_result_queue = Queue()
+        self.data_queue = Queue()
         self._workers = []
-        self._worker_queue_idx_cycle = itertools.cycle(range(self.num_workers))
-        self.done_event = Event()
+        self._workers_down_events = []
+        # self._worker_queue_idx_cycle = itertools.cycle(range(self.num_workers))
+        self._workers_status = []
+        self._workers_cond_vars = []
+        self._active_workers = 0
         
-        for i in range(self.num_workers):
-            idx_queue = Queue()
-            idx_queue.cancel_join_thread()
-            
-            w = Process(target=self.worker_loop, args=(i, idx_queue, self.idx_to_worker, self._worker_result_queue, self.done_event))
-            # w.daemon = True
-            w.start()
-            self._index_queues.append(idx_queue)
-            self._workers.append(w)
-            self._active_workers = self.num_workers
+        for _ in range(self.num_workers):
+            self._spawn_worker()
         
-        self.data_queue = self._worker_result_queue
         self._reset(first_epoch=True)
 
-    def _purge_worker(self, worker_id):
-        self._index_queues[worker_id].cancel_join_thread()
-        self._index_queues[worker_id].close()
-        self._index_queues.pop(worker_id)
+    def _spawn_worker(self):
+        for i in range(len(self._workers_status)):
+            if not self._workers_status[i]:
+                self._mark_worker_as_available(i)
+                return
+        
+        self._active_workers += 1
+        idx_queue = Queue()
+        idx_queue.cancel_join_thread()
+        done_event = Event()
+        worker_id = len(self._workers_status)
+        cond_var = Condition()
+        w = Process(target=self.worker_loop, args=(worker_id, idx_queue, self.idx_to_worker, self.data_queue, done_event, cond_var))
+        w.daemon = True
+        w.start()
+        self._index_queues.append(idx_queue)
+        self._workers.append(w)
+        self._workers_cond_vars.append(cond_var)
+        self._workers_status.append(True)
+        self._workers_down_events.append(done_event)
     
+    def _pause_worker(self):
+        for i in range(len(self._workers_status)):
+            if self._workers_status[i]:
+                self._index_queues[i].put(None)
+                self._workers_status[i] = False
+                self._active_workers -= 1
+                break
+
+    def _shut_down_worker(self, n = 1):
+        count = 0
+        for i in range(len(self._workers_status)):
+            if count == n:
+                break
+            if self._workers_status[i]:
+                self._workers_down_events[i].set()
+                self._mark_worker_as_unavailable(i, True)
+                count += 1
+    
+    def _mark_worker_as_available(self, worker_id):
+        assert not self._workers_status[worker_id]
+        # q = Queue()
+        # q.cancel_join_thread()
+        # self._index_queues[worker_id] = q
+        # self._workers[worker_id].start()
+        self._active_workers += 1
+        self._workers_status[worker_id] = True
+        with self._workers_cond_vars[worker_id]:
+            self._workers_cond_vars[worker_id].notify()
+        
+    def _mark_worker_as_unavailable(self, worker_id, shutdown=False):
+            # Mark a worker as having finished its work e.g., due to
+        # exhausting an `IterableDataset`. This should be used only when this
+        # `_MultiProcessingDataLoaderIter` is going to continue running.
+
+        assert self._workers_status[worker_id] or (self.persistent_workers and shutdown)
+
+        # Signal termination to that specific worker.
+        q = self._index_queues[worker_id]
+        # Indicate that no more data will be put on this queue by the current
+        # process.
+        q.put(None)
+
+        # Note that we don't actually join the worker here, nor do we remove the
+        # worker's pid from C side struct because (1) joining may be slow, and
+        # (2) since we don't join, the worker may still raise error, and we
+        # prefer capturing those, rather than ignoring them, even though they
+        # are raised after the worker has finished its job.
+        # Joinning is deferred to `_shutdown_workers`, which it is called when
+        # all workers finish their jobs (e.g., `IterableDataset` replicas) or
+        # when this iterator is garbage collected.
+
+        self._workers_status[worker_id] = False
+
+        assert self._workers_down_events[worker_id].is_set() == shutdown
+        
     class DummyDataset(torch.utils.data.Dataset):
         def __init__(self, dataset) -> None:
             super().__init__()
@@ -485,12 +549,16 @@ class DLCJobDataLoader(object):
             
     def _reset(self, first_epoch=True):
         if first_epoch or self.shuffle:
-            # set the num_workers=0 to use the main process to load data
-            dummy_dataset = self.DummyDataset(np.arange(len(self.dataset)))
-            dummy_loader = DataLoader(dummy_dataset, self.batch_size, self.shuffle, self.sampler, self.batch_sampler, 0, self.collate_fn, 
-                                      self.pin_memory, self.drop_last, self.timeout, self.worker_init_fn, self.multiprocessing_context, self.generator, 
-                                      prefetch_factor=self.prefetch_factor, persistent_workers=self.persistent_workers)
-            self._index_sampler = iter(dummy_loader._index_sampler)
+            if self.sampler is None:
+                if self.shuffle:
+                    self.sampler = RandomSampler(self.dataset)
+                else:
+                    self.sampler = SequentialSampler(self.dataset)
+            
+            if self.batch_size > 0 and self.batch_sampler is None:
+                self._index_sampler = BatchSampler(self.sampler, self.batch_size, self.drop_last)
+                
+            self._index_sampler = iter(self._index_sampler)
             
             # update chunk status to ACTIVE
             etags = []
@@ -528,6 +596,7 @@ class DLCJobDataLoader(object):
         # the worker will be reset to available in the next epoch.
         self._workers_status = [True for i in range(self.num_workers)]
 
+        self._rr_worker = 0
         self._last_iter_time = None
         
         # prime the prefetch loop
@@ -544,53 +613,88 @@ class DLCJobDataLoader(object):
         # print('worker load 1 batch data: {}'.format(time.time() - t))
         return data
 
-    def worker_loop(self, worker_id, index_queue, idx_to_worker, data_queue, done_event):
+    def worker_loop(self, worker_id, index_queue, idx_to_worker, data_queue, done_event, cond_var):
+        t = time.time()
+        def _put_data(idx, batch):
+            nonlocal t
+            # print('worker {} get batch {} from queue'.format(worker_id, idx))
+            data = self._fetch_data(batch)
+            now = time.time()
+            data_queue.put((idx, data, now-t))
+            # print('worker {} put batch {} into queue'.format(worker_id, idx))
+            idx_to_worker[idx] = worker_id
+            del idx, batch, data  # save memory
+            t = now
+        
+        pause = False
         try:
             while True:
-                try:
-                    idx, batch = index_queue.get()
-                except queue.Empty:
-                    continue
-                
-                # print('worker {} get batch {} from queue'.format(worker_id, idx))
-                t = time.time()
-                data = self._fetch_data(batch)
-                data_queue.put((idx, data, time.time()-t))
-                idx_to_worker[idx] = worker_id
-                del idx, batch, data  # save memory
+                if not pause:
+                    data = index_queue.get(block=True)
+                    if data is None:
+                        pause = True
+                    else:
+                        _put_data(*data)
+                        
+                if pause:
+                    while True:
+                        try:
+                            data = index_queue.get(block=False)
+                            _put_data(*data)
+                        except queue.Empty:
+                            print('worker {} start waiting....'.format(worker_id))
+                            with cond_var:
+                                cond_var.wait()
+                            pause = False
+                            print('worker {} is waked up'.format(worker_id))
+                            break                
         except KeyboardInterrupt:
             pass
-            
+
         if done_event.is_set():
             data_queue.cancel_join_thread()
             data_queue.close()
 
     def _try_put_index(self):
-        # assert self._tasks_outstanding < self.prefetch_factor * self.num_workers
+        # assert self._tasks_outstanding < self.prefetch_factor * self._active_workers
 
         # calculate the # of index should be put
-        n = 1
-        if len(self._req_time) > 0 and len(self._load_time) > 0:
-            mean_req_interval = np.mean(self._req_time)
-            mean_load_interval = np.mean(self._load_time)
-            n = math.ceil(mean_load_interval/mean_req_interval)
+        if len(self._req_time) > 0 and len(self._req_time) % 10 == 0:
+            req_interval = np.median(self._req_time[-10:])
+            load_interval = np.median(self._load_time[-10:])
+            # print('req: {}, load: {}'.format(req_interval, load_interval))
+            k = math.ceil(load_interval/req_interval) - self._active_workers
+            print('add {} workers'.format(k))
+            if k > 0:
+                for _ in range(k):
+                    self._spawn_worker()
+            elif k < 0:
+                for _ in range(-k):
+                    self._pause_worker()
         
-        for _ in range(n):
-            try:
-                batched_idxs = next(self._index_sampler)
-            except StopIteration:
-                return
+        try:
+            batched_idxs = next(self._index_sampler)
+        except StopIteration:
+            return
+        
+        assert self._active_workers > 0
+        
+        num_workers = len(self._workers_status)
+        for _ in range(num_workers):
+            if self._rr_worker + 1 >= num_workers:
+                self._rr_worker = 0
+            else:
+                self._rr_worker += 1
             
-            for _ in range(self.num_workers):
-                worker_queue_idx = next(self._worker_queue_idx_cycle)
-                if self._workers_status[worker_queue_idx]:
-                    # print('batch {} to worker {}'.format(self._send_idx, worker_queue_idx))
-                    break
+            worker_queue_idx = self._rr_worker
+            if self._workers_status[worker_queue_idx]:
+                # print('batch {} to worker {}'.format(self._send_idx, worker_queue_idx))
+                break
 
-            self._index_queues[worker_queue_idx].put((self._send_idx, batched_idxs))
-            self._task_info[self._send_idx] = (worker_queue_idx,)
-            self._tasks_outstanding += 1
-            self._send_idx += 1
+        self._index_queues[worker_queue_idx].put((self._send_idx, batched_idxs))
+        self._task_info[self._send_idx] = (worker_queue_idx,)
+        self._tasks_outstanding += 1
+        self._send_idx += 1
 
     def expire_cache(self):
         time.sleep(COOL_DOWN_SEC)
@@ -625,22 +729,17 @@ class DLCJobDataLoader(object):
         return data
     
     def _next_data(self):
-        # If the worker responsible for `self._rcvd_idx` has already ended
-        # and was unable to fulfill this task (due to exhausting an `IterableDataset`),
-        # we try to advance `self._rcvd_idx` to find the next valid index.
-        #
-        # This part needs to run in the loop because both the `self._get_data()`
-        # call and `_IterableDatasetStopIteration` check below can mark
-        # extra worker(s) as dead.
-        while self._rcvd_idx < self._send_idx:
-            info = self._task_info[self._rcvd_idx]
-            worker_id = info[0]
-            if len(info) == 2 or self._workers_status[worker_id]:  # has data or is still active
-                break
-            del self._task_info[self._rcvd_idx]
-            self._rcvd_idx += 1
-        else:
-            raise StopIteration
+        # while self._rcvd_idx < self._send_idx:
+        #     info = self._task_info[self._rcvd_idx]
+        #     worker_id = info[0]
+        #     if len(info) == 2 or self._workers_status[worker_id]:  # has data or is still active
+        #         break
+        #     del self._task_info[self._rcvd_idx]
+        #     print('del task info {}, len {}'.format(self._rcvd_idx, len(info)))
+        #     self._rcvd_idx += 1
+        # else:
+        #     print(self._rcvd_idx, self._send_idx)
+        #     raise StopIteration
 
         # Now `self._rcvd_idx` is the batch index we want to fetch
 
@@ -651,7 +750,10 @@ class DLCJobDataLoader(object):
                 return self._process_data(data)
 
             assert self._tasks_outstanding > 0
+            
+            # print('main proc waiting for batch {}'.format(self._rcvd_idx))
             idx, data, dur = self.data_queue.get(block=True)
+            
             self._load_time.append(dur)
             self._tasks_outstanding -= 1
 
@@ -733,3 +835,12 @@ class DLCJobDataLoader(object):
                 data = self._next_data()
                 
         return data
+    
+    # def _shutdown_workers(self):
+    #     if not self._shutdown:
+    #         self._shutdown = True
+    #         while len(self._workers) > 0:
+    #             self._shut_down_worker()
+
+    # def __del__(self):
+    #     self._shutdown_workers()
