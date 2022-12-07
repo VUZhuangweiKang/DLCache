@@ -78,6 +78,8 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--sim-compute-time', type=float, default=0.01,
+                    help='simulated computation time per batch in second')
 
 best_acc1 = 0
 
@@ -303,6 +305,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     # switch to train mode
     model.train()
 
+    t = time.time()
     end = time.time()
     for i, (images, target) in enumerate(train_loader):
         # measure data loading time
@@ -331,11 +334,12 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # measure elapsed time
         batch_time.update(time.time() - end)
         
-        time.sleep(3)
+        time.sleep(args.sim_compute_time)
         end = time.time()
 
         if i % args.print_freq == 0:
             progress.display(i + 1)
+    print('Total time: {}'.format(time.time()-t))
 
 
 def validate(val_loader, model, criterion, args):
