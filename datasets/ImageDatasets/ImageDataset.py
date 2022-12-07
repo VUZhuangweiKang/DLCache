@@ -17,19 +17,18 @@ class ImageDataset(DLCJobDataset):
         targets = []
 
         for _, row in self.manifest.iterrows():
-            if row['sample'] not in self.samples: continue
+            if row['sample'] not in self.samples or row['target'] not in cls_idx: 
+                continue
             samples.append(self.samples[row['sample']])
             targets.append(cls_idx[row["target"]])
         return samples, targets
-    
-    def __getitem__(self, index: int):
-        return self.try_get_item(index)
 
-    def sample_reader(self, path: str = None, raw_bytes: bytes = None):
-        img = Image.open(path)
+    def sample_reader(self, sample_item):
+        img_path = sample_item
+        img = Image.open(img_path)
         img = img.convert("RGB")
         img = self.transform(img)
         return img
     
-    def __len__(self) -> int:
-        return len(self.samples)
+    def target_reader(self, target_item):
+        return target_item

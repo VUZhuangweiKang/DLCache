@@ -10,14 +10,13 @@ import grpc
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
 from collections import defaultdict
-from multiprocessing import Process, Queue, Lock, Manager, Event, Condition
 import threading
 import queue
-import itertools
 from typing import Optional, Union, Sequence, Iterable, List, Tuple
 import torch
-from torch.utils.data import Dataset, DataLoader, Sampler, BatchSampler, RandomSampler, SequentialSampler
-from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
+from torch import multiprocessing as mp
+from torch.utils.data import Dataset, DataLoader, Sampler, BatchSampler, RandomSampler, SequentialSampler, IterableDataset
+from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t, default_collate
 
 
 COOL_DOWN_SEC = 600
@@ -89,6 +88,7 @@ class DLCJobDataset(Dataset):
             self.job_info = mongo_client.Cacher.Job.find_one({"Meta.JobId": job_meta['jobId']})
             self.dataset_col = mongo_client.Cacher.Datasets
             
+            t = time.time()
             # update chunk status
             self.dataset_col.update_many(
                 {
@@ -99,6 +99,7 @@ class DLCJobDataset(Dataset):
                     "$inc": {"Status.active_count": 1}
                 }
             )
+            print('Mongo Opt takes: {} s'.format(time.time() - t))
             
             mfst_etags = self.job_info["ChunkETags"][self.dtype]["manifests"]
             self.manifest = None
@@ -125,51 +126,48 @@ class DLCJobDataset(Dataset):
         
         if self.lazy:
             self.unused_idx = set(list(range(self.__len__())))
-            self._miss_queue = Queue()
-        Process(target=self.handle_miss, daemon=True).start()
+            self._miss_queue = mp.Queue()
+            mp.Process(target=self.handle_miss, daemon=True).start()
 
-    def try_get_item(self, idx):
+    def __default_get_item__(self, index):
         if self.lazy:         
             if self.usecache:
-                sample = self.samples[idx]
+                sample = self.samples[index]
+                target = self.targets[index]
                 try:
                     X = self.sample_reader(sample)
-                    Y = None
-                    if len(self.targets) > 0:
-                        Y = self.targets[idx]
-                        if os.path.exists(str(Y)):
-                            Y = self.target_reader(Y)
-                    read_idx = idx
+                    Y = self.target_reader(target)
+                    read_idx = index
                 except FileNotFoundError:
                     print('miss nfs file {}'.format(sample))
                     while True:
                         if len(self.unused_idx) == 0:
-                            sub_idx = random.randint(0, self.__len__() - 1)
+                            sub_idx = random.randint(0, len(self) - 1)
                         else:
                             sub_idx = random.choice(list(self.unused_idx))
 
                         sub_sample, sub_target = self.samples[sub_idx], self.targets[sub_idx]
                         if os.path.exists(sub_sample):
                             etag = sample.split('/')[-1]
-                            self._miss_queue.put([[idx, etag], sub_idx])
+                            self._miss_queue.put([[index, etag], sub_idx])
                             break
                         else:
                             sub_etag = sub_sample.split("/")[-1]
                             self._miss_queue.put([[sub_idx, sub_etag], sub_idx])
                     read_idx = sub_idx
-                    X, Y = self.try_get_item(sub_idx)
+                    X, Y = self.__default_get_item__(sub_idx)
                 
                 self.unused_idx.remove(read_idx)
             else:
-                X = self.client.get_object(Bucket=self.bucket, Key=self.samples[idx])['Body'].read()
+                X = self.client.get_object(Bucket=self.bucket, Key=self.samples[index])['Body'].read()
                 Y = None
                 if len(self.targets) > 0:
-                    Y = self.targets[idx]
+                    Y = self.targets[index]
                     if 'Contents' in self.client.list_objects(Bucket=self.bucket, Prefix=str(Y)):
                         Y = self.client.get_object(Bucket=self.bucket, Key=Y)['Body'].read()            
-            return (X, Y)
+            return (X, Y) if Y is not None else X
         else:
-            return (self.samples[idx], self.targets[idx])
+            return (self.samples[index], self.targets[index])
 
     def handle_miss(self):
         manager_uri = "dlcpod-manager:50051"
@@ -293,26 +291,11 @@ class DLCJobDataset(Dataset):
         
         self.samples, self.targets = self.process()
 
-    def sample_reader(self, path: str = None, raw_bytes: bytes = None):
-        """this function defines the logic of reading sample data (X) from a file
-
-        Args:
-            path (string): read from a file
-            raw_bytes (bytes): read from raw bytes
-            
-        Raises:
-            NotImplementedError: _description_
-        """
+    def sample_reader(self, sample_item):
         raise NotImplementedError
     
-    def target_reader(self, path: str = None, raw_bytes: bytes = None):
-        """this function defines the logic of reading target data (Y) from a file
-
-        Args:
-            path (string): read from a file
-            raw_bytes (bytes): read from raw bytes
-        """
-        return
+    def target_reader(self, target_item):
+        raise NotImplementedError
     
     def process(self) -> Tuple[List, List]:
         """process self.samples ans self.target
@@ -332,10 +315,10 @@ class DLCJobDataset(Dataset):
         Returns:
             (Any): Sample and meta data, optionally transformed by the respective transforms.
         """
-        raise NotImplementedError
+        return self.__default_get_item__(index)
 
     def __len__(self) -> int:
-        raise NotImplementedError
+        return len(self.samples)
 
 
 class DLCJobDataLoader(object):
@@ -425,7 +408,10 @@ class DLCJobDataLoader(object):
         self.sampler = sampler
         self.batch_sampler = batch_sampler
         self.num_workers = num_workers
-        self.collate_fn = collate_fn
+        
+        if collate_fn is None:
+            self.collate_fn = default_collate
+            
         self.pin_memory = pin_memory
         self.drop_last = drop_last
         self.timeout = timeout
@@ -434,26 +420,34 @@ class DLCJobDataLoader(object):
         self.generator = generator
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
-        self.num_batches = math.ceil(len(self.dataset.samples)/batch_size)
         
+        if self.sampler is None:
+            if self.shuffle:
+                self.sampler = RandomSampler(self.dataset)
+            else:
+                self.sampler = SequentialSampler(self.dataset)
+        
+        if self.batch_size > 0 and self.batch_sampler is None:
+            self._index_sampler = BatchSampler(self.sampler, self.batch_size, self.drop_last)
+
         self.lazy = self.dataset.qos['LazyLoading']
         self._partition_idx = 0
-        clear()
         
         self._req_time = []
         self._load_time = []
-        self.lock = Lock()
 
-        manager = Manager()
+        manager = mp.Manager()
         self.idx_to_worker = manager.dict()
         self._index_queues = []
-        self.data_queue = Queue()
+        self.data_queue = mp.Queue()
         self._workers = []
         self._workers_down_events = []
         # self._worker_queue_idx_cycle = itertools.cycle(range(self.num_workers))
         self._workers_status = []
         self._workers_cond_vars = []
         self._active_workers = 0
+        
+        self._cool_down_event = threading.Event()
         
         for _ in range(self.num_workers):
             self._spawn_worker()
@@ -467,12 +461,12 @@ class DLCJobDataLoader(object):
                 return
         
         self._active_workers += 1
-        idx_queue = Queue()
+        idx_queue = mp.Queue()
         idx_queue.cancel_join_thread()
-        done_event = Event()
+        done_event = mp.Event()
         worker_id = len(self._workers_status)
-        cond_var = Condition()
-        w = Process(target=self.worker_loop, args=(worker_id, idx_queue, self.idx_to_worker, self.data_queue, done_event, cond_var))
+        cond_var = mp.Condition()
+        w = mp.Process(target=self._worker_loop, args=(self.dataset, worker_id, idx_queue, self.data_queue, done_event, cond_var), name='DLCJobLoader-Worker-{}'.format(self._active_workers))
         w.daemon = True
         w.start()
         self._index_queues.append(idx_queue)
@@ -480,6 +474,7 @@ class DLCJobDataLoader(object):
         self._workers_cond_vars.append(cond_var)
         self._workers_status.append(True)
         self._workers_down_events.append(done_event)
+        print('add worker {}'.format(self._active_workers))
     
     def _pause_worker(self):
         for i in range(len(self._workers_status)):
@@ -488,77 +483,18 @@ class DLCJobDataLoader(object):
                 self._workers_status[i] = False
                 self._active_workers -= 1
                 break
-
-    def _shut_down_worker(self, n = 1):
-        count = 0
-        for i in range(len(self._workers_status)):
-            if count == n:
-                break
-            if self._workers_status[i]:
-                self._workers_down_events[i].set()
-                self._mark_worker_as_unavailable(i, True)
-                count += 1
     
     def _mark_worker_as_available(self, worker_id):
         assert not self._workers_status[worker_id]
-        # q = Queue()
-        # q.cancel_join_thread()
-        # self._index_queues[worker_id] = q
-        # self._workers[worker_id].start()
         self._active_workers += 1
         self._workers_status[worker_id] = True
         with self._workers_cond_vars[worker_id]:
             self._workers_cond_vars[worker_id].notify()
-        
-    def _mark_worker_as_unavailable(self, worker_id, shutdown=False):
-            # Mark a worker as having finished its work e.g., due to
-        # exhausting an `IterableDataset`. This should be used only when this
-        # `_MultiProcessingDataLoaderIter` is going to continue running.
-
-        assert self._workers_status[worker_id] or (self.persistent_workers and shutdown)
-
-        # Signal termination to that specific worker.
-        q = self._index_queues[worker_id]
-        # Indicate that no more data will be put on this queue by the current
-        # process.
-        q.put(None)
-
-        # Note that we don't actually join the worker here, nor do we remove the
-        # worker's pid from C side struct because (1) joining may be slow, and
-        # (2) since we don't join, the worker may still raise error, and we
-        # prefer capturing those, rather than ignoring them, even though they
-        # are raised after the worker has finished its job.
-        # Joinning is deferred to `_shutdown_workers`, which it is called when
-        # all workers finish their jobs (e.g., `IterableDataset` replicas) or
-        # when this iterator is garbage collected.
-
-        self._workers_status[worker_id] = False
-
-        assert self._workers_down_events[worker_id].is_set() == shutdown
-        
-    class DummyDataset(torch.utils.data.Dataset):
-        def __init__(self, dataset) -> None:
-            super().__init__()
-            self.dataset = dataset
-        
-        def __len__(self) -> int:
-            return len(self.dataset)
-        
-        def __getitem__(self, index):
-            return self.dataset[index]
             
     def _reset(self, first_epoch=True):
         if first_epoch or self.shuffle:
-            if self.sampler is None:
-                if self.shuffle:
-                    self.sampler = RandomSampler(self.dataset)
-                else:
-                    self.sampler = SequentialSampler(self.dataset)
-            
-            if self.batch_size > 0 and self.batch_sampler is None:
-                self._index_sampler = BatchSampler(self.sampler, self.batch_size, self.drop_last)
-                
-            self._index_sampler = iter(self._index_sampler)
+            self._sampler_iter = iter(self._index_sampler)
+            self.num_batches = len(self._index_sampler)
             
             # update chunk status to ACTIVE
             etags = []
@@ -568,6 +504,7 @@ class DLCJobDataLoader(object):
                 for chunk in part:
                     etags.append(chunk['ChunkETag'])
             now = datetime.utcnow().timestamp()
+            t = time.time()
             self.dataset.dataset_col.update_many(
                 {"ChunkETag": {"$in": etags}}, 
                 {
@@ -576,17 +513,20 @@ class DLCJobDataLoader(object):
                     "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
                 }
             )
+            print('Mongodb Opt takes: {}'.format(time.time() - t))
             
         self._send_idx = 0  # idx of the next task to be sent to workers
         if first_epoch:
             self._rcvd_idx = -1
         else:
             self._rcvd_idx = 0  # idx of the next task to be returned in __next__
+            
         # information about data not yet yielded, i.e., tasks w/ indices in range [rcvd_idx, send_idx).
         # map: task idx => - (worker_id,)        if data isn't fetched (outstanding)
         #                  \ (worker_id, data)   if data is already fetched (out-of-order)
         self._task_info = {}
         self._tasks_outstanding = 0  # always equal to count(v for v in task_info.values() if len(v) == 1)
+        
         # A list of booleans representing whether each worker still has work to
         # do, i.e., not having exhausted its iterable dataset object. It always
         # contains all `True`s if not using an iterable-style dataset
@@ -602,28 +542,21 @@ class DLCJobDataLoader(object):
         # prime the prefetch loop
         for _ in range(self.prefetch_factor * self.num_workers):
             self._try_put_index()
-    
-    def _fetch_data(self, batch):
-        # t = time.time()
-        data = []
-        for item_idx in batch:
-            item = self.dataset.try_get_item(item_idx)
-            data.append(item)
-        data = zip(*data)
-        # print('worker load 1 batch data: {}'.format(time.time() - t))
-        return data
 
-    def worker_loop(self, worker_id, index_queue, idx_to_worker, data_queue, done_event, cond_var):
+    def _worker_loop(self, dataset, worker_id, index_queue, data_queue, done_event, cond_var):
         t = time.time()
-        def _put_data(idx, batch):
+        
+        def _put_data(batch_idx, batch):
             nonlocal t
-            # print('worker {} get batch {} from queue'.format(worker_id, idx))
-            data = self._fetch_data(batch)
+            # print('worker {} get batch {} from queue'.format(worker_id, batch_idx))
+            data = []
+            for idx in batch:
+                data.append(dataset[idx])
+            data = self.collate_fn(data)
             now = time.time()
-            data_queue.put((idx, data, now-t))
-            # print('worker {} put batch {} into queue'.format(worker_id, idx))
-            idx_to_worker[idx] = worker_id
-            del idx, batch, data  # save memory
+            data_queue.put((batch_idx, data, now-t))
+            # print('worker {} put batch {} into queue'.format(worker_id, batch_idx))
+            del batch_idx, batch, data  # save memory
             t = now
         
         pause = False
@@ -664,7 +597,7 @@ class DLCJobDataLoader(object):
             load_interval = np.median(self._load_time[-10:])
             # print('req: {}, load: {}'.format(req_interval, load_interval))
             k = math.ceil(load_interval/req_interval) - self._active_workers
-            print('add {} workers'.format(k))
+            # print('add {} workers'.format(k))
             if k > 0:
                 for _ in range(k):
                     self._spawn_worker()
@@ -673,7 +606,7 @@ class DLCJobDataLoader(object):
                     self._pause_worker()
         
         try:
-            batched_idxs = next(self._index_sampler)
+            batched_idxs = next(self._sampler_iter)
         except StopIteration:
             return
         
@@ -696,8 +629,10 @@ class DLCJobDataLoader(object):
         self._tasks_outstanding += 1
         self._send_idx += 1
 
-    def expire_cache(self):
-        time.sleep(COOL_DOWN_SEC)
+    def expire_chunks(self):
+        self._cool_down_event.wait(timeout=COOL_DOWN_SEC)
+        if self._cool_down_event.is_set():
+            return
         etags = []
         for sample_path in self.dataset.samples:
             etags.append(sample_path.split('/')[-1])
@@ -721,7 +656,7 @@ class DLCJobDataLoader(object):
         return self
     
     def __len__(self):
-        return self.num_batches
+        return len(self._index_sampler)
     
     def _process_data(self, data):
         self._rcvd_idx += 1
@@ -752,7 +687,12 @@ class DLCJobDataLoader(object):
             assert self._tasks_outstanding > 0
             
             # print('main proc waiting for batch {}'.format(self._rcvd_idx))
-            idx, data, dur = self.data_queue.get(block=True)
+            # t = time.time()
+            try:
+                idx, data, dur = self.data_queue.get(timeout=5.0)
+            except queue.Empty:
+                continue
+            # print('get batch {} takes {}s'.format(idx, time.time() - t))
             
             self._load_time.append(dur)
             self._tasks_outstanding -= 1
@@ -770,7 +710,7 @@ class DLCJobDataLoader(object):
                 self._rcvd_idx = 0
             elif self._rcvd_idx == 0:
                 self._reset(first_epoch=False)
-            elif self._rcvd_idx == self.num_batches:
+            elif self._rcvd_idx == len(self._index_sampler):
                 raise StopIteration
             
             t = time.time()
@@ -821,10 +761,10 @@ class DLCJobDataLoader(object):
                     }
                 )
                 
-                if self.cool_down_proc is not None and self.cool_down_proc.is_alive():
-                    self.cool_down_proc.terminate()
-                self.cool_down_proc = Process(target=self.expire_cache, daemon=True)
-                self.cool_down_proc.start()
+                if not self._cool_down_event.is_set():
+                    self._cool_down_event.set()
+                self.cool_down_thread = threading.Thread(target=self.expire_chunks, daemon=True)
+                self.cool_down_thread.start()
                 raise StopIteration
             else:                    
                 # data in the current part have been consumed    
@@ -836,6 +776,42 @@ class DLCJobDataLoader(object):
                 
         return data
     
+    # def _shut_down_worker(self, n = 1):
+    #     count = 0
+    #     for i in range(len(self._workers_status)):
+    #         if count == n:
+    #             break
+    #         if self._workers_status[i]:
+    #             self._workers_down_events[i].set()
+    #             self._mark_worker_as_unavailable(i, True)
+    #             count += 1
+                
+    # def _mark_worker_as_unavailable(self, worker_id, shutdown=False):
+    #         # Mark a worker as having finished its work e.g., due to
+    #     # exhausting an `IterableDataset`. This should be used only when this
+    #     # `_MultiProcessingDataLoaderIter` is going to continue running.
+
+    #     assert self._workers_status[worker_id] or (self.persistent_workers and shutdown)
+
+    #     # Signal termination to that specific worker.
+    #     q = self._index_queues[worker_id]
+    #     # Indicate that no more data will be put on this queue by the current
+    #     # process.
+    #     q.put(None)
+
+    #     # Note that we don't actually join the worker here, nor do we remove the
+    #     # worker's pid from C side struct because (1) joining may be slow, and
+    #     # (2) since we don't join, the worker may still raise error, and we
+    #     # prefer capturing those, rather than ignoring them, even though they
+    #     # are raised after the worker has finished its job.
+    #     # Joinning is deferred to `_shutdown_workers`, which it is called when
+    #     # all workers finish their jobs (e.g., `IterableDataset` replicas) or
+    #     # when this iterator is garbage collected.
+
+    #     self._workers_status[worker_id] = False
+
+    #     assert self._workers_down_events[worker_id].is_set() == shutdown
+
     # def _shutdown_workers(self):
     #     if not self._shutdown:
     #         self._shutdown = True
