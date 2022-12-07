@@ -16,6 +16,7 @@ from typing import Optional, Union, Sequence, Iterable, List, Tuple
 import torch
 from torch import multiprocessing as mp
 from torch.utils.data import Dataset, DataLoader, Sampler, BatchSampler, RandomSampler, SequentialSampler, IterableDataset
+import torch.utils.data._utils.pin_memory as pm
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t, default_collate
 
 
@@ -439,7 +440,8 @@ class DLCJobDataLoader(object):
         manager = mp.Manager()
         self.idx_to_worker = manager.dict()
         self._index_queues = []
-        self.data_queue = mp.Queue()
+        
+        self._worker_result_queue = mp.Queue()    
         self._workers = []
         self._workers_down_events = []
         # self._worker_queue_idx_cycle = itertools.cycle(range(self.num_workers))
@@ -452,6 +454,25 @@ class DLCJobDataLoader(object):
         for _ in range(self.num_workers):
             self._spawn_worker()
         
+        self.pin_memory = self.pin_memory and torch.cuda.is_available()
+        if self.pin_memory:
+            self._pin_memory_thread_done_event = threading.Event()
+
+            # Queue is not type-annotated
+            self._data_queue = queue.Queue()  # type: ignore[var-annotated]
+            pin_memory_thread = threading.Thread(
+                target=pm._pin_memory_loop,
+                args=(self._worker_result_queue, self._data_queue,
+                      torch.cuda.current_device(),
+                      self._pin_memory_thread_done_event))
+            pin_memory_thread.daemon = True
+            pin_memory_thread.start()
+            # Similar to workers (see comment above), we only register
+            # pin_memory_thread once it is started.
+            self._pin_memory_thread = pin_memory_thread
+        else:
+            self._data_queue = self._worker_result_queue
+            
         self._reset(first_epoch=True)
 
     def _spawn_worker(self):
@@ -466,7 +487,7 @@ class DLCJobDataLoader(object):
         done_event = mp.Event()
         worker_id = len(self._workers_status)
         cond_var = mp.Condition()
-        w = mp.Process(target=self._worker_loop, args=(self.dataset, worker_id, idx_queue, self.data_queue, done_event, cond_var), name='DLCJobLoader-Worker-{}'.format(self._active_workers))
+        w = mp.Process(target=self._worker_loop, args=(self.dataset, worker_id, idx_queue, self._worker_result_queue, done_event, cond_var), name='DLCJobLoader-Worker-{}'.format(self._active_workers))
         w.daemon = True
         w.start()
         self._index_queues.append(idx_queue)
@@ -689,7 +710,7 @@ class DLCJobDataLoader(object):
             # print('main proc waiting for batch {}'.format(self._rcvd_idx))
             # t = time.time()
             try:
-                idx, data, dur = self.data_queue.get(timeout=5.0)
+                idx, data, dur = self._data_queue.get(timeout=5.0)
             except queue.Empty:
                 continue
             # print('get batch {} takes {}s'.format(idx, time.time() - t))
