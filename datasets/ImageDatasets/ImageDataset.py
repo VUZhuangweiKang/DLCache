@@ -1,6 +1,6 @@
 from PIL import Image
 from DLCJob import DLCJobDataset
-
+import numpy as np
 
 class ImageDataset(DLCJobDataset):
     def __init__(self, dtype: str = 'train', transform=None):
@@ -21,6 +21,9 @@ class ImageDataset(DLCJobDataset):
                 continue
             samples.append(self.samples[row['sample']])
             targets.append(cls_idx[row["target"]])
+        
+        np.save('{}_samples.npy'.format(self.dtype), samples)
+        np.save('{}_targets.npy'.format(self.dtype), targets)
         return samples, targets
 
     def sample_reader(self, sample_item):

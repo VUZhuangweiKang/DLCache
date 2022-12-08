@@ -2,20 +2,19 @@ import os
 import json
 import bson
 import math
+import statistics
 import random
 import time
-import numpy as np
 from datetime import datetime
 import grpc
 import grpctool.dbus_pb2 as pb
 import grpctool.dbus_pb2_grpc as pb_grpc
-from collections import defaultdict
 import threading
 import queue
 from typing import Optional, Union, Sequence, Iterable, List, Tuple
 import torch
 from torch import multiprocessing as mp
-from torch.utils.data import Dataset, DataLoader, Sampler, BatchSampler, RandomSampler, SequentialSampler, IterableDataset
+from torch.utils.data import Dataset, DataLoader, Sampler, BatchSampler, RandomSampler, SequentialSampler
 import torch.utils.data._utils.pin_memory as pm
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t, default_collate
 
@@ -110,42 +109,27 @@ class DLCJobDataset(Dataset):
             self.load_chunks_from_cloud()
 
         self.load_data(partition_index=0)
-        
-        if self.lazy:
-            self.reset()
-            self._miss_queue = mp.Queue()
-            mp.Process(target=self.handle_miss, daemon=True).start()
+        self.handle_miss_thread = None
 
-    def __default_get_item__(self, index):
+    def __default_get_item__(self, index):            
         if self.lazy:         
             if self.usecache:
+                if self.handle_miss_thread is None:
+                    self._miss_queue = queue.Queue()
+                    self.handle_miss_thread = threading.Thread(target=self.handle_miss, daemon=True)
+                    self.handle_miss_thread.start()
+                
                 sample = self.samples[index]
                 target = self.targets[index]
                 try:
-                    
                     X = self.sample_reader(sample)
                     Y = self.target_reader(target)
-                    read_idx = index
                 except FileNotFoundError:
                     print('miss nfs file {}'.format(sample))
-                    while True:
-                        if len(self.unused_idx) == 0:
-                            sub_idx = random.randint(0, len(self) - 1)
-                        else:
-                            sub_idx = random.choice(list(self.unused_idx))
-
-                        sub_sample, sub_target = self.samples[sub_idx], self.targets[sub_idx]
-                        if os.path.exists(sub_sample):
-                            etag = sample.split('/')[-1]
-                            self._miss_queue.put([[index, etag], sub_idx])
-                            break
-                        else:
-                            sub_etag = sub_sample.split("/")[-1]
-                            self._miss_queue.put([[sub_idx, sub_etag], sub_idx])
-                    read_idx = sub_idx
+                    etag = sample.split('/')[-1]
+                    self._miss_queue.put(etag)
+                    sub_idx = random.randint(0, len(self) - 1)
                     X, Y = self.__default_get_item__(sub_idx)
-                
-                self.unused_idx.remove(read_idx)
             else:
                 X = self.client.get_object(Bucket=self.bucket, Key=self.samples[index])['Body'].read()
                 Y = None
@@ -162,20 +146,12 @@ class DLCJobDataset(Dataset):
         self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
         channel = grpc.insecure_channel(manager_uri)
         stub = pb_grpc.DataMissStub(channel)
-        def swap(x, y):
-            x, y = y, x
-            
+
         try:
             while True:
-                info = self._miss_queue.get(block=True)
-                miss_idx, miss_etag = info[0]
-                sub_idx = info[1]
-                swap(self.samples[miss_idx], self.samples[sub_idx])
-                swap(self.targets[miss_idx], self.targets[sub_idx])
+                miss_etag = self._miss_queue.get(block=True)
                 stub.call(pb.DataMissRequest(cred=self.cred, etag=miss_etag))
         except KeyboardInterrupt:
-            self._miss_queue.cancel_join_thread()
-            self._miss_queue.close()
             channel.close()
             
     def load_chunks(self):
@@ -281,9 +257,6 @@ class DLCJobDataset(Dataset):
             self.targets = helper(self.target_chunks, self.target_reader)
         
         self.samples, self.targets = self.process()
-
-    def reset(self):
-        self.unused_idx = set(range(len(self)))
         
     def sample_reader(self, sample_item):
         raise NotImplementedError
@@ -315,6 +288,102 @@ class DLCJobDataset(Dataset):
         return len(self.samples)
 
 
+class WorkerInfo:
+    def __init__(self, worker_id=None, status=True):
+        self.worker_id = worker_id
+        self.status = status
+        self.next = None
+    
+
+class WorkerQueueIndexCycle:
+    def __init__(self) -> None:
+        super().__init__()
+        self.__head = None
+        
+    def is_empty(self):
+        return not self.__head
+        
+    def __next__(self):        
+        while not self.__ptr.status:
+            self.__ptr = self.__ptr.next
+        worker_queue_idx = self.__ptr.worker_id
+        self.__ptr = self.__ptr.next
+        return worker_queue_idx
+
+    def __iter__(self):
+        return self
+    
+    # add from the head
+    def add(self, worker_id, status=True):
+        w = WorkerInfo(worker_id, status)
+        if self.is_empty():
+            self.__head = w
+            w.next = self.__head
+            self.__ptr = self.__head
+            return
+        cur = self.__head
+        while cur.next != self.__head:
+            cur = cur.next
+        cur.next = w
+        w.next = self.__head
+        self.__head = w
+    
+    # append from the end
+    def append(self, worker_id, status=True):
+        if self.is_empty():
+            self.add(worker_id, status)
+            return
+        cur = self.__head
+        while cur.next != self.__head:
+            cur = cur.next
+        w = WorkerInfo(worker_id, status)
+        cur.next = w
+        w.next = self.__head
+    
+    def num_active_workers(self):
+        if self.is_empty():
+            return 0
+        n = self.__head.status
+        cur = self.__head
+        while cur.next != self.__head:
+            n += cur.status
+            cur = cur.next
+        return n
+    
+    def set_status(self, index, value):
+        if index < 0:
+            raise IndexError
+        if index > self.length() - 1:
+            raise IndexError
+        cur = self.__head
+        for _ in range(index):
+            cur = cur.next
+        cur.status = value
+    
+    def remove(self, index):
+        if index < 0:
+            raise IndexError
+        if index > self.length() - 1:
+            raise IndexError
+        cur = self.__head
+        prev = None
+        for i in range(index):
+            prev = cur
+            cur = cur.next
+        if cur == self.__head:
+            prev = self.__head
+            while prev.next != self.__head:
+                prev = prev.next
+            if prev == self.__head:
+                self.__head = None
+                return
+            prev.next = self.__head.next
+            self.__head = self.__head.next
+            return
+        prev.next = cur.next
+    
+    
+    
 class DLCJobDataLoader(object):
     def __init__(self, dataset: DLCJobDataset, 
                  batch_size: Optional[int] = 1, shuffle: bool = False, sampler: Union[Sampler, Iterable, None] = None,
@@ -395,7 +464,7 @@ class DLCJobDataLoader(object):
         .. warning:: See :ref:`reproducibility`, and :ref:`dataloader-workers-random-seed`, and
                     :ref:`data-loading-randomness` notes for random seed related questions.
         """
-        
+        self._profile_name = "enumerate(DataLoader)#{}.__next__".format(self.__class__.__name__)
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -434,13 +503,13 @@ class DLCJobDataLoader(object):
         self._partition_idx = 0
         
         self._index_queues = []
+        self._worker_queue_idx_cycle = WorkerQueueIndexCycle()
         self._worker_result_queue = mp.Queue()    
         self._workers = []
         self._workers_down_events = []
         self._workers_status = []
         self._active_workers = 0
         
-        self._cool_down_event = threading.Event()
         self._base_seed = torch.empty((), dtype=torch.int64).random_(generator=self.generator).item()
         for _ in range(self.num_workers):
             self._spawn_worker()
@@ -464,9 +533,10 @@ class DLCJobDataLoader(object):
         else:
             self._data_queue = self._worker_result_queue
         
+        self._cool_down_proc = None
         self._mongo_operation_queue = queue.Queue()
         threading.Thread(target=self.async_mongo_operator).start()
-        self._reset(first_iter=True)
+        self._reset()
 
     def async_mongo_operator(self):
         try:
@@ -488,8 +558,7 @@ class DLCJobDataLoader(object):
         done_event = mp.Event()
         worker_id = len(self._workers_status)
         w = mp.Process(target=self._worker_loop, 
-                       args=(self.dataset, worker_id, idx_queue, self._worker_result_queue, done_event, self._base_seed), 
-                       name='DLCJobLoader-Worker-{}'.format(self._active_workers))
+                       args=(self.dataset, worker_id, idx_queue, self._worker_result_queue, done_event, self._base_seed))
         w.daemon = True
         w.start()
         self._index_queues.append(idx_queue)
@@ -498,6 +567,7 @@ class DLCJobDataLoader(object):
         # A list of booleans representing whether each worker still has work to
         # do, i.e., not having exhausted its iterable dataset object.
         self._workers_status.append(True)
+        self._worker_queue_idx_cycle.append(self._active_workers)
         self._workers_down_events.append(done_event)
         self._active_workers += 1
         print('add worker {}'.format(self._active_workers))
@@ -506,6 +576,7 @@ class DLCJobDataLoader(object):
         for i in range(len(self._workers_status)):
             if self._workers_status[i]:
                 self._workers_status[i] = False
+                self._worker_queue_idx_cycle.set_status(i, False)
                 # print('pause worker {}'.format(i))
                 self._active_workers -= 1
                 break
@@ -513,31 +584,11 @@ class DLCJobDataLoader(object):
     def _mark_worker_as_available(self, worker_id):
         assert not self._workers_status[worker_id]
         self._workers_status[worker_id] = True
+        self._worker_queue_idx_cycle.set_status(worker_id, True)
         self._active_workers += 1
         # print('reactive worker {}'.format(worker_id))
-            
-    def _reset(self, first_iter=True):
-        if first_iter:
-            # update chunk status to ACTIVE
-            etags = []
-            tmp = self.dataset.sample_chunks.copy()
-            tmp.extend(self.dataset.target_chunks)
-            for part in tmp:
-                for chunk in part:
-                    etags.append(chunk['ChunkETag'])
-            now = datetime.utcnow().timestamp()
-
-            t = time.time()
-            self._mongo_operation_queue.put(('Datasets', 'update_many', 
-                                             {
-                                                 "filter": {"ChunkETag": {"$in": etags}}, 
-                                                 "update": {
-                                                     "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
-                                                     "$inc": {"Status.active_count": 1},
-                                                     "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}}
-                                              }))
-            print('Mongodb Opt takes: {}'.format(time.time() - t))
         
+    def _reset(self):    
         self._sampler_iter = iter(self._index_sampler)
         self._send_idx = 0  # idx of the next task to be sent to workers
         self._rcvd_idx = 0  # idx of the next task to be returned in __next__
@@ -547,8 +598,7 @@ class DLCJobDataLoader(object):
         #                  \ (worker_id, data)   if data is already fetched (out-of-order)
         self._task_info = {}
         self._tasks_outstanding = 0  # always equal to count(v for v in task_info.values() if len(v) == 1)
-
-        self._rr_worker = 0
+        
         self._last_iter_time = None
         
         self._req_time = []
@@ -566,12 +616,7 @@ class DLCJobDataLoader(object):
         
         try:
             while True:
-                info = index_queue.get(block=True)
-                if info is None:
-                    dataset.reset()
-                    continue
-
-                batch_idx, batch, idx_req_time = info
+                batch_idx, batch, idx_req_time = index_queue.get(block=True)
                 # print('worker {} get batch {} from queue'.format(worker_id, batch_idx))
                 data = []
                 for idx in batch:
@@ -589,10 +634,10 @@ class DLCJobDataLoader(object):
 
     def _try_put_index(self):
         # calculate the # of index should be put
-        if len(self._req_time) > 0 and len(self._req_time) % self.tune_num_workers_frequency == 0:
+        if self._rcvd_idx > 0 and self._rcvd_idx % self.tune_num_workers_frequency == 0:
             print('active workers: {}'.format(self._active_workers))
-            req_interval = np.median(self._req_time[-self.tune_num_workers_frequency:])
-            load_interval = np.median(self._load_time[-self.tune_num_workers_frequency:])
+            req_interval = statistics.median(self._req_time)
+            load_interval = statistics.median(self._load_time)
             # print('req: {}, load: {}'.format(req_interval, load_interval))
             k = math.ceil(load_interval/req_interval) - self._active_workers
             # print('add {} workers'.format(k))
@@ -604,55 +649,19 @@ class DLCJobDataLoader(object):
             elif k < 0:
                 for _ in range(-k):
                     self._pause_worker()
-            
-            # self._req_time.pop(0)
-            # self._load_time.pop(0)
+            self._req_time = []
+            self._load_time = []
         
-        timestamp = time.time()
         try:
             batched_idxs = next(self._sampler_iter)
         except StopIteration:
             return
 
-        num_workers = len(self._workers_status)
-        while self._rr_worker < num_workers:
-            worker_queue_idx = self._rr_worker
-            self._rr_worker += 1
-            if self._workers_status[worker_queue_idx]:
-                # print('batch {} to worker {}'.format(self._send_idx, worker_queue_idx))
-                break
-        if self._rr_worker == num_workers:
-            self._rr_worker = 0
-
-        self._index_queues[worker_queue_idx].put((self._send_idx, batched_idxs, timestamp))
+        worker_queue_idx = next(self._worker_queue_idx_cycle)
+        self._index_queues[worker_queue_idx].put((self._send_idx, batched_idxs, time.time()))
         self._task_info[self._send_idx] = (worker_queue_idx,)
         self._tasks_outstanding += 1
         self._send_idx += 1
-
-    def expire_chunks(self):
-        self._cool_down_event.wait(timeout=COOL_DOWN_SEC)
-        if self._cool_down_event.is_set():
-            return
-        etags = []
-        for sample_path in self.dataset.samples:
-            etags.append(sample_path.split('/')[-1])
-        for target_path in self.dataset.targets:
-            if target_path:
-                etags.append(target_path.split("/")[-1])
-        
-        self._mongo_operation_queue.put(("Datasets", "update_many", 
-                                         {
-                                             "filter": {
-                                                 "ChunkETag": {"$in": etags},
-                                                 "Status.code": CHUNK_STATUS.COOL_DOWN
-                                             },
-                                             "update": {
-                                                 "$set":{
-                                                     "Status.code": CHUNK_STATUS.INACTIVE,
-                                                     "Status.active_count": 0
-                                                 }
-                                             }
-                                         }))
     
     def __iter__(self):
         return self
@@ -678,9 +687,20 @@ class DLCJobDataLoader(object):
         #     print(self._rcvd_idx, self._send_idx)
         #     raise StopIteration
 
-        if self._rcvd_idx >= self._send_idx:
-            for i in range(len(self._index_queues)):
-                self._index_queues[i].put(None)
+        if self._rcvd_idx == 0:
+            # update chunk status to ACTIVE
+            now = datetime.utcnow().timestamp()
+            self._mongo_operation_queue.put(('Datasets', 'update_many', 
+                                            {
+                                                "filter": {"ChunkETag": {"$in": self.dataset.chunk_etags}}, 
+                                                "update": {
+                                                    "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
+                                                    "$inc": {"Status.active_count": 1},
+                                                    "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}}
+                                            }))
+            if self._cool_down_proc is not None and self._cool_down_proc.is_alive():
+                self._cool_down_proc.terminate()
+        elif self._rcvd_idx >= self._send_idx:
             raise StopIteration
         
         # Now `self._rcvd_idx` is the batch index we want to fetch
@@ -710,72 +730,82 @@ class DLCJobDataLoader(object):
                 return self._process_data(data)
             
     def __next__(self):
-        # with torch.autograd.profiler.record_function(self._profile_name):
-        try:
-            if self._sampler_iter is None:
-                raise StopIteration
-            
-            t = time.time()
-            if self._last_iter_time is not None:
-                self._req_time.append(t-self._last_iter_time)
+        with torch.autograd.profiler.record_function(self._profile_name):
+            try:
+                if self._sampler_iter is None:
+                    print('self._sampler_iter is None')
+                    raise StopIteration
+                
+                if self._last_iter_time is not None:
+                    self._req_time.append(time.time()-self._last_iter_time)
 
-            data = self._next_data()
-            self._last_iter_time = time.time()
-        except StopIteration:
-            print('raise StopIteration Exception....')
-            
-            # epoch is down
-            if self._partition_idx == len(self.dataset.sample_chunks)-1:
-                self._partition_idx = 0
-                
-                t = time.time()
-                # update chunk status to COOL_DOWN
-                now = datetime.utcnow().timestamp()
-                self._mongo_operation_queue.put(("Datasets", "update_many", 
-                                                 {
-                                                     "filter": {
-                                                         "ChunkETag": {"$in": self.dataset.chunk_etags},
-                                                         "Status.active_count": 1
-                                                     },
-                                                     "update": {"$set": {
-                                                         "Status.code": CHUNK_STATUS.INACTIVE,
-                                                         "Status.active_count": 0,
-                                                         "Status.cool_down_init": bson.timestamp.Timestamp(int(now), inc=1)}
-                                                     }
-                                                 }))
-                self._mongo_operation_queue.put(("Datasets", "update_many", 
-                                                 {
-                                                     "filter": {
-                                                         "ChunkETag": {"$in": self.dataset.chunk_etags},
-                                                         "Status.active_count": {"$gt": 1}
-                                                     },
-                                                     "update": {
-                                                         "$inc": {"Status.active_count": -1},
-                                                         "$set": {
-                                                             "Status.code": CHUNK_STATUS.INACTIVE,
-                                                             "Status.cool_down_init": bson.timestamp.Timestamp(int(now), inc=1)
-                                                         }
-                                                     }
-                                                 }))
-                print('Mongo Opt takes {} s'.format(time.time() - t))
-                
-                if not self._cool_down_event.is_set():
-                    self._cool_down_event.set()
-                self.cool_down_thread = threading.Thread(target=self.expire_chunks)
-                self.cool_down_thread.start()
-                
-                self._reset(first_iter=False)
-                raise StopIteration
-            else:                    
-                # data in the current part have been consumed    
-                self._partition_idx += 1
-                self.dataset.load_data(self._partition_idx)
-                # TODO: 不对
-                self._reset(first_iter=True)
                 data = self._next_data()
+                self._last_iter_time = time.time()
+            except StopIteration:
+                print('raise StopIteration Exception....')
                 
-        return data
+                # epoch is down
+                if self._partition_idx == len(self.dataset.sample_chunks)-1:
+                    self._partition_idx = 0
+                    
+                    # update chunk status to COOL_DOWN
+                    now = datetime.utcnow().timestamp()
+                    self._mongo_operation_queue.put(("Datasets", "update_many", 
+                                                    {
+                                                        "filter": {
+                                                            "ChunkETag": {"$in": self.dataset.chunk_etags},
+                                                            "Status.active_count": 1
+                                                        },
+                                                        "update": {"$set": {
+                                                            "Status.code": CHUNK_STATUS.INACTIVE,
+                                                            "Status.active_count": 0,
+                                                            "Status.cool_down_init": bson.timestamp.Timestamp(int(now), inc=1)}
+                                                        }
+                                                    }))
+                    self._mongo_operation_queue.put(("Datasets", "update_many", 
+                                                    {
+                                                        "filter": {
+                                                            "ChunkETag": {"$in": self.dataset.chunk_etags},
+                                                            "Status.active_count": {"$gt": 1}
+                                                        },
+                                                        "update": {
+                                                            "$inc": {"Status.active_count": -1},
+                                                            "$set": {
+                                                                "Status.code": CHUNK_STATUS.INACTIVE,
+                                                                "Status.cool_down_init": bson.timestamp.Timestamp(int(now), inc=1)
+                                                            }
+                                                        }
+                                                    }))
+                    
+                    self._cool_down_proc = mp.Process(target=self.expire_chunks, daemon=True)
+                    self._cool_down_proc.start()
+                    self._reset()
+                    raise StopIteration
+                else:                    
+                    # data in the current part have been consumed    
+                    self._partition_idx += 1
+                    self.dataset.load_data(self._partition_idx)
+                    self._reset()
+                    data = self._next_data()
+                    self._last_iter_time = time.time()
+            return data
     
+    def expire_chunks(self):
+        time.sleep(COOL_DOWN_SEC)   
+        self._mongo_operation_queue.put(("Datasets", "update_many", 
+                                         {
+                                             "filter": {
+                                                 "ChunkETag": {"$in": self.dataset.chunk_etags},
+                                                 "Status.code": CHUNK_STATUS.COOL_DOWN
+                                             },
+                                             "update": {
+                                                 "$set":{
+                                                     "Status.code": CHUNK_STATUS.INACTIVE,
+                                                     "Status.active_count": 0
+                                                 }
+                                             }
+                                         }))
+        
     # def _shut_down_worker(self, n = 1):
     #     count = 0
     #     for i in range(len(self._workers_status)):

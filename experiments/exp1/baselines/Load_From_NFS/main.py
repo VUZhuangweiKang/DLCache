@@ -299,6 +299,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     # switch to train mode
     model.train()
 
+    t = time.time()
     end = time.time()
     load_time = 0
     for i, (images, target) in enumerate(train_loader):
@@ -333,7 +334,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         if i % args.print_freq == 0:
             progress.display(i + 1)
-    
+    print('Total Time: {}'.format(time.time()-t))
     return load_time
 
 

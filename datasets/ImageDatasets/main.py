@@ -230,39 +230,30 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         DatasetCls = ImageDataset
     
-    # t = time.time()
-    # val_dataset = DatasetCls(dtype='validation', transform=transform)
+    t = time.time()
+    val_dataset = DatasetCls(dtype='validation', transform=transform)
     
-    # if args.distributed:
-    #     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False, drop_last=True)
-    # else:
-    #     val_sampler = None
-
-    # t = time.time()
-    # val_loader = DLCJobDataLoader(
-    #     val_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
-    
-    # if args.evaluate:
-    #     validate(val_loader, model, criterion, args)
-    #     return
-    # else:
-    #     train_dataset = DatasetCls(dtype='train', transform=transform)
-    #     if args.distributed:
-    #         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    #     else:
-    #         train_sampler = None
-    #     train_loader = DLCJobDataLoader(
-    #         train_dataset, batch_size=args.batch_size,
-    #         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
-
-    train_dataset = DatasetCls(dtype='train', transform=transform)
     if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+        val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False, drop_last=True)
     else:
-        train_sampler = None
-    train_loader = DLCJobDataLoader(
-        train_dataset, batch_size=args.batch_size,
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+        val_sampler = None
+
+    t = time.time()
+    val_loader = DLCJobDataLoader(
+        val_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
+    
+    if args.evaluate:
+        validate(val_loader, model, criterion, args)
+        return
+    else:
+        train_dataset = DatasetCls(dtype='train', transform=transform)
+        if args.distributed:
+            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+        else:
+            train_sampler = None
+        train_loader = DLCJobDataLoader(
+            train_dataset, batch_size=args.batch_size,
+            num_workers=args.workers, pin_memory=True, sampler=train_sampler)
     
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
