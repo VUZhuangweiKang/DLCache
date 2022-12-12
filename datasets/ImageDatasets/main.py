@@ -18,8 +18,8 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.models as models
 from torch.utils.data import Subset
-from ImageDataset import *
-from DLCJob import *
+from ImageDataset import ImageDataset
+from DLCJob import DLCJobDataLoader
 
 
 model_names = sorted(name for name in models.__dict__
@@ -231,7 +231,7 @@ def main_worker(gpu, ngpus_per_node, args):
         DatasetCls = ImageDataset
     
     t = time.time()
-    val_dataset = DatasetCls(dtype='validation', transform=transform)
+    val_dataset = DatasetCls(dataset_type='validation', transform=transform)
     
     if args.distributed:
         val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False, drop_last=True)
@@ -246,7 +246,7 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
     else:
-        train_dataset = DatasetCls(dtype='train', transform=transform)
+        train_dataset = DatasetCls(dataset_type='train', transform=transform)
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         else:
