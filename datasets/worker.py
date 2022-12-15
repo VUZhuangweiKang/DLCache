@@ -230,7 +230,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             dataset = apply_shuffle_seed(dataset, shared_rng)
 
         global _worker_info
-        _worker_info = WorkerInfo(id=worker_id, num_workers=num_workers,
+        _worker_info = WorkerInfo(id=worker_id, num_workers=num_workers.value,
                                   seed=seed, dataset=dataset)
 
         from torch.utils.data import _DatasetKind
@@ -294,6 +294,8 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             
             idx, index, idx_req_time = r
             data: Union[_IterableDatasetStopIteration, ExceptionWrapper]
+            
+            wn1 = num_workers.value
             if init_exception is not None:
                 data = init_exception
                 init_exception = None
@@ -313,9 +315,11 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                         # See NOTE [ Python Traceback Reference Cycle Problem ]
                         data = ExceptionWrapper(
                             where="in DataLoader worker process {}".format(worker_id))
+            wn2 = num_workers.value
             
+            _num_workers = None if wn1 != wn2 else wn1
             load_time = time.time()-idx_req_time
-            data_queue.put((idx, data, load_time))
+            data_queue.put((idx, data, _num_workers, load_time))
             del data, idx, index, r  # save memory
     except KeyboardInterrupt:
         # Main process will raise KeyboardInterrupt anyways.

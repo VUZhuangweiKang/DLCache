@@ -220,16 +220,17 @@ class DLCJobDataLoader(DataLoader):
         self.mongo_operation_queue = queue.Queue()
         self.cool_down_proc = None
         threading.Thread(target=self.async_mongo_operator, daemon=True).start()
-        self.init_tunner()
+        self.reset_env()
     
-    def init_tunner(self):
+    def reset_env(self):
+        self.num_tune_iters = 0
+        self.qtable = np.zeros((cpu_count, 3))
+        self.qtable = np.matrix(self.qtable)
         self.load_time_cache = defaultdict(list)  # the latest `num_batches` # of load time
-        # self.num_worker_samples = np.array(np.array_split(np.arange(1, cpu_count+1), cpu_count//2))
-        self.num_worker_samples = np.random.dirichlet(np.ones_like(np.arange(cpu_count)))
-        self.perf_metrics = []
-        self.stop_tune = False
+        self.num_worker_history = []
         self.avg_req_time_history = []
         self.avg_load_time_history = defaultdict(list)
+        self.stop_tune = False
         
     def async_mongo_operator(self):
         try:
@@ -265,21 +266,52 @@ class DLCJobDataLoader(DataLoader):
             del self.cool_down_proc
         self.cool_down_proc = multiprocessing.Process(target=self.expire_chunks)
         
-        if self._iterator is not None:
-            self.load_time_cache = self._iterator._load_time_cache
-            self.num_worker_samples = self._iterator._num_worker_samples
-            self.perf_metrics = self._iterator._perf_metrics
-            self.stop_tune = self._iterator._stop_tune
-            self.avg_req_time_history = self._iterator._avg_req_time_history
-            self.avg_load_time_history = self._iterator._avg_load_time_history
-            num_workers = self._iterator._active_workers.value
+        if self.num_tune_iters == 0:
+            opt_num_worker = self.num_workers
         else:
-            num_workers = self.num_workers
-            
-        self._iterator = _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.tune_num_workers_freq, self.cool_down_proc, 
-                                               self.mongo_operation_queue, self.load_time_cache, self.num_worker_samples, self.perf_metrics,
-                                               self.stop_tune, self.avg_req_time_history, self.avg_load_time_history)
+            # check if env changed, if so, restart tuning num_workers
+            if len(self.avg_load_time_history) > 3 and len(self.avg_req_time_history) > 3:
+                reset_env_cond1 = np.abs(np.mean(self._iterator._req_time) - np.mean(self.avg_req_time_history)) > 2*np.std(self.avg_req_time_history)
+                reset_env_cond2 = False
+                for nw in self.load_time_cache:
+                    if np.abs(np.mean(self.load_time_cache[nw]) - np.mean(self.avg_load_time_history[nw])) > 2*np.std(self.avg_load_time_history[nw]):
+                        reset_env_cond2 = True
+                        break
+                if reset_env_cond1 or reset_env_cond2:
+                    print('reset env, cond1: {}, cond2: {}'.format(reset_env_cond1, reset_env_cond2))
+                    print(self.avg_req_time_history)
+                    print('----------------')
+                    print(self.avg_load_time_history)
+                    print('----------------')
+                    for nw in self.avg_load_time_history:
+                        print(nw, np.mean(self.avg_load_time_history[nw]))
+                    self.stop_tune = False
+                    self.reset_env()
+                
+            self.avg_req_time_history.append(np.mean(self._iterator._req_time))
+            for nw in self.load_time_cache:
+                if len(self.avg_load_time_history[nw]) == 0 or np.mean(self.load_time_cache[nw]) != self.avg_load_time_history[nw][-1]:
+                    self.avg_load_time_history[nw].append(np.mean(self.load_time_cache[nw]))
 
+            if not self.stop_tune:
+                if self._iterator is not None and self.num_tune_iters % 5 != 0:
+                    opt_num_worker = self._iterator._active_workers.value
+                    self.num_worker_history.append(opt_num_worker)
+                    # stop tuning num_workers
+                    if len(self.num_worker_history) > 5 and np.std(self.num_worker_history[-5:]) < 1:
+                        self.stop_tune = True
+                        opt_num_worker = math.floor(np.mean(self.num_worker_history[-5:]))
+                else:
+                    print('start a new epoch ...')
+                    # start a new tuning episode
+                    opt_num_worker = random.randint(1, cpu_count)
+            else:
+                opt_num_worker = self._iterator._active_workers.value
+                    
+        self._iterator = _DLCJobDataLoaderIter(self, self.num_batches, self.tune_num_workers_freq, opt_num_worker, 
+                                               self.cool_down_proc, self.mongo_operation_queue, self.qtable, 
+                                               self.load_time_cache, self.stop_tune, self.num_tune_iters)
+        self.num_tune_iters += 1
         return self._iterator
         
 
@@ -338,14 +370,14 @@ class StatefulCycleIterator:
         
         
 class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
-    def __init__(self, loader, num_batches, opt_num_workers, tune_num_workers_freq: int = 10,
+    def __init__(self, loader, num_batches, tune_num_workers_freq: int = 10, opt_num_worker: int = 4, 
                  cool_down_proc: multiprocessing.Process = None, mongo_operation_queue: queue.Queue = None,
-                 load_time_cache: defaultdict = None, num_worker_samples: np.array = None, perf_metrics: np.array = None,
-                 stop_tune: bool = False, avg_req_time_history: np.array = None, avg_load_time_history: np.array = None):
+                 sarsa_qtable: np.array = None, load_time_cache: defaultdict = None, stop_tune: bool = False,
+                 num_tune_iters: int = None):
         super(_DLCJobDataLoaderIter, self).__init__(loader)
-        
+
         self._num_batches = num_batches
-        self._num_workers = opt_num_workers
+        self._num_workers = opt_num_worker
         self._prefetch_factor = loader.prefetch_factor
         
         self.lazy = self._dataset.lazy
@@ -422,12 +454,11 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._mongo_operation_queue = mongo_operation_queue
         self._cool_down_proc = cool_down_proc
         
+        self._qtable = sarsa_qtable
         self._load_time_cache = load_time_cache
-        self._num_worker_samples = num_worker_samples
-        self._perf_metrics = perf_metrics
+        self._prev_num_workers = None
         self._stop_tune = stop_tune
-        self._avg_req_time_history = avg_req_time_history
-        self._avg_load_time_history = avg_load_time_history
+        self._num_tune_iters = num_tune_iters
         self._reset(loader, first_iter=True)
         
     def _reset(self, loader, first_iter=False):    
@@ -488,64 +519,88 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
     def _pause_worker(self):
         if self._worker_queue_idx_cycle.deactive_worker():
             self._active_workers.value -= 1
-    
-    def _reset_tunner(self):
-        self._stop_tune = False
-        self._num_worker_samples = np.array(np.array_split(np.arange(1, cpu_count+1), cpu_count//2))
-        self._perf_metrics = []
-        self._load_time_cache = defaultdict(list)  # the latest `num_batches` # of load time
-        self._avg_req_time_history = []
-        self._avg_load_time_history = defaultdict(list)
-    
-    def _tune_worker_num(self):
-        fn = np.mean
-        num_workers = self._active_workers.value
         
-        # if len(self._load_time_cache[num_workers]) > 0:
-        #     # check if env changed, if so, restart tuning num_workers
-        #     reset_env_cond1 = len(self._avg_req_time_history) > 1 and \
-        #         np.abs(fn(self._req_time) - fn(self._avg_req_time_history)) > 2*np.std(self._avg_req_time_history)
-        #     reset_env_cond2 = len(self._avg_load_time_history[num_workers]) > 1 and \
-        #         np.abs(fn(self._load_time_cache[num_workers]) - fn(self._avg_load_time_history[num_workers])) > 2*np.std(self._avg_load_time_history[num_workers])        
+    def _tune_worker_num(self):
+        fn = lambda arr: np.mean(arr)
+        if len(self._load_time_cache[self._active_workers.value]) == 0:
+            return
+        load_time = fn(self._load_time_cache[self._active_workers.value])
+        req_time = fn(self._req_time)
+        min_num_workers, max_num_workers = 1, cpu_count
+        local_max = min(math.ceil(load_time/req_time), max_num_workers)
+        
+        print(self._active_workers.value, load_time, req_time)
+        def choose_action(state):
+            epsilon_end = 0.01
+            epsilon_start = 0.90
+            epsilon_decay = 10 * self._num_batches / self._tune_num_workers_freq
+            epsilon = epsilon_end + (epsilon_start - epsilon_end) * math.exp(-self._num_tune_iters / epsilon_decay)
+            if np.random.random() < epsilon:
+                action = np.random.randint(0, 3)
+            else:
+                action = np.argmax(self._qtable[state, :])
+            return action
             
-        #     if reset_env_cond1 or reset_env_cond2:
-        #         print('reset env, cond1: {}, cond2: {}'.format(reset_env_cond1, reset_env_cond2))
-        #         print(self._avg_req_time_history)
-        #         print('----------------')
-        #         print(self._avg_load_time_history)
-        #         print('----------------')
-        #         self._reset_tunner()
-        #         return
-                        
-        self._stop_tune = len(self._num_worker_samples) == 1
-        if not self._stop_tune and (self._rcvd_idx % self._tune_num_workers_freq == 0) \
-            and len(self._req_time) > 0 and len(self._load_time_cache[num_workers]) > 0:
-            # record req/load history
-            self._avg_req_time_history.append(fn(self._req_time))
-            self._avg_load_time_history[num_workers].append(fn(self._load_time_cache[num_workers]))
-                    
-            # check whether to re-sample
-            if len(self._perf_metrics) == len(self._num_worker_samples):
-                # self._num_worker_samples = self._num_worker_samples[np.argsort(self._perf_metrics)[:len(self._perf_metrics)//2]]
-                self._num_workers_samples = np.random.dirichlet(1/self._perf_metrics)
-                self._perf_metrics.clear()
-            else:
-                self._perf_metrics.append(fn(self._load_time_cache[num_workers]))
-                
-            # next_sample_idx = len(self._perf_metrics)-1
-            # new_num_workers = np.random.choice(self._num_worker_samples[next_sample_idx])
-            new_num_workers = np.random.choice(np.arange(1, cpu_count+1), size=1, replace=False, p=self._num_worker_samples)[0]
-            delta = new_num_workers - num_workers
-            if delta > 0:
-                for _ in range(delta):
-                    self._spawn_worker(worker_id=self._active_workers.value)
-            else:
-                for _ in range(-delta):
-                    self._pause_worker()
+        def commit_action(action):
+            """
+            0: add worker
+            1: pause worker
+            2: no action
+            """
+            if action == 0 and self._active_workers.value < local_max:
+                self._spawn_worker(self._active_workers.value)
+            elif action == 1 and self._active_workers.value > min_num_workers:
+                self._pause_worker()
+        
+        def sarsa(state, state2, reward, action, action2):
+            alpha, gamma = 0.1, 0.9
+            predict = self._qtable[state, action]
+            target = reward + gamma * self._qtable[state2, action2]
+            self._qtable[state, action] += alpha * (target - predict)
+        
+        def qlearn(state, state2, reward, action):
+            alpha, gamma = 0.1, 0.9
+            predict = self._qtable[state, action]
+            target = reward + gamma * np.max(self._qtable[state2, :])
+            self._qtable[state, action] += alpha * (target - predict)
+        
+        def get_reward():
+            # if self._action == 2:
+            #     reward = 0
+            # else:
+            #     last_load_time = fn(self._load_time_cache[self._prev_num_workers])
+            #     reward = (last_load_time-load_time) / last_load_time
+            # return reward
+            return 1/load_time
+        
+        if self._prev_num_workers is None:
+            self._state = self._active_workers.value-1
+            self._action = choose_action(self._state)
+            self._prev_num_workers = self._active_workers.value
+            commit_action(self._action)
             print('change worker num to: {}'.format(self._active_workers.value))
+            return
+        
+        # state2, reward = self._active_workers.value-1, get_reward()
+        # action2 = choose_action(state2)
+        # sarsa(self._state, state2, reward, self._action, action2)
+        # self._state = state2
+        # self._action = action2
+        # self._prev_num_workers = self._active_workers.value
+        # commit_action(self._action)        
+        
+        state2, reward = self._active_workers.value-1, get_reward()
+        qlearn(self._state, state2, reward, self._action)
+        self._state = state2
+        self._action = choose_action(state2)
+        commit_action(self._action)
+        
+        print('change worker num to: {}'.format(self._active_workers.value))
 
     def _try_put_index(self):
-        self._tune_worker_num()    
+        if not self._stop_tune and (self._rcvd_idx % self._tune_num_workers_freq == 0) and len(self._req_time) > 0:
+            self._tune_worker_num()
+            
         try:
             batched_idxs = self._next_index()
         except StopIteration:
