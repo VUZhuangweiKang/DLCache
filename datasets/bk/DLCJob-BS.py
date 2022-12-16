@@ -27,7 +27,6 @@ from typing import (
     TypeVar,
 )
 from collections import defaultdict
-from scipy.special import softmax
 import torch
 import torch.multiprocessing as multiprocessing
 from torch.utils.data import DataLoader, Sampler
@@ -42,7 +41,6 @@ warnings.filterwarnings("ignore")
 
 COOL_DOWN_SEC = 600
 cpu_count = multiprocessing.cpu_count()
-cores = np.arange(1, cpu_count+1)
 class CHUNK_STATUS:
     PREPARE = 0
     ACTIVE = 1
@@ -226,10 +224,11 @@ class DLCJobDataLoader(DataLoader):
         self.init_tunner()
     
     def init_tunner(self):
-        self.tune_iters = 0
         self.load_time_cache = defaultdict(list)  # the latest `num_batches` # of load time
-        self.worker_weights = None
-        self.perf_metrics = defaultdict(float)
+        self.num_worker_samples = np.array(np.array_split(np.arange(1, cpu_count+1), 2))
+        self.perf_metrics = []
+        self.stop_tune = False
+        self.avg_req_time_history = []
         self.avg_load_time_history = defaultdict(list)
         
     def async_mongo_operator(self):
@@ -267,18 +266,19 @@ class DLCJobDataLoader(DataLoader):
         self.cool_down_proc = multiprocessing.Process(target=self.expire_chunks)
         
         if self.autoscale_workers and self._iterator is not None:
-            self.tune_iters = self._iterator._tune_iters
             self.load_time_cache = self._iterator._load_time_cache
-            self.worker_weights = self._iterator._worker_weights
+            self.num_worker_samples = self._iterator._num_worker_samples
             self.perf_metrics = self._iterator._perf_metrics
+            self.stop_tune = self._iterator._stop_tune
+            self.avg_req_time_history = self._iterator._avg_req_time_history
             self.avg_load_time_history = self._iterator._avg_load_time_history
             num_workers = self._iterator._active_workers.value
         else:
             num_workers = self.num_workers
             
         self._iterator = _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.cool_down_proc, 
-                                               self.mongo_operation_queue, self.autoscale_workers, self.load_time_cache, self.worker_weights, 
-                                               self.perf_metrics, self.avg_load_time_history, self.tune_iters)
+                                               self.mongo_operation_queue, self.autoscale_workers, self.load_time_cache, self.num_worker_samples, 
+                                               self.perf_metrics, self.stop_tune, self.avg_req_time_history, self.avg_load_time_history)
 
         return self._iterator
         
@@ -340,16 +340,15 @@ class StatefulCycleIterator:
 class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
     def __init__(self, loader, num_batches, opt_num_workers,
                  cool_down_proc: multiprocessing.Process = None, mongo_operation_queue: queue.Queue = None, autoscale_workers: bool = True,
-                 load_time_cache: defaultdict = None, worker_weights: np.array = None, perf_metrics: np.array = None,
-                 avg_load_time_history: np.array = None, tune_iters: int = None):
+                 load_time_cache: defaultdict = None, num_worker_samples: np.array = None, perf_metrics: np.array = None,
+                 stop_tune: bool = False, avg_req_time_history: np.array = None, avg_load_time_history: np.array = None):
         super(_DLCJobDataLoaderIter, self).__init__(loader)
         
         self._num_batches = num_batches
         self._num_workers = opt_num_workers
         self._autoscale_workers = autoscale_workers
         self._prefetch_factor = loader.prefetch_factor
-        self._factor = 4
-        self._tune_freq = self._num_batches // self._factor
+        self._tune_freq = self._num_batches // 2
         
         self.lazy = self._dataset.lazy
 
@@ -424,15 +423,18 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._mongo_operation_queue = mongo_operation_queue
         self._cool_down_proc = cool_down_proc
         
-        self._tune_iters = tune_iters
         self._load_time_cache = load_time_cache
-        self._worker_weights = worker_weights
+        self._num_worker_samples = num_worker_samples
         self._perf_metrics = perf_metrics
+        self._stop_tune = stop_tune
+        self._avg_req_time_history = avg_req_time_history
         self._avg_load_time_history = avg_load_time_history
         self._reset(loader, first_iter=True)
         
     def _reset(self, loader, first_iter=False):    
-        super()._reset(loader, first_iter)
+        super()._reset(loader, first_iter)        
+        self._last_iter_time = None
+        self._req_time = []
         
         self._send_idx = 0  # idx of the next task to be sent to workers
         self._rcvd_idx = 0  # idx of the next task to be returned in __next__
@@ -488,42 +490,59 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             self._active_workers.value -= 1
     
     def _reset_tunner(self):
-        self._worker_weights = None
-        self._perf_metrics = defaultdict(float)
+        self._stop_tune = False
+        self._num_worker_samples = np.array(np.array_split(np.arange(1, cpu_count+1), 2))
+        self._perf_metrics = []
         self._load_time_cache = defaultdict(list)  # the latest `num_batches` # of load time
+        self._avg_req_time_history = []
         self._avg_load_time_history = defaultdict(list)
     
     def _tune_worker_num(self):
-        mean = np.mean
+        mean, median = np.mean, np.median
         num_workers = self._active_workers.value
         
-        if self._rcvd_idx == 1 or (self._rcvd_idx % self._tune_freq == 0):
-            if len(self._load_time_cache[num_workers]) == 0:
+        '''
+        # check if environment changed
+        avg_load_time_history is empty when this function is call in the first time,
+        since we need the std of avg_load_time_history, therefore avg_load_time_history
+        must have at least 2 values.
+        '''
+        if len(self._avg_load_time_history[num_workers]) > 1:
+            cond1 = np.abs(mean(self._req_time) - mean(self._avg_req_time_history)) > 3*np.std(self._avg_req_time_history)
+            cond2 = np.abs(mean(self._load_time_cache[num_workers]) - mean(self._avg_load_time_history[num_workers])) > 3*np.std(self._avg_load_time_history[num_workers])        
+            print(mean(self._req_time), mean(self._avg_req_time_history), np.std(self._avg_req_time_history))
+            if cond1 or cond2:
+                print('cond1: {}, cond2: {}'.format(cond1, cond2))
+                print(self._avg_req_time_history)
+                print('------------------------')
+                print(self._avg_load_time_history)
+                self._reset_tunner()
                 return
-            
+        
+        if self._rcvd_idx == 1 or (self._rcvd_idx % self._tune_freq == 0):
+            print(self._num_worker_samples)
+            if len(self._req_time) > 0:  # start from the 2nd batch
+                self._avg_req_time_history.append(mean(self._req_time))
             if len(self._load_time_cache[num_workers]) > 0:
                 self._avg_load_time_history[num_workers].append(mean(self._load_time_cache[num_workers]))
-            
-            # update weights
-            self._perf_metrics[num_workers] = mean(self._load_time_cache[num_workers])
-            if len(self._perf_metrics) == cpu_count:
-                self._worker_weights = softmax(1/np.array(list(self._perf_metrics.values())))
+                        
+            # resample
+            if len(self._perf_metrics) == len(self._num_worker_samples):
+                new_candidates = self._num_worker_samples[np.argsort(self._perf_metrics)[0]]
+                self._num_worker_samples = np.array(np.array_split(new_candidates, min(len(new_candidates), 2)))
+                self._perf_metrics.clear()
+            else:
+                self._perf_metrics.append(mean(self._load_time_cache[num_workers]))
             
             # get the next `num_worker` value to test
-            if self._worker_weights is not None:
-                new_num_workers = np.random.choice(cores, size=1, replace=False, p=self._worker_weights)[0]
-            else:
-                new_num_workers = cores[self._tune_iters]
-            
-            delta = new_num_workers - num_workers
+            next_idx = len(self._perf_metrics) % len(self._num_worker_samples)
+            delta = np.random.choice(self._num_worker_samples[next_idx], size=1, replace=False)[0] - num_workers
             for _ in range(abs(delta)):
                 if delta > 0:
                     self._spawn_worker(worker_id=self._active_workers.value)
                 elif delta < 0:
                     self._pause_worker()
-            
-            if self._perf_metrics[num_workers] is not None:
-                self._tune_iters += 1
+                    
             print('change worker num to: {}'.format(self._active_workers.value))
 
     def _try_put_index(self):    
@@ -622,6 +641,10 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
 
     def _next_data(self):
         start = time.time()
+        if self._rcvd_idx > 0 and self._last_iter_time is not None:
+            if len(self._req_time) > self._tune_freq:
+                self._req_time.pop(0)
+            self._req_time.append(time.time() - self._last_iter_time)
 
         if self._rcvd_idx == 0:                
             # update chunk status to ACTIVE
@@ -718,6 +741,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         
         if self._autoscale_workers:
             self._tune_worker_num()
+        
+        self._last_iter_time = time.time()
             
         return data
         

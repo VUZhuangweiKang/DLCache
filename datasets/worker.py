@@ -292,7 +292,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                 # processing steps.
                 continue
             
-            idx, index, idx_req_time = r
+            idx, index = r
             data: Union[_IterableDatasetStopIteration, ExceptionWrapper]
             
             wn1 = num_workers.value
@@ -318,8 +318,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             wn2 = num_workers.value
             
             _num_workers = None if wn1 != wn2 else wn1
-            load_time = time.time()-idx_req_time
-            data_queue.put((idx, data, _num_workers, load_time))
+            data_queue.put((idx, data, _num_workers))
             del data, idx, index, r  # save memory
     except KeyboardInterrupt:
         # Main process will raise KeyboardInterrupt anyways.
