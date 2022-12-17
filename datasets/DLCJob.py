@@ -1,10 +1,8 @@
 import os
 import json
 import bson
-import math
 import random
 import numpy as np
-from enum import IntEnum
 import time
 from datetime import datetime
 import grpc
@@ -522,6 +520,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             self._load_time_cache[num_workers].clear()
 
         if self._rcvd_idx == 1 or (self._rcvd_idx % self._next_tune_freq == 0):
+            # print(self._worker_weights)
             if len(self._load_time_cache[num_workers]) == 0:
                 return
             
@@ -530,11 +529,13 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             
             # update weights
             if num_workers in self._perf_metrics:
-                self._perf_metrics[num_workers] = (self._perf_metrics[num_workers] + mean(self._load_time_cache[num_workers])) / 2
+                # due to the measurement jitter, we use the alpha to balance historical and the latest performance measurement 
+                alpha = 0.8
+                self._perf_metrics[num_workers] = alpha * self._perf_metrics[num_workers] + (1-alpha) * mean(self._load_time_cache[num_workers])
             else:
                 self._perf_metrics[num_workers] = mean(self._load_time_cache[num_workers])
             if len(self._perf_metrics) == cpu_count:
-                self._worker_weights = softmax( (1/np.array(list(self._perf_metrics.values())))**2 )
+                self._worker_weights = softmax( 1/np.array(list(self._perf_metrics.values())) )
             
             # get the next `num_worker` value to test
             if self._worker_weights is not None:

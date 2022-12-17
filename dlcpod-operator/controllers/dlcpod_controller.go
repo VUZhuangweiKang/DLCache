@@ -418,10 +418,10 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 			Name:         "shmem",
 			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev/shm"}},
 		},
-		{
-			Name:         "runtime",
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}},
-		},
+		// {
+		// 	Name:         "runtime",
+		// 	VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}},
+		// },
 	}
 
 	volumes = append(volumes, spec.Volumes...)
@@ -429,7 +429,7 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		{Name: "secret", MountPath: "/secret"},
 		{Name: "jobsmeta", MountPath: "/jobsmeta"},
 		{Name: "share", MountPath: "/share"},
-		{Name: "runtime", MountPath: "/runtime"},
+		// {Name: "runtime", MountPath: "/runtime"},
 		{Name: "shmem", MountPath: "/dev/shm"},
 	}
 	nodes := &corev1.NodeList{}
