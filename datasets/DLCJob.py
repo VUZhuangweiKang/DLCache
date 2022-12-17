@@ -520,7 +520,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             self._load_time_cache[num_workers].clear()
 
         if self._rcvd_idx == 1 or (self._rcvd_idx % self._next_tune_freq == 0):
-            # print(self._worker_weights)
+            print(self._worker_weights)
             if len(self._load_time_cache[num_workers]) == 0:
                 return
             
@@ -535,7 +535,10 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             else:
                 self._perf_metrics[num_workers] = mean(self._load_time_cache[num_workers])
             if len(self._perf_metrics) == cpu_count:
-                self._worker_weights = softmax( 1/np.array(list(self._perf_metrics.values())) )
+                # self._worker_weights = softmax( 1/np.array(list(self._perf_metrics.values())) )
+                vals = 1/np.array(list(self._perf_metrics.values()))
+                vals = vals ** 2
+                self._worker_weights = vals / np.sum(vals)
             
             # get the next `num_worker` value to test
             if self._worker_weights is not None:

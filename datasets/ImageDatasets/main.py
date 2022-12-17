@@ -80,6 +80,8 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'multi node data parallel training')
 parser.add_argument('--sim-compute-time', type=float, default=0.01,
                     help='simulated computation time per batch in second')
+parser.add_argument('--autoscale-dataloader', action='store_true', default=False,
+                    help='tune the number of workers in the dataloader')
 
 best_acc1 = 0
 
@@ -240,7 +242,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     t = time.time()
     val_loader = DLCJobDataLoader(
-        val_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
+        val_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True, sampler=val_sampler, autoscale_workers=args.autoscale_dataloader)
     
     if args.evaluate:
         validate(val_loader, model, criterion, args)
@@ -253,7 +255,7 @@ def main_worker(gpu, ngpus_per_node, args):
             train_sampler = None
         train_loader = DLCJobDataLoader(
             train_dataset, batch_size=args.batch_size,
-            num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+            num_workers=args.workers, pin_memory=True, sampler=train_sampler, autoscale_workers=args.autoscale_dataloader)
     
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
