@@ -299,9 +299,12 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             if init_exception is not None:
                 data = init_exception
                 init_exception = None
+                dur = None
             else:
                 try:
+                    t = time.time()
                     data = fetcher.fetch(index)
+                    dur = time.time() - t
                 except Exception as e:
                     if isinstance(e, StopIteration) and dataset_kind == _DatasetKind.Iterable:
                         data = _IterableDatasetStopIteration(worker_id)
@@ -315,10 +318,12 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                         # See NOTE [ Python Traceback Reference Cycle Problem ]
                         data = ExceptionWrapper(
                             where="in DataLoader worker process {}".format(worker_id))
+                    dur = None
+                    
             wn2 = num_workers.value
             
             _num_workers = None if wn1 != wn2 else wn1
-            data_queue.put((idx, data, _num_workers))
+            data_queue.put((idx, data, _num_workers, dur))
             del data, idx, index, r  # save memory
     except KeyboardInterrupt:
         # Main process will raise KeyboardInterrupt anyways.

@@ -1,7 +1,6 @@
 import os
 import json
 import bson
-import math
 import random
 import numpy as np
 import time
@@ -227,8 +226,22 @@ class DLCJobDataLoader(DataLoader):
     
     def init_tunner(self):
         self.tune_iters = 0
-        self.realtime_load_perf = defaultdict(list)
-        self.history_load_perf = defaultdict(float)
+        
+        self.tune_freqs = []
+        k = 2*cpu_count
+        w = cpu_count
+        while w > 0:
+            self.tune_freqs.extend([k] * w)
+            k *= 2
+            w = w//2
+        
+        self.tune_freqs = itertools.cycle(self.tune_freqs)
+        self.next_tune_freq = next(self.tune_freqs)
+        self.batch_time_cache = defaultdict(list)  # the latest `num_batches` # of load time
+        self.worker_weights = None
+        self.perf_metrics = defaultdict(float)
+        self.avg_batch_time_history = defaultdict(list)
+        self.avg_req_time_history = []
         
     def async_mongo_operator(self):
         try:
@@ -266,15 +279,19 @@ class DLCJobDataLoader(DataLoader):
         
         if self.autoscale_workers and self._iterator is not None:
             self.tune_iters = self._iterator._tune_iters
-            self.realtime_load_perf = self._iterator._realtime_load_perf
-            self.history_load_perf = self._iterator._history_load_perf
+            self.batch_time_cache = self._iterator._batch_time_cache
+            self.worker_weights = self._iterator._worker_weights
+            self.perf_metrics = self._iterator._perf_metrics
+            self.avg_batch_time_history = self._iterator._avg_batch_time_history
             num_workers = self._iterator._active_workers.value
+            next_tune_freq = self._iterator._next_tune_freq
         else:
             num_workers = self.num_workers
+            next_tune_freq = self.next_tune_freq
             
         self._iterator = _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.cool_down_proc, 
-                                               self.mongo_operation_queue, self.autoscale_workers, self.realtime_load_perf, 
-                                               self.history_load_perf, self.tune_iters)
+                                               self.mongo_operation_queue, self.autoscale_workers, self.batch_time_cache, self.worker_weights, 
+                                               self.perf_metrics, self.avg_batch_time_history, self.tune_iters, self.tune_freqs, next_tune_freq)
 
         return self._iterator
         
@@ -342,14 +359,17 @@ class StatefulCycleIterator:
 class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
     def __init__(self, loader, num_batches, opt_num_workers,
                  cool_down_proc: multiprocessing.Process = None, mongo_operation_queue: queue.Queue = None, autoscale_workers: bool = True,
-                 realtime_load_perf: defaultdict = None, history_load_perf: np.array = None, tune_iters: int = None):
+                 batch_time_cache: defaultdict = None, worker_weights: np.array = None, perf_metrics: np.array = None,
+                 avg_batch_time_history: np.array = None, tune_iters: int = None, tune_freqs: itertools.cycle = None,
+                 next_tune_freq: int = None):
         super(_DLCJobDataLoaderIter, self).__init__(loader)
         
         self._num_batches = num_batches
         self._num_workers = opt_num_workers
         self._autoscale_workers = autoscale_workers
         self._prefetch_factor = loader.prefetch_factor
-        self._tune_freq = cpu_count * self._prefetch_factor
+        self._tune_freqs = tune_freqs
+        self._next_tune_freq = next_tune_freq
         self.lazy = self._dataset.lazy
 
         if loader.multiprocessing_context is None:
@@ -424,8 +444,10 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._cool_down_proc = cool_down_proc
         
         self._tune_iters = tune_iters
-        self._realtime_load_perf = realtime_load_perf
-        self._history_load_perf = history_load_perf
+        self._batch_time_cache = batch_time_cache
+        self._worker_weights = worker_weights
+        self._perf_metrics = perf_metrics
+        self._avg_batch_time_history = avg_batch_time_history
         self._reset(loader, first_iter=True)
         
     def _reset(self, loader, first_iter=False):    
@@ -433,7 +455,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         
         self._last_iter_time = None
         self._req_time = []
-        self._fetch_time = []
+        self._load_time = []
         
         self._send_idx = 0  # idx of the next task to be sent to workers
         self._rcvd_idx = 0  # idx of the next task to be returned in __next__
@@ -489,60 +511,53 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             self._active_workers.value -= 1
     
     def _reset_tunner(self):
-        self._history_load_perf = defaultdict(float)
-        self._realtime_load_perf = defaultdict(list)  # the latest `num_batches` # of load time
+        self._worker_weights = None
+        self._perf_metrics = defaultdict(float)
+        self._batch_time_cache = defaultdict(list)  # the latest `num_batches` # of load time
+        self._avg_batch_time_history = defaultdict(list)
     
     def _tune_worker_num(self):
         mean, median = np.mean, np.median
         num_workers = self._active_workers.value
-        
+            
         # buffer `num_batches` load time measurements
-        if len(self._realtime_load_perf[num_workers]) > self._tune_freq:
-            self._realtime_load_perf[num_workers].clear()
+        if len(self._batch_time_cache[num_workers]) > self._next_tune_freq:
+            self._batch_time_cache[num_workers].clear()
 
-        if self._rcvd_idx == 1 or (self._rcvd_idx % self._tune_freq == 0):
-            
-            # get rid of inacurrant measurements
-            if self._realtime_load_perf[num_workers] is None:
+        if self._rcvd_idx == 1 or (self._rcvd_idx % self._next_tune_freq == 0):
+            opt_num_workers = median(self._load_time) / median(self._req_time)
+            print('ideal num workers:', opt_num_workers)
+        
+            if len(self._batch_time_cache[num_workers]) == 0:
                 return
-            
-            # estimate required workers by comparing req and load time
-            if len(self._fetch_time) > 0 and len(self._req_time) > 0:
-                est_num_workers = math.ceil(median(self._fetch_time) / median(self._req_time))
-            else:
-                est_num_workers = np.inf
-            
-            '''
-            update worker weights,
-            we omit the first batch to avoid data reloading time spent in the reset function
-            '''
-            if self._rcvd_idx > 1:
-                if num_workers in self._history_load_perf:
-                    '''
-                    due to the measurement jitter, we use the alpha to balance historical and 
-                    the latest performance measurement. 
-                    '''
-                    alpha = 0.4
-                    self._history_load_perf[num_workers] = alpha * self._history_load_perf[num_workers] + (1-alpha) * mean(self._realtime_load_perf[num_workers])
-                else:
-                    self._history_load_perf[num_workers] = mean(self._realtime_load_perf[num_workers])
 
-            # print(self._history_load_perf)
-            if est_num_workers == np.inf:
-                new_num_workers = num_workers
-            elif est_num_workers > cpu_count:
-                # we assume the load time follows a normal distribution
-                loc, scale = math.ceil(3*cpu_count/4), math.ceil(cpu_count/4)
-                new_num_workers = min(math.ceil(np.random.normal(loc=loc, scale=scale, size=1)[0]), cpu_count)
-                new_num_workers = max(1, new_num_workers)
-                
-                # if the worker number has been sampled, use worker number with min load time
-                if new_num_workers in self._history_load_perf:
-                    new_num_workers = sorted(self._history_load_perf.items(), key=lambda item: item[1])[0][0]
-            else:
-                new_num_workers = est_num_workers
+            if len(self._batch_time_cache[num_workers]) > 0:
+                self._avg_batch_time_history[num_workers].append(mean(self._batch_time_cache[num_workers]))
             
-            # commit the tunning action
+            # update weights
+            if num_workers in self._perf_metrics:
+                # due to the measurement jitter, we use the alpha to balance historical and the latest performance measurement 
+                alpha = 0.2
+                self._perf_metrics[num_workers] = alpha * self._perf_metrics[num_workers] + (1-alpha) * mean(self._batch_time_cache[num_workers])
+            else:
+                self._perf_metrics[num_workers] = mean(self._batch_time_cache[num_workers])
+            if len(self._perf_metrics) == cpu_count:
+                # self._worker_weights = softmax( 1/np.array(list(self._perf_metrics.values())) )
+                
+                vals = np.array(list(self._perf_metrics.values()))
+                print(vals)
+                vals = 1/vals ** 2
+                min_val, max_val = np.min(vals), np.max(vals)
+                vals = (vals-min_val) / (max_val-min_val)
+                vals = vals / np.arange(1, cpu_count+1)
+                self._worker_weights = vals / np.sum(vals)
+            
+            # get the next `num_worker` value to test
+            if self._worker_weights is not None:
+                new_num_workers = np.random.choice(cores, size=1, replace=False, p=self._worker_weights)[0]
+            else:
+                new_num_workers = cores[self._tune_iters]
+            
             delta = new_num_workers - num_workers
             for _ in range(abs(delta)):
                 if delta > 0:
@@ -550,7 +565,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 elif delta < 0:
                     self._pause_worker()
             
-            # preload data in the new workers
             if delta > 0:
                 pos = self._worker_queue_idx_cycle.get_ptr()
                 for _ in range(self._prefetch_factor):
@@ -558,8 +572,9 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                     for _ in range(delta):
                         self._try_put_index()
                     
-            if self._history_load_perf[num_workers] is not None:
+            if self._perf_metrics[num_workers] is not None:
                 self._tune_iters += 1
+            self._next_tune_freq = next(self._tune_freqs)
             print('change worker num to: {}'.format(self._active_workers.value))
 
     def _try_put_index(self):    
@@ -671,7 +686,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                                             }))
 
         if self._last_iter_time is not None:
-            if len(self._req_time) == self._tune_freq:
+            if len(self._req_time) == self._next_tune_freq:
                 self._req_time.pop(0)
             self._req_time.append(time.time() - self._last_iter_time)
             
@@ -750,17 +765,15 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 
         # ensure the `num_workers` is consensus while reading the batch
         # we skip the first batch because the reset function needs to prefetch data synchronously
-        if self._rcvd_idx > 1:
-            if active_workers is not None:
-                self._realtime_load_perf[active_workers].append(time.time() - start)
-                
-            if load_time is not None:
-                if len(self._fetch_time) > self._tune_freq:
-                    self._fetch_time.pop(0)
-                self._fetch_time.append(load_time)
-            
-            if self._autoscale_workers:
-                self._tune_worker_num()
+        if active_workers is not None:
+            self._batch_time_cache[active_workers].append(time.time() - start)
+        if load_time is not None:
+            if len(self._load_time) > self._next_tune_freq:
+                self._load_time.pop(0)
+            self._load_time.append(load_time)
+        
+        if self._autoscale_workers:
+            self._tune_worker_num()
         
         self._last_iter_time = time.time()
         return data
