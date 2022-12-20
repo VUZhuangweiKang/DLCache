@@ -27,8 +27,7 @@ from typing import (
 )
 from collections import defaultdict
 import itertools
-import zmq
-import shutil
+from scipy.special import softmax
 import torch
 import torch.multiprocessing as multiprocessing
 from torch.utils.data import DataLoader, Sampler
@@ -37,13 +36,20 @@ from torch.utils.data import _utils
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 import torch.utils.data._utils.worker as worker
 import torch.utils.data._utils.signal_handling as signal_handling
+from pymongo.mongo_client import MongoClient
 from utils import *
 warnings.filterwarnings("ignore")
 
+COOL_DOWN_SEC = 600
 cpu_count = multiprocessing.cpu_count()
 cores = np.arange(1, cpu_count+1)
-init_channel = 'ipc:///share/init.ipc'
-ipc_channel = 'ipc:///share/runtime.ipc'
+class CHUNK_STATUS:
+    PREPARE = 0
+    ACTIVE = 1
+    PENDING = 2
+    COOL_DOWN = 3
+    INACTIVE = 4
+
 
 T_co = TypeVar('T_co', covariant=True)
 
@@ -76,19 +82,26 @@ class DLCJobDataset(Generic[T_co]):
         while not os.path.exists(jobinfo): pass
         with open(jobinfo, 'rb') as f:
             job_meta = json.load(f)
+
         self.lazy = job_meta['qos']['LazyLoading']
         
-        self.samples_manifest = self.read_samples_manifest()
-        self.targets_manifest = self.read_targets_manifest()
-        self.samples_nfs_paths = self.get_samples_nfs_paths()
-        self.targets_nfs_paths = self.get_targets_nfs_paths()
+        # manifest files for mapping object path from cloud to local
+        self.__samples_manifest = {}
+        self.__targets_manifest = {}
+
+        mongo_client = MongoClient(job_meta['mongoUri'])
+        self.db = mongo_client.Cacher
+        cursor = self.db.Job.find_one({"Meta.JobId": job_meta['jobId']})
+        self.job_info = {"ChunkETags": cursor["ChunkETags"], "Meta": cursor["Meta"]}
         
+        self.__build_manifests()
         self.num_partitions = 1 if self.lazy else len(self.samples_manifest)
+        
         self._load_partition_data()
         self._miss_queue = queue.Queue()
         self._handle_miss_thread = threading.Thread(target=self._handle_miss, daemon=True)
         self._handle_miss_thread.start()
-    
+
     def _handle_miss(self):
         # grpc consumes high memory
         manager_uri = "dlcpod-manager:50051"
@@ -99,26 +112,50 @@ class DLCJobDataset(Generic[T_co]):
                 stub = pb_grpc.DataMissStub(channel)
                 stub.call(pb.DataMissRequest(cred=cred, etag=miss_etag))
             del cred, stub, miss_etag
-            
-    # manifest files for mapping object path from cloud to local
-    def read_samples_manifest(self):
-        with open('/share/{}_samples_manifests.json'.format(self.dataset_type), 'r') as f:
-            return json.load(f)
-    def read_targets_manifest(self):
-        p = '/share/{}_targets_manifests.json'.format(self.dataset_type)
-        if os.path.exists(p):
-            with open(p, 'r') as f:
-                return json.load(f)
-        else:
-            return {}
-    def get_samples_nfs_paths(self):
-        paths = list(self.samples_manifest.values())
-        paths = [path.replace('/runtime', '') for path in paths]
-        return paths
-    def get_targets_nfs_paths(self):
-        paths = list(self.targets_manifest.values())
-        paths = [path.replace('/runtime', '') for path in paths]
-        return paths
+    
+    @property
+    def samples_manifest(self):
+        return self.__samples_manifest
+    
+    @property
+    def targets_manifest(self):
+        return self.__targets_manifest
+    
+    def __build_manifests(self):
+        """Load all chunks (MongoDB query result) of the given dataset. 
+        
+        In the LazyLoading mode, there is only 1 group because no memory pressure.
+        Otherwise, we group chunks to make them fit the MaxPartMill constraint.
+
+        Returns:
+            None: initialize the self._sample_chunks and self._target_chunks
+        """
+        def load(etags):
+            data = {}
+            if etags:
+                chunks_iter = self.db.Datasets.aggregate([
+                    {"$match": {"ChunkETag": {"$in": etags}}},
+                    {"$project": {"Key": 1, "Location": 1, "ChunkETag": 1, "_id": 0}}
+                ])
+                for chunk in chunks_iter:
+                    cloud_path, loc, chunk_etag = chunk['Key'], chunk["Location"], chunk['ChunkETag']
+                    local_path = '/{}/{}'.format(loc, chunk_etag)
+                    # decompressed folder, so key has the .tar.gz extension
+                    if os.path.isdir(local_path):
+                        # We assume data won't be immediately deleted after being downloaded by Manager.
+                        for root, dirs, files in os.walk(local_path):
+                            for name in files:
+                                p = os.path.join(root, name)
+                                dummy_cloud_path = cloud_path + p.replace(local_path, '')
+                                data[dummy_cloud_path] = p
+                    else:
+                        data[cloud_path] = local_path
+            return data
+
+        chunk_etags = self.job_info['ChunkETags'][self.dataset_type]
+        self.__samples_manifest = load(chunk_etags['samples'])
+        self.__targets_manifest = load(chunk_etags['targets'])
+        self.chunk_etags = [*chunk_etags['samples'], *chunk_etags["targets"]]
     
     def _load_partition_data(self, partition_idx=0):
         if self.lazy:
@@ -151,16 +188,10 @@ class DLCJobDataset(Generic[T_co]):
             try:
                 return self.__getItem__(index)
             except FileNotFoundError as ex:
-                nfs_path = self.samples_nfs_paths[index]
-                print(nfs_path)
-                if os.path.exists(nfs_path):
-                    shutil.copyfile(nfs_path, '/runtime')  # NFS --> tmpfs
-                    return self.__getItem__(index)
-                else:
-                    miss_etag = ex.filename.split('/')[-1]
-                    self._miss_queue.put(miss_etag)
-                    sub_idx = random.randint(index+1, len(self) - 1)
-                    return self.__getItem__(sub_idx)
+                miss_etag = ex.filename.split('/')[-1]
+                self._miss_queue.put(miss_etag)
+                sub_idx = random.randint(index+1, len(self) - 1)
+                return self.__getItem__(sub_idx)
         else:
             return self.__getItem__(index)
     
@@ -188,22 +219,51 @@ class DLCJobDataLoader(DataLoader):
         
         self.check_worker_number_rationality()
         self.num_batches = len(self)
+        self.mongo_operation_queue = queue.Queue()
+        self.cool_down_proc = None
         self.autoscale_workers = autoscale_workers
+        threading.Thread(target=self.async_mongo_operator, daemon=True).start()
         self.init_tunner()
-        
-        context = zmq.Context()
-        self.socket_req = context.socket(zmq.REQ)
-        self.socket_req.connect(init_channel)
-
-        self.socket_pub = context.socket(zmq.PUB)
-        self.socket_pub.connect(ipc_channel)
     
     def init_tunner(self):
         self.tune_iters = 0
         self.realtime_load_perf = defaultdict(list)
         self.history_load_perf = defaultdict(float)
-
-    def _get_iterator(self) -> '_BaseDataLoaderIter':        
+        
+    def async_mongo_operator(self):
+        try:
+            while True:
+                collection, func, opertion = self.mongo_operation_queue.get(block=True)
+                if func == 'update_many':
+                    self.dataset.db[collection].update_many(**opertion)
+                del collection, func, opertion
+        except KeyboardInterrupt:
+            pass
+           
+    def expire_chunks(self):
+        time.sleep(COOL_DOWN_SEC)   
+        self.mongo_operation_queue.put(("Datasets", "update_many", 
+                                         {
+                                             "filter": {
+                                                 "ChunkETag": {"$in": self.dataset.chunk_etags},
+                                                 "Status.code": CHUNK_STATUS.COOL_DOWN
+                                             },
+                                             "update": {
+                                                 "$set":{
+                                                     "Status.code": CHUNK_STATUS.INACTIVE,
+                                                     "Status.active_count": 0
+                                                 }
+                                             }
+                                         }))
+        
+    def _get_iterator(self) -> '_BaseDataLoaderIter':
+        if self.cool_down_proc is not None:
+            if self.cool_down_proc.is_alive():
+                self.cool_down_proc.terminate()
+                self.cool_down_proc.join()
+            del self.cool_down_proc
+        self.cool_down_proc = multiprocessing.Process(target=self.expire_chunks)
+        
         if self.autoscale_workers and self._iterator is not None:
             self.tune_iters = self._iterator._tune_iters
             self.realtime_load_perf = self._iterator._realtime_load_perf
@@ -212,8 +272,9 @@ class DLCJobDataLoader(DataLoader):
         else:
             num_workers = self.num_workers
             
-        self._iterator = _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.autoscale_workers, self.realtime_load_perf, 
-                                               self.history_load_perf, self.tune_iters, self.socket_req, self.socket_pub)
+        self._iterator = _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.cool_down_proc, 
+                                               self.mongo_operation_queue, self.autoscale_workers, self.realtime_load_perf, 
+                                               self.history_load_perf, self.tune_iters)
 
         return self._iterator
         
@@ -279,9 +340,9 @@ class StatefulCycleIterator:
         
         
 class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
-    def __init__(self, loader, num_batches, opt_num_workers, autoscale_workers: bool = True, 
-                 realtime_load_perf: defaultdict = None, history_load_perf: np.array = None, tune_iters: int = None, 
-                 socket_req: zmq.Socket = None, socket_pub: zmq.Socket = None):
+    def __init__(self, loader, num_batches, opt_num_workers,
+                 cool_down_proc: multiprocessing.Process = None, mongo_operation_queue: queue.Queue = None, autoscale_workers: bool = True,
+                 realtime_load_perf: defaultdict = None, history_load_perf: np.array = None, tune_iters: int = None):
         super(_DLCJobDataLoaderIter, self).__init__(loader)
         
         self._num_batches = num_batches
@@ -290,25 +351,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._prefetch_factor = loader.prefetch_factor
         self._tune_freq = cpu_count * self._prefetch_factor
         self.lazy = self._dataset.lazy
-        
-        # sockets for communication with client
-        self._socket_req = socket_req
-        self._socket_pub = socket_pub
-        
-        # send batch sampler indexes to client
-        # instruct client to init Cache
-        if self.lazy:
-            t = time.time()
-            sampler_iter = iter(self._index_sampler)
-            batches = [batch for batch in sampler_iter]
-            msg = {
-                "paths": batches,
-                "prefetch_factor": self._prefetch_factor
-            }
-            self._socket_req.send_multipart([b"init", self._dataset.dataset_type.encode('utf-8'), json.dumps(msg).encode('utf-8')])
-            self._socket_req.recv()
-            print('init: {}'.format(time.time()-t))
-        
+
         if loader.multiprocessing_context is None:
             multiprocessing_context = multiprocessing
         else:
@@ -376,6 +419,9 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         signal_handling._set_worker_pids(id(self), tuple(w.pid for w in self._workers))  # type: ignore[misc]
         signal_handling._set_SIGCHLD_handler()
         self._worker_pids_set = True
+        
+        self._mongo_operation_queue = mongo_operation_queue
+        self._cool_down_proc = cool_down_proc
         
         self._tune_iters = tune_iters
         self._realtime_load_perf = realtime_load_perf
@@ -612,13 +658,22 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
 
     def _next_data(self):
         start = time.time()
-        
+        if self._rcvd_idx == 0:
+            # update chunk status to ACTIVE
+            now = datetime.utcnow().timestamp()
+            self._mongo_operation_queue.put(('Datasets', 'update_many', 
+                                            {
+                                                "filter": {"ChunkETag": {"$in": self._dataset.chunk_etags}}, 
+                                                "update": {
+                                                    "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
+                                                    "$inc": {"Status.active_count": 1},
+                                                    "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}}
+                                            }))
+
         if self._last_iter_time is not None:
             if len(self._req_time) == self._tune_freq:
                 self._req_time.pop(0)
             self._req_time.append(time.time() - self._last_iter_time)
-            msg = {'send_idx': self._send_idx, 'rcvd_idx': self._rcvd_idx, 'active_workers': self._active_workers.value, 'req_time': np.mean(self._req_time)}
-            self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), json.dumps(msg).encode('utf-8')])
             
         while True:
             try:
@@ -631,7 +686,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                     self._rcvd_idx += 1
                 else:
                     if not self._persistent_workers:
-                        self._socket_pub.send_multipart([b"expireChunk", self._dataset.dataset_type.encode('utf-8'), b""])
                         self._shutdown_workers()
                     raise StopIteration
 
@@ -658,8 +712,37 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 if self._partition_idx == self._dataset.num_partitions-1:
                     self._partition_idx = 0
                     
+                    # update chunk status to COOL_DOWN
+                    now = datetime.utcnow().timestamp()
+                    self._mongo_operation_queue.put(("Datasets", "update_many", 
+                                                    {
+                                                        "filter": {
+                                                            "ChunkETag": {"$in": self._dataset.chunk_etags},
+                                                            "Status.active_count": 1
+                                                        },
+                                                        "update": {"$set": {
+                                                            "Status.code": CHUNK_STATUS.INACTIVE,
+                                                            "Status.active_count": 0,
+                                                            "Status.cool_down_init": bson.timestamp.Timestamp(int(now), inc=1)}
+                                                        }
+                                                    }))
+                    self._mongo_operation_queue.put(("Datasets", "update_many", 
+                                                    {
+                                                        "filter": {
+                                                            "ChunkETag": {"$in": self._dataset.chunk_etags},
+                                                            "Status.active_count": {"$gt": 1}
+                                                        },
+                                                        "update": {
+                                                            "$inc": {"Status.active_count": -1},
+                                                            "$set": {
+                                                                "Status.code": CHUNK_STATUS.INACTIVE,
+                                                                "Status.cool_down_init": bson.timestamp.Timestamp(int(now), inc=1)
+                                                            }
+                                                        }
+                                                    }))
+                    self._cool_down_proc.start()
                     raise StopIteration
-                else: 
+                else:                    
                     # data in the current part have been consumed    
                     self._partition_idx += 1
                     self._dataset._load_partition_data(self._partition_idx)
@@ -679,7 +762,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             if self._autoscale_workers:
                 self._tune_worker_num()
         
-        self._socket_pub.send_multipart([b"releaseCache", self._dataset.dataset_type.encode('utf-8'), str(self._rcvd_idx-1).encode('utf-8')])
         self._last_iter_time = time.time()
         return data
         

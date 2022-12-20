@@ -557,41 +557,41 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             chunks = []
             node_seq = request.nodesequence
 
-            futures = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-                for l1 in ['train', 'validation', 'test']:
-                    raw_chunks  = []
-                    for l2 in ['samples', 'targets', 'manifests']:
-                        raws = load_chunks(l1, l2)
-                        if not raws:
-                            dataset_etags[l1][l2] = []
-                            continue
-                        else:
-                            dataset_etags[l1][l2] = [chunk['ChunkETag'] for chunk in raws]
-                            for i in range(len(raws)):
-                                raws[i]['Category'] = l1
-                                if raws[i]["Exist"]:
-                                    if raws[i]["Status"]["code"] == CHUNK_STATUS.ACTIVE:
-                                        raws[i]["Status"]["active_count"] += 1
-                                    else:
-                                        raws[i]["Status"]["code"] = CHUNK_STATUS.PENDING
-                                else:
-                                    raws[i]['Status'] = {"code": CHUNK_STATUS.PENDING, "active_count": 1}
-                            raw_chunks.extend(raws)
+            # futures = []
+            # with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+            #     for l1 in ['train', 'validation', 'test']:
+            #         raw_chunks  = []
+            #         for l2 in ['samples', 'targets', 'manifests']:
+            #             raws = load_chunks(l1, l2)
+            #             if not raws:
+            #                 dataset_etags[l1][l2] = []
+            #                 continue
+            #             else:
+            #                 dataset_etags[l1][l2] = [chunk['ChunkETag'] for chunk in raws]
+            #                 for i in range(len(raws)):
+            #                     raws[i]['Category'] = l1
+            #                     if raws[i]["Exist"]:
+            #                         if raws[i]["Status"]["code"] == CHUNK_STATUS.ACTIVE:
+            #                             raws[i]["Status"]["active_count"] += 1
+            #                         else:
+            #                             raws[i]["Status"]["code"] = CHUNK_STATUS.PENDING
+            #                     else:
+            #                         raws[i]['Status'] = {"code": CHUNK_STATUS.PENDING, "active_count": 1}
+            #                 raw_chunks.extend(raws)
 
-                    # try to acquire resources for the job
-                    if not self.manager.acquire_resources(raw_chunks, node_seq):
-                        return pb.RegisterResponse(rc=pb.RC.FAILED, regerr=pb.RegisterError(error="failed to register the jod, disk resource is under pressure"))
+            #         # try to acquire resources for the job
+            #         if not self.manager.acquire_resources(raw_chunks, node_seq):
+            #             return pb.RegisterResponse(rc=pb.RC.FAILED, regerr=pb.RegisterError(error="failed to register the jod, disk resource is under pressure"))
 
-                    # downloading ...
-                    for chunk in raw_chunks:
-                        if not chunk['Exist']:
-                            futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, node_seq))
-                        elif chunk['Location'] != node_seq[0]:
-                            # move the data to a node in nodesequence
-                            futures.append(executor.submit(self.manager.move_chunk, chunk, node_seq))
-            for future in concurrent.futures.as_completed(futures):
-                chunks.extend(future.result())
+            #         # downloading ...
+            #         for chunk in raw_chunks:
+            #             if not chunk['Exist']:
+            #                 futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, node_seq))
+            #             elif chunk['Location'] != node_seq[0]:
+            #                 # move the data to a node in nodesequence
+            #                 futures.append(executor.submit(self.manager.move_chunk, chunk, node_seq))
+            # for future in concurrent.futures.as_completed(futures):
+            #     chunks.extend(future.result())
 
             # write job_col and dataset_col collections
             jobInfo = {
