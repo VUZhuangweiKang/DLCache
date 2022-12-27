@@ -13,6 +13,7 @@ class ImageDataset(DLCJobDataset):
         cls_names = list(set([path.split('/')[-2] for path in sample_files]))
         cls_idx = {cls_names[i]: i for i in range(len(cls_names))}    
         for image in sample_files:
+            print(self.samples_manifest[image])
             self.images.append(self.samples_manifest[image])
             self.labels.append(cls_idx[image.split('/')[-2]])
 

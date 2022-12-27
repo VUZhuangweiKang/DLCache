@@ -28,7 +28,6 @@ from typing import (
 from collections import defaultdict
 import itertools
 import zmq
-import shutil
 import torch
 import torch.multiprocessing as multiprocessing
 from torch.utils.data import DataLoader, Sampler
@@ -85,20 +84,20 @@ class DLCJobDataset(Generic[T_co]):
         
         self.num_partitions = 1 if self.lazy else len(self.samples_manifest)
         self._load_partition_data()
-        self._miss_queue = queue.Queue()
-        self._handle_miss_thread = threading.Thread(target=self._handle_miss, daemon=True)
-        self._handle_miss_thread.start()
+        self._miss_queue = multiprocessing.Queue()
+        self._handle_miss_proc = multiprocessing.Process(target=self._handle_miss, daemon=True)
+        self._handle_miss_proc.start()
+        self.cache_miss_hist = [0, 0]
     
     def _handle_miss(self):
         # grpc consumes high memory
         manager_uri = "dlcpod-manager:50051"
+        channel = grpc.insecure_channel(manager_uri)
+        cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
+        stub = pb_grpc.DataMissStub(channel)
         while True:
             miss_etag = self._miss_queue.get(block=True)
-            with grpc.insecure_channel(manager_uri) as channel:
-                cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
-                stub = pb_grpc.DataMissStub(channel)
-                stub.call(pb.DataMissRequest(cred=cred, etag=miss_etag))
-            del cred, stub, miss_etag
+            stub.call(pb.DataMissRequest(cred=cred, etag=miss_etag))
             
     # manifest files for mapping object path from cloud to local
     def read_samples_manifest(self):
@@ -147,20 +146,31 @@ class DLCJobDataset(Generic[T_co]):
         raise NotImplementedError
             
     def __getitem__(self, index: int):
+        # print(self.cache_miss_hist)
         if self.lazy:
-            try:
-                return self.__getItem__(index)
-            except FileNotFoundError as ex:
-                nfs_path = self.samples_nfs_paths[index]
-                print(nfs_path)
-                if os.path.exists(nfs_path):
-                    shutil.copyfile(nfs_path, '/runtime')  # NFS --> tmpfs
-                    return self.__getItem__(index)
-                else:
-                    miss_etag = ex.filename.split('/')[-1]
-                    self._miss_queue.put(miss_etag)
-                    sub_idx = random.randint(index+1, len(self) - 1)
-                    return self.__getItem__(sub_idx)
+            while True:
+                try:
+                    val = self.__getItem__(index)
+                    self.cache_miss_hist[0] += 1
+                    return val
+                except FileNotFoundError as ex:
+                    nfs_path = self.samples_nfs_paths[index]
+                    tmpfs_path = '/runtime{}'.format(nfs_path)
+                    print('miss file {}'.format(tmpfs_path))
+                    if os.path.exists(nfs_path):
+                        self.cache_miss_hist[1] += 1
+                        # os.system('cp {} {}'.format(nfs_path, '/runtime{}'.format(nfs_path))) # NFS --> tmpfs
+                        shutil.copyfile(nfs_path, tmpfs_path)
+                        # while os.stat(nfs_path).st_size != os.stat(tmpfs_path).st_size: pass
+                        return self.__getitem__(index)
+                    else:
+                        print(nfs_path)
+                        miss_etag = ex.filename.split('/')[-1]
+                        self._miss_queue.put(miss_etag)
+                        sub_idx = random.randint(index+1, len(self) - 1)
+                        return self.__getitem__(sub_idx)
+                except:
+                    continue
         else:
             return self.__getItem__(index)
     
@@ -295,20 +305,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._socket_req = socket_req
         self._socket_pub = socket_pub
         
-        # send batch sampler indexes to client
-        # instruct client to init Cache
-        if self.lazy:
-            t = time.time()
-            sampler_iter = iter(self._index_sampler)
-            batches = [batch for batch in sampler_iter]
-            msg = {
-                "paths": batches,
-                "prefetch_factor": self._prefetch_factor
-            }
-            self._socket_req.send_multipart([b"init", self._dataset.dataset_type.encode('utf-8'), json.dumps(msg).encode('utf-8')])
-            self._socket_req.recv()
-            print('init: {}'.format(time.time()-t))
-        
         if loader.multiprocessing_context is None:
             multiprocessing_context = multiprocessing
         else:
@@ -336,6 +332,21 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         for i in range(self._num_workers):
             self._spawn_worker(i)
 
+        # send batch sampler indexes to client
+        # instruct client to init Cache
+        if self.lazy:
+            t = time.time()
+            sampler_iter = iter(self._index_sampler)
+            batches = [batch for batch in sampler_iter]
+            msg = {
+                "paths": batches,
+                "active_workers": self._active_workers.value,
+                "prefetch_factor": self._prefetch_factor
+            }
+            self._socket_req.send_multipart([b"init", self._dataset.dataset_type.encode('utf-8'), json.dumps(msg).encode('utf-8')])
+            self._socket_req.recv()
+            print('init: {}'.format(time.time()-t))
+            
         if self._pin_memory:
             self._pin_memory_thread_done_event = threading.Event()
 
@@ -481,7 +492,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 else:
                     self._history_load_perf[num_workers] = mean(self._realtime_load_perf[num_workers])
 
-            # print(self._history_load_perf)
             if est_num_workers == np.inf:
                 new_num_workers = num_workers
             elif est_num_workers > cpu_count:
@@ -617,9 +627,13 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             if len(self._req_time) == self._tune_freq:
                 self._req_time.pop(0)
             self._req_time.append(time.time() - self._last_iter_time)
-            msg = {'send_idx': self._send_idx, 'rcvd_idx': self._rcvd_idx, 'active_workers': self._active_workers.value, 'req_time': np.mean(self._req_time)}
-            self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), json.dumps(msg).encode('utf-8')])
-            
+
+        '''
+        fetch_time would be np.nan in the first iteration
+        '''
+        msg = {'send_idx': self._send_idx, 'rcvd_idx': self._rcvd_idx, 'active_workers': self._active_workers.value, 'fetch_time': np.mean(self._fetch_time)}
+        self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), json.dumps(msg).encode('utf-8')])
+        
         while True:
             try:
                 while self._rcvd_idx < self._send_idx:
@@ -638,17 +652,17 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 # Now `self._rcvd_idx` is the batch index we want to fetch
                 # Check if the next sample has already been generated
                 if len(self._reorder_dict[self._rcvd_idx]) == 2:
-                    data, active_workers, load_time = self._reorder_dict.pop(self._rcvd_idx)[1]
+                    data, active_workers, fetch_time = self._reorder_dict.pop(self._rcvd_idx)[1]
                     data = self._process_data(data)
                     break
                 
                 assert not self._shutdown and self._tasks_outstanding > 0
-                idx, data, active_workers, load_time  = self._get_data()
+                idx, data, active_workers, fetch_time  = self._get_data()
                 self._tasks_outstanding -= 1
 
                 if idx != self._rcvd_idx:
                     # store out-of-order samples
-                    self._reorder_dict[idx] += ((data, active_workers, load_time),)
+                    self._reorder_dict[idx] += ((data, active_workers, fetch_time),)
                 else:
                     del self._reorder_dict[idx]
                     data = self._process_data(data)
@@ -671,10 +685,10 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             if active_workers is not None:
                 self._realtime_load_perf[active_workers].append(time.time() - start)
                 
-            if load_time is not None:
+            if fetch_time is not None:
                 if len(self._fetch_time) > self._tune_freq:
                     self._fetch_time.pop(0)
-                self._fetch_time.append(load_time)
+                self._fetch_time.append(fetch_time)
             
             if self._autoscale_workers:
                 self._tune_worker_num()

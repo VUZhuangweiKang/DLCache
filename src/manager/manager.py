@@ -384,9 +384,13 @@ class Manager():
             etag = hashing(value)
 
         now = datetime.utcnow().timestamp()
+        try:
+            last_modified = bson.timestamp.Timestamp(int(chunk['LastModified'].timestamp()), inc=1)
+        except:
+            last_modified = bson.timestamp.Timestamp(int(chunk['LastModified'].as_datetime().timestamp()), inc=1)
         chunk.update({
             "InitTime": bson.timestamp.Timestamp(int(now), inc=1),
-            "LastModified": bson.timestamp.Timestamp(int(chunk['LastModified'].timestamp()), inc=1)
+            "LastModified": last_modified
         })
 
         def extend_chunk_info(raw:dict, chunk_etag, chunk_size, loc):
@@ -661,7 +665,7 @@ class DataMissService(pb_grpc.DataMissServicer):
         def download(etag):
             chunk = self.manager.dataset_col.find_one({"ChunkETag": etag})
             s3_client = self.manager.get_s3_client(cred)
-            self.manager.clone_chunk(dataobj=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], chunk_size=chunk['ChunkSize'], node_sequence=[chunk['Location']])
+            self.manager.clone_chunk(chunk=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], node_sequence=[chunk['Location']])
         download(request.etag)
         return pb.DataMissResponse(response=True)
 
