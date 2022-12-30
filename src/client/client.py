@@ -238,7 +238,6 @@ class Client(object):
                     if os.path.exists(path):
                         os.remove(path)
                 
-                logger.info('release cache for batch {}'.format(idx))
                 futures = []
                 for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:            
                     with concurrent.futures.ThreadPoolExecutor(multiprocessing.cpu_count()) as executor:
@@ -246,6 +245,7 @@ class Client(object):
                         if target_path:
                             futures.append(executor.submit(release, target_path))
                         concurrent.futures.wait(futures)
+                logger.info('release cache for batch {}'.format(idx))
                                     
     def expire_chunks(self, dataset_type):
         time.sleep(COOL_DOWN_SEC)

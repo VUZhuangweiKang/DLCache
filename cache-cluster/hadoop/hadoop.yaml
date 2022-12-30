@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hadoop-hdfs-master
+spec:
+  type: NodePort
+  selector:
+    name: hdfs-master
+  ports:
+    - name: rpc
+      port: 9000
+      targetPort: 9000
+    - name: http
+      port: 50070
+      targetPort: 50070
+      nodePort: 32007
+---
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: hdfs-master
+  labels:
+    name: hdfs-master
+spec:
+  replicas: 1
+  selector:
+    name: hdfs-master
+  template:
+    metadata:
+      labels:
+        name: hdfs-master
+    spec:
+      containers:
+        - name: hdfs-master
+          image: kubeguide/hadoop:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9000
+            - containerPort: 50070    
+          env:
+            - name: HADOOP_NODE_TYPE
+              value: namenode
+            - name: HDFS_MASTER_SERVICE
+              valueFrom:
+                configMapKeyRef:
+                  name: kube-hadoop-conf
+                  key: HDFS_MASTER_SERVICE
+            - name: HDOOP_YARN_MASTER
+              valueFrom:
+                configMapKeyRef:
+                  name: kube-hadoop-conf
+                  key: HDOOP_YARN_MASTER
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: hadoop-datanode
+  labels:
+    app: hadoop-datanode
+spec:
+  replicas: 3
+  selector:
+    name: hadoop-datanode
+  template:
+    metadata:
+      labels:
+        name: hadoop-datanode
+    spec:
+      containers:
+        - name: hadoop-datanode
+          image: kubeguide/hadoop:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9000
+            - containerPort: 50070    
+          env:
+            - name: HADOOP_NODE_TYPE
+              value: datanode
+            - name: HDFS_MASTER_SERVICE
+              valueFrom:
+                configMapKeyRef:
+                  name: kube-hadoop-conf
+                  key: HDFS_MASTER_SERVICE
+            - name: HDOOP_YARN_MASTER
+              valueFrom:
+                configMapKeyRef:
+                  name: kube-hadoop-conf
+                  key: HDOOP_YARN_MASTER
+      restartPolicy: Always
