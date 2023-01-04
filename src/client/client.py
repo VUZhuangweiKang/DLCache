@@ -378,7 +378,8 @@ class Client(object):
                         k = 0
                     else:
                         avg_load_time = np.mean(self.load_time)
-                        k = avg_load_time * data['active_workers'] / data['fetch_time']
+                        # k = avg_load_time * data['active_workers'] / data['fetch_time']
+                        k = avg_load_time / data['fetch_time']
                         k = math.ceil(batch_size * (k-1) / k) if k > 1 else 0
                     
                     self.send_idx_queue.insert(0, (dataset_type, send_idx, k))

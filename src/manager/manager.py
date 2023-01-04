@@ -160,10 +160,11 @@ class Manager():
         Returns:
             float: total eviction cost
         """
-        transport_cost = TRANSFER_PRICE * compressed_file_size
-        cf = float(self.managerconf['costFactor'])
-        total_cost = cf*(download_latency + extract_latency) + (1-cf)*(API_PRICE+TRANSFER_PRICE*transport_cost)
-        return total_cost
+        # transport_cost = TRANSFER_PRICE * compressed_file_size
+        # cf = float(self.managerconf['costFactor'])
+        # total_cost = cf*(download_latency + extract_latency) + (1-cf)*(API_PRICE + transport_cost)
+        # return total_cost
+        return download_latency + extract_latency
 
     # Segment a file if it's greater than the max_part_size
     @staticmethod
@@ -332,10 +333,10 @@ class Manager():
     def cost_aware_lrfu(self, chunks, require: float):
         scores = []
         for i, chunk in enumerate(chunks):
-            init_time, ref_times, cost = chunk['InitTime'], chunk['References'], float(chunk['Cost'])
+            t_base, ref_times, cost = datetime.now(), chunk['References'], float(chunk['Cost'])
             crf = 0
             for ref in ref_times:
-                dur = (ref.as_datetime() - init_time.as_datetime()).total_seconds()
+                dur = (t_base - ref.as_datetime()).total_seconds()
                 af = float(self.managerconf['attenuationFactor']) + 1e-9
                 crf += cost/dur * pow(1/af, af*dur)
             scores.append((i, crf))
