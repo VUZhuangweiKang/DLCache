@@ -119,19 +119,16 @@ class ReviewDataset(DLCJobDataset):
     def get_num_batches(self, batch_size):
         return len(self) // batch_size  
     
-    def process(self):
-        samples, self._vectorizer = list(self.samples.values())[0]
-        return samples, None
+    def _process(self):
+        path = self.samples_manifest.values()[0]
+        self.data = pd.read_csv(path), 
+        self._vectorizer = ReviewVectorizer.from_dataframe(self.data)
     
-    def sample_reader(self, path: str = None, raw_bytes: bytes = None):
-        df = pd.read_csv(path)
-        return df, ReviewVectorizer.from_dataframe(df)
-    
-    def __getitem__(self, index):
-        row = self.samples.iloc[index]
+    def __getItem__(self, index):
+        row = self.data.iloc[index]
         review_vector = self._vectorizer.vectorize(row.review)
         rating_index = self._vectorizer.rating_vocab.lookup_token(row.rating)
         return {'x_data': review_vector, 'y_target': rating_index}
     
     def __len__(self):
-        return len(self.samples)
+        return len(self.data)

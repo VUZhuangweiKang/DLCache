@@ -8,11 +8,9 @@ IMG_SIZE = (128,128)
 class OpenImagesDataset(ImageDataset):
     def __init__(self, dtype='train'):
         super().__init__(dtype)
-    
-    def __getitem__(self, index: int):
-        return self.try_get_item(index)
 
-    def __sample_reader__(self, path: str = None, raw_bytes: bytes = None):
+    def __getItem__(self, index):
+        path = self.images[index]
         img = Image.open(path)
 
         if img.mode == 'L':
@@ -20,7 +18,6 @@ class OpenImagesDataset(ImageDataset):
             img = tr(img)
 
         tr = transforms.ToTensor()
-        img1 = tr(img)
 
         width, height = img.size
         if min(width, height)>IMG_SIZE[0] * 1.5:
@@ -41,10 +38,8 @@ class OpenImagesDataset(ImageDataset):
         if (img.shape[0] != 3):
             img = img[0:3]
 
-        return img
-
-    def __len__(self) -> int:
-        return len(self.samples)
+        label = self.labels[index]
+        return img, label
 
 
 

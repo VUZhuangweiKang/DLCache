@@ -9,37 +9,34 @@ from DLCJob import *
 class StockDataset(DLCJobDataset):
     def __init__(self, dtype, steps=10):
         self.steps = steps
+        self.X = []
+        self.Y = []
         super().__init__(dtype)
 
     def get_num_batches(self, batch_size):
         return len(self) // batch_size  
     
-    def process(self):
-        samples = list(self.samples.values())[0]
-        X, Y = list(), list()
-        for i in range(len(samples)):
-            sample = i + self.steps
-            if sample > len(samples)-1:
-                break
-            x, y = samples[i:sample], samples[sample]
-            X.append(x)
-            Y.append(y)            
-        return X, Y
-    
-    def sample_reader(self, path: str = None, raw_bytes: bytes = None):
-        X = pd.read_csv(path, index_col='date')
-        X.fillna(method='ffill', inplace=True)
-        X = X.to_numpy()
-        if(np.isnan(X).any()):
+    def _process(self, sample_files, target_files=None):
+        data = pd.read_csv(sample_files[0], index_col='date')
+        data.fillna(method='ffill', inplace=True)
+        data = data.to_numpy()
+        if(np.isnan(data).any()):
             print('Contains NaN....')
-        return tensor(X, dtype=torch.float32)
+        data = tensor(data, dtype=torch.float32)
     
-    def target_reader(self, path: str = None, raw_bytes: bytes = None):
-        Y = pd.read_csv(path, index_col='date')['Label'].to_numpy()
-        return tensor(Y, dtype=torch.float32)
+        targets = pd.read_csv(target_files[0], index_col='date')['Label'].to_numpy()
+        targets = tensor(targets, dtype=torch.float32)
+    
+        for i in range(len(data)):
+            sample = i + self.steps
+            if sample > len(data)-1:
+                break
+            x, y = data[i:sample], data[sample]
+            self.X.append(x)
+            self.Y.append(y)            
     
     def __getitem__(self, index):
-        return {'x_data': self.samples[index], 'y_target': self.targets[index]}
+        return {'x_data': self.X[index], 'y_target': self.Y[index]}
     
     def __len__(self):
-        return len(self.samples)
+        return len(self.X)

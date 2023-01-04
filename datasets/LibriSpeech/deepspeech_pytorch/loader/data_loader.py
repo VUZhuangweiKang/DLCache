@@ -154,35 +154,24 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
         :param normalize: Apply standard mean and deviation normalization to audio tensor
         :param augmentation_conf(Optional): Config containing the augmentation parameters
         """
+        self.audio_objs = []
+        self.transcript_objs = []
         DLCJobDataset.__init__(self, dtype)
         self.labels_map = dict([(labels[i], i) for i in range(len(labels))])
         SpectrogramParser.__init__(self, audio_conf, normalize, aug_cfg)
-
-    def __getitem__(self, index):
-        spect, transcript = self.try_get_item(index)
-        return spect, transcript
     
-    def sample_reader(self, path: str = None, raw_bytes: bytes = None):
-        return self.parse_audio(path)
-    
-    def target_reader(self, path: str = None, raw_bytes: bytes = None):
-        return self.parse_transcript(path)
-    
-    def process(self):
+    def _process(self):
         """convert keys of self.data from /path/to/audio.wav to /path/to/audio.txt
         
         Returns:
             list(str): corresponding .txt file paths
         """
-        audio_objs = []
-        transcript_objs = []
         
-        sample_keys = list(self.samples.keys())
-        target_keys = list(self.targets.keys())
+        sample_keys = list(self.samples_manifest.keys())
+        target_keys = list(self.targets_manifest.keys())
         for i in range(len(sample_keys)):
-            audio_objs.append(self.samples[sample_keys[i]])
-            transcript_objs.append(self.targets[target_keys[i]])
-        return audio_objs, transcript_objs
+            self.audio_objs.append(self.samples_manifest[sample_keys[i]])
+            self.transcript_objs.append(self.targets_manifest[target_keys[i]])
     
     def parse_transcript(self, transcript_path):
         with open(transcript_path, 'r', encoding='utf8') as transcript_file:
@@ -190,6 +179,10 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
         transcript = list(filter(None, [self.labels_map.get(x) for x in list(transcript)]))
         return transcript
 
+    def __getItem__(self, index):
+        spect, transcript = self.parse_audio(self.audio_objs[index]), self.parse_transcript(self.transcript_objs[index])
+        return spect, transcript
+    
     def __len__(self):
         return len(self.samples)
 
