@@ -110,6 +110,30 @@ message DataMissResponse {
     optional bool response = 1;
 }
 
+service DownloadFile {
+    rpc call (DownloadFileRequest) returns (DownloadFileResponse) {}
+}
+message DownloadFileRequest {
+    required S3Auth s3auth = 1;
+    required string bucket = 2;
+    required string key = 3;
+    required string dst = 4;
+}
+message DownloadFileResponse {
+    required string size = 1;
+    required string cost = 2;
+}
+
+service ExtractFile {
+    rpc call (ExtractFileRequest) returns (ExtractFileResponse) {}
+}
+message ExtractFileRequest {
+    required string compressed_file = 1;
+}
+message ExtractFileResponse {
+    required string cost = 1;
+}
+
 // CC periodically sends log messages tO GM
 service Logger {
     rpc call (stream LogItem) returns (google.protobuf.Empty) {}

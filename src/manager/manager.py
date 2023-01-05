@@ -24,6 +24,7 @@ BANDWIDTH = 100*1e6/8  # 100Mbps
 API_PRICE = 0.004/1e4
 TRANSFER_PRICE = 0.09 # per GB
 MAX_CHUNK_SIZE = 1e9
+workers = {'129.59.234.236': '10.244.1.3', '129.59.234.237': '10.244.5.6', '129.59.234.238': '10.244.2.63', '129.59.234.239': '10.244.4.6', '129.59.234.241': '10.244.3.6'}
 
 class CHUNK_STATUS:
     PREPARE = 0
@@ -58,6 +59,14 @@ class Manager():
         self.client_col = load_collection('Client', "mongo-schemas/client.json")
         self.job_col = load_collection('Job', "mongo-schemas/job.json")
         self.dataset_col = load_collection('Datasets', "mongo-schemas/datasets.json")
+        
+        self.download_file_stubs = {}
+        self.extract_file_stubs = {}
+        for node in workers:
+            channel = grpc.insecure_channel('{}:50052'.format(workers[node]))
+            self.download_file_stubs[node] = pb_grpc.DownloadFileStub(channel)
+            self.extract_file_stubs[node] = pb_grpc.ExtractFileStub(channel)
+                        
         logger.info("start global manager")
 
     def auth_client(self, cred, s3auth=None, conn_check=False):
@@ -94,60 +103,61 @@ class Manager():
         s3_client = s3_session.client('s3')
         return s3_client
 
-    def download_file(self, client, bucket, key, etag):
-        """Download file from S3
-        Args:
-            client (Client): s3 client
-            bucket (str): s3 bucket name
-            key (str): object key
-            etag (str): entity tag
+    # def download_file(self, client, bucket, key, etag):
+    #     """Download file from S3
+    #     Args:
+    #         client (Client): s3 client
+    #         bucket (str): s3 bucket name
+    #         key (str): object key
+    #         etag (str): entity tag
 
-        Returns:
-            (str, float, float): destination path, file size, download time
-        """
-        tmp_file = '/tmp/{}'.format(etag)
-        if os.path.exists(tmp_file):
-            size = os.path.getsize(tmp_file)
-            cost = size / BANDWIDTH
-        else:
-            logger.info("downloading file {} ...".format(key))
-            start = time.time()
-            try:
-                client.download_file(bucket, key, tmp_file)
-            except botocore.exceptions.ClientError as e:
-                if e.response["Error"]["Code"] == "404":
-                    logger.error("Object {} does not exist".format(key))
-                return -1
-            cost = time.time() - start
-            size = os.path.getsize(tmp_file)
-        return tmp_file, size, cost
+    #     Returns:
+    #         (str, float, float): destination path, file size, download time
+    #     """
+    #     tmp_file = '/tmp/{}'.format(etag)
+    #     if os.path.exists(tmp_file):
+    #         size = os.path.getsize(tmp_file)
+    #         cost = size / BANDWIDTH
+    #     else:
+    #         logger.info("downloading file {} ...".format(key))
+    #         start = time.time()
+    #         try:
+    #             client.download_file(bucket, key, tmp_file)
+    #         except botocore.exceptions.ClientError as e:
+    #             if e.response["Error"]["Code"] == "404":
+    #                 logger.error("Object {} does not exist".format(key))
+    #             return -1
+    #         cost = time.time() - start
+    #         size = os.path.getsize(tmp_file)
+    #     return tmp_file, size, cost
 
-    # TODO: decompression is still slow
-    def extract_file(self, src, dst):
-        """Decompress file from src to dst
+    # def extract_file(self, compressed_file):
+    #     """Decompress file from src to dst
 
-        Args:
-            src (str): compressed file path
-            dst (str): decompression folder/file
+    #     Args:
+    #         src (str): compressed file path
+    #         dst (str): decompression folder/file
 
-        Returns:
-            float: time used for extracting the file
-        """
-        import tarfile, zipfile
-        start = time.time()
-        if tarfile.is_tarfile(src) or zipfile.is_zipfile(src):
-            if not os.path.exists(dst):
-                os.makedirs(dst)
-            logger.info("extracting {} ...".format(src))
-            os.system('tar --use-compress-program="pigz -d -p {}" --overwrite -xf {} -C {}'.format(multiprocessing.cpu_count(), src, dst))
-            os.remove(src)
-        else:
-            if not os.path.exists(dst):
-                shutil.move(src, dst)
-            return 0
+    #     Returns:
+    #         float: time used for extracting the file
+    #     """
+    #     import tarfile, zipfile
+    #     start = time.time()
+    #     if tarfile.is_tarfile(compressed_file) or zipfile.is_zipfile(compressed_file):
+    #         if not os.path.exists(compressed_file):
+    #             os.makedirs(compressed_file)
+    #         logger.info("extracting {} ...".format(compressed_file))
+    #         src_folder = '{}-tmp'.format(compressed_file)
+    #         os.mkdir(src_folder)
+    #         os.system('pigz -dc {} | tar xC {}'.format(compressed_file, src_folder))
+    #         logger.info("extracted file {} to {} ...".format(compressed_file, src_folder))
+    #         shutil.move(src_folder, compressed_file)
+    #         os.remove(compressed_file)
+    #     else:
+    #         return 0
 
-        cost = time.time() - start
-        return cost
+    #     cost = time.time() - start
+    #     return cost
 
     def calculate_cost(self, download_latency, extract_latency, compressed_file_size):
         """Cost = a*(L_download + L_extraction) + (1-a)*(C_API + C_transport)
@@ -174,6 +184,7 @@ class Manager():
                 free_space = subprocess.check_output("df /%s | awk '{print $4}' | tail -n 1" % node, shell=True)
                 free_space = int(free_space) * 1e3
                 if free_space >= chunk_size:
+                    logger.info("assign file to node {}".format(node))
                     return node
 
     def seg_tabular_chunk(self, etag, file_type, file_path, node_sequence):
@@ -373,7 +384,7 @@ class Manager():
                 except OSError:  # handle the case that the node is out of space
                     continue
 
-    def clone_chunk(self, chunk: dict, s3_client, bucket_name, node_sequence):
+    def clone_chunk(self, chunk: dict, s3auth, s3_client, bucket_name, node_sequence):
         key = chunk['Key']
         file_type = key.split('.')[-1].lower()
 
@@ -423,14 +434,22 @@ class Manager():
             return obj_chunks
 
         # download file
-        tmp_path, df_size, download_latency = self.download_file(s3_client, bucket_name, key, etag)
-        loc = self.assign_node(node_sequence, zcat(tmp_path))
+        # tmp_path, df_size, download_latency = self.download_file(s3_client, bucket_name, key, etag)
+        # actual_file_size = zcat(tmp_path)
+        size = chunk['Size']
+        loc = self.assign_node(node_sequence, size)
         dst = "/{}/{}".format(loc, etag)
+        resp = self.download_file_stubs[loc].call(s3auth, bucket_name, key, dst)
+        df_size, download_latency = resp.size, resp.cost
+        
+        # move compressed file to assigned node
+        # shutil.move(tmp_path, dst)
 
         # extract file
         extract_latency = 0
         if file_type in ['tar', 'bz2', 'zip', 'gz']:
-            extract_latency = self.extract_file(tmp_path, dst)
+            # extract_latency = self.extract_file(dst)
+            extract_latency = self.extract_file_stubs[loc].call(dst).cost
 
             # walk through extracted files
             if os.path.isdir(dst):
@@ -591,12 +610,45 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     # downloading ...
                     for chunk in raw_chunks:
                         if not chunk['Exist']:
-                            futures.append(executor.submit(self.manager.clone_chunk, chunk, s3_client, bucket_name, node_seq))
+                            futures.append(executor.submit(self.manager.clone_chunk, chunk, cred, s3_client, bucket_name, node_seq))
                         elif chunk['Location'] != node_seq[0]:
                             # move the data to a node in nodesequence
                             futures.append(executor.submit(self.manager.move_chunk, chunk, node_seq))
+                            
             for future in concurrent.futures.as_completed(futures):
                 chunks.extend(future.result())
+            
+            # for l1 in ['train', 'validation', 'test']:
+            #     raw_chunks  = []
+            #     for l2 in ['samples', 'targets', 'manifests']:
+            #         raws = load_chunks(l1, l2)
+            #         if not raws:
+            #             dataset_etags[l1][l2] = []
+            #             continue
+            #         else:
+            #             dataset_etags[l1][l2] = [chunk['ChunkETag'] for chunk in raws]
+            #             for i in range(len(raws)):
+            #                 raws[i]['Category'] = l1
+            #                 if raws[i]["Exist"]:
+            #                     if raws[i]["Status"]["code"] == CHUNK_STATUS.ACTIVE:
+            #                         raws[i]["Status"]["active_count"] += 1
+            #                     else:
+            #                         raws[i]["Status"]["code"] = CHUNK_STATUS.PENDING
+            #                 else:
+            #                     raws[i]['Status'] = {"code": CHUNK_STATUS.PENDING, "active_count": 1}
+            #             raw_chunks.extend(raws)
+
+            #     # try to acquire resources for the job
+            #     if not self.manager.acquire_resources(raw_chunks, node_seq):
+            #         return pb.RegisterResponse(rc=pb.RC.FAILED, regerr=pb.RegisterError(error="failed to register the jod, disk resource is under pressure"))
+
+            #     # downloading ...
+            #     for chunk in raw_chunks:
+            #         if not chunk['Exist']:
+            #             chunks.extend(self.manager.clone_chunk(chunk, s3_client, bucket_name, node_seq))
+            #         elif chunk['Location'] != node_seq[0]:
+            #             # move the data to a node in nodesequence
+            #             chunks.extend(self.manager.move_chunk(chunk, node_seq))
 
             # write job_col and dataset_col collections
             jobInfo = {
