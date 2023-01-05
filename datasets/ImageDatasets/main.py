@@ -19,7 +19,7 @@ import torchvision.transforms as transforms
 import torchvision.models as models
 from torch.utils.data import Subset
 from ImageDataset import ImageDataset
-from DLCJob import DLCJobDataLoader
+from lib.DLCJob import DLCJobDataLoader
 
 
 model_names = sorted(name for name in models.__dict__

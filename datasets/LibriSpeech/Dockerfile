@@ -1,7 +1,7 @@
 FROM pytorch/pytorch:latest
 RUN apt-get update && apt-get install -y nano git libsndfile1 sox liblzma-dev
-RUN mkdir deepspeech
-WORKDIR /deepspeech
+RUN mkdir app
+WORKDIR /app
 COPY . ./
 RUN pip install -r requirements.txt
 RUN pip install -e .

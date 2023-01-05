@@ -1,5 +1,5 @@
 from PIL import Image
-from DLCJob import DLCJobDataset
+from lib.DLCJob import DLCJobDataset
 
 
 class ImageDataset(DLCJobDataset):

@@ -1,0 +1,32 @@
+apiVersion: docgroup.com/v1alpha1
+kind: DLCPod
+metadata:
+  name: ilsvrc
+  namespace: default
+spec:
+  secret:
+    name: dlcpod-client-credentials
+  jobs:
+  - name: job
+    image: zhuangweikang/imagedatasets-dev:latest
+    command: ["bash"]
+    datasource:
+      name: ILSVRC
+      bucket: vuzhuangwei
+      keys:
+        train:
+          samples:
+            - ILSVRC/train/samples
+          manifests: 
+            - ILSVRC/train/manifest.csv
+        validation:
+          samples:
+            - ILSVRC/val/samples
+          manifests: 
+            - ILSVRC/val/manifest.csv
+    qos:
+      usecache: true
+      MaxPartMill: 10000
+      lazyloading: true
+    tty: true
+    stdin: true
