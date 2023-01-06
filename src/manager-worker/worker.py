@@ -7,8 +7,12 @@ import concurrent.futures
 import multiprocessing
 import socket
 import grpc
-import grpctool.dbus_pb2 as pb
-import grpctool.dbus_pb2_grpc as pb_grpc
+try:
+    import dbus_pb2 as pb
+    import dbus_pb2_grpc as pb_grpc
+except ImportError:
+    import grpctool.dbus_pb2 as pb
+    import grpctool.dbus_pb2_grpc as pb_grpc
 
 
 BANDWIDTH = 100*1e6/8  # 100Mbps
@@ -28,14 +32,17 @@ def get_ip():
     local_ip = socket.gethostbyname(hostname)
     return local_ip
 
-# TODO: 当文件被加压后存在于nfs_storage中，此时怎么判断是否需要重新下载文件
-# 考虑在eviction的时候直接删掉整个数据块即使是文件夹，因为无论如何都要重新下载解压
-class DownFileService(pb_grpc.DownloadFileServicer):
-    
-    def call(self, request, context):
+
+class ManagerWorkerService(pb_grpc.ManagerWorkerServicer):
+    def download(self, request, context):
         s3auth, bucket, key, dst = request.s3auth, request.bucket, request.key, request.dst
-        if os.path.exists(dst) and not os.path.isdir(dst):
-            size = os.path.getsize(dst)
+        if os.path.exists(dst):
+            if os.path.isdir(dst):
+                size = 0
+                for ele in os.scandir(dst):
+                    size += os.path.getsize(ele)
+            else:
+                size = os.path.getsize(dst)
             cost = size / BANDWIDTH
         else:
             start = time.time()
@@ -48,10 +55,7 @@ class DownFileService(pb_grpc.DownloadFileServicer):
             size = os.path.getsize(dst)
         return pb.DownloadFileResponse(size=size, cost=cost)
 
-
-class ExtractFileService(pb_grpc.ExtractFileServicer):
-    
-    def call(self, request, context):
+    def extract(self, request, context):
         compressed_file = request.compressed_file
         print('extracting file {}...'.format(compressed_file))
         import tarfile, zipfile
@@ -75,13 +79,12 @@ if __name__ == '__main__':
     node_ip = os.getenv("NODE_IP")
     assert node_ip is not None
     channel = grpc.insecure_channel("dlcpod-manager:50051")
-    worker_join_stub = pb_grpc.WorkerJoinStub(channel)
+    manager_stub = pb_grpc.ManagerStub(channel)
     join_req = pb.WorkerJoinRequest(node_ip=node_ip, worker_ip=get_ip())
-    resp = worker_join_stub.call(join_req)
+    resp = manager_stub.join(join_req)
     
     server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()))
-    pb_grpc.add_DownloadFileServicer_to_server(DownFileService(), server)
-    pb_grpc.add_ExtractFileServicer_to_server(ExtractFileService(), server)
+    pb_grpc.add_ManagerWorkerServicer_to_server(ManagerWorkerService(), server)
     server.add_insecure_port(address="{}:50052".format(get_ip()))
     server.start()
     server.wait_for_termination()

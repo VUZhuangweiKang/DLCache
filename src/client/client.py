@@ -4,8 +4,12 @@ import json
 import time
 import math
 import glob
-import grpctool.dbus_pb2 as pb
-import grpctool.dbus_pb2_grpc as pb_grpc
+try:
+    import dbus_pb2 as pb
+    import dbus_pb2_grpc as pb_grpc
+except ImportError:
+    import grpctool.dbus_pb2 as pb
+    import grpctool.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import numpy as np
 from pymongo import MongoClient
@@ -53,21 +57,20 @@ class Client(object):
         if len(self.jobsmeta) > 0:
             self.cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
             
-            conn_stub = pb_grpc.ConnectionStub(channel)
+            self.manager_stub = pb_grpc.ManagerStub(channel)
             req = pb.ConnectRequest(
                 cred=self.cred, 
                 s3auth=pb.S3Auth(**cloudSecret),
                 createUser=True
             )
-            resp = conn_stub.connect(req)
+            resp = self.manager_stub.connect(req)
             if resp.rc == pb.RC.FAILED:
                 logger.error("failed to connect to server with: {}".format(resp.resp))
                 raise Exception
             else:
                 logger.info("connect to server")
             
-            stub = pb_grpc.RegistrationStub(channel)
-            resp = self.registerJob(stub)
+            resp = self.registerJob()
             mongo_client = MongoClient(resp.mongoUri, connect=False)
             self.dataset_col = mongo_client.Cacher.Datasets
             self.job_col = mongo_client.Cacher.Job
@@ -77,8 +80,6 @@ class Client(object):
             with open('/share/{}.json'.format(job['name']), 'w') as f:
                 json.dump(job, f)
             logger.info('registered job {}, assigned jobId is {}'.format(job['name'], resp.jobId))
-
-            self.datamiss_stub = pb_grpc.DataMissStub(channel)
         
         context = zmq.Context()
         self.socket_rep = context.socket(zmq.REP)
@@ -98,7 +99,7 @@ class Client(object):
         self.load_cache_proc = None
         self.process_events()
         
-    def registerJob(self, stub):
+    def registerJob(self):
         """Register a list of jobs to the GM
 
         Args:
@@ -128,7 +129,7 @@ class Client(object):
                 resource=pb.ResourceInfo(CPUMemoryFree=get_cpu_free_mem(), GPUMemoryFree=get_gpu_free_mem())
             )
             logger.info('waiting for data preparation')
-            resp = stub.register(request)
+            resp = self.manager_stub.register(request)
             logger.info('receiving registration response stream')
             if resp.rc == pb.RC.REGISTERED:
                 return resp.regsucc
@@ -216,7 +217,7 @@ class Client(object):
                         return
                     print('failed to copy {}'.format(nfs_path))
                     etag = nfs_path.split('/')[-1]
-                    self.datamiss_stub.call(pb.DataMissRequest(cred=self.cred, etag=etag))
+                    self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                     futures = []

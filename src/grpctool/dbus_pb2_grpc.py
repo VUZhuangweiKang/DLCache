@@ -2,16 +2,12 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-try:
-    import dbus_pb2 as dbus__pb2
-except:
-    import grpctool.dbus_pb2 as dbus__pb2
+import dbus_pb2 as dbus__pb2
 from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 
 
-class ConnectionStub(object):
-    """set up connection between user and GM
-    """
+class ManagerStub(object):
+    """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
         """Constructor.
@@ -20,84 +16,40 @@ class ConnectionStub(object):
             channel: A grpc.Channel.
         """
         self.connect = channel.unary_unary(
-                '/dbus.Connection/connect',
+                '/dbus.Manager/connect',
                 request_serializer=dbus__pb2.ConnectRequest.SerializeToString,
                 response_deserializer=dbus__pb2.ConnectResponse.FromString,
                 )
+        self.register = channel.unary_unary(
+                '/dbus.Manager/register',
+                request_serializer=dbus__pb2.RegisterRequest.SerializeToString,
+                response_deserializer=dbus__pb2.RegisterResponse.FromString,
+                )
+        self.deregister = channel.unary_unary(
+                '/dbus.Manager/deregister',
+                request_serializer=dbus__pb2.DeregisterRequest.SerializeToString,
+                response_deserializer=dbus__pb2.DeregisterResponse.FromString,
+                )
+        self.handle_datamiss = channel.unary_unary(
+                '/dbus.Manager/handle_datamiss',
+                request_serializer=dbus__pb2.DataMissRequest.SerializeToString,
+                response_deserializer=dbus__pb2.DataMissResponse.FromString,
+                )
+        self.join = channel.unary_unary(
+                '/dbus.Manager/join',
+                request_serializer=dbus__pb2.WorkerJoinRequest.SerializeToString,
+                response_deserializer=dbus__pb2.WorkerJoinResponse.FromString,
+                )
 
 
-class ConnectionServicer(object):
-    """set up connection between user and GM
-    """
+class ManagerServicer(object):
+    """Missing associated documentation comment in .proto file."""
 
     def connect(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
-
-
-def add_ConnectionServicer_to_server(servicer, server):
-    rpc_method_handlers = {
-            'connect': grpc.unary_unary_rpc_method_handler(
-                    servicer.connect,
-                    request_deserializer=dbus__pb2.ConnectRequest.FromString,
-                    response_serializer=dbus__pb2.ConnectResponse.SerializeToString,
-            ),
-    }
-    generic_handler = grpc.method_handlers_generic_handler(
-            'dbus.Connection', rpc_method_handlers)
-    server.add_generic_rpc_handlers((generic_handler,))
-
-
- # This class is part of an EXPERIMENTAL API.
-class Connection(object):
-    """set up connection between user and GM
-    """
-
-    @staticmethod
-    def connect(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/dbus.Connection/connect',
-            dbus__pb2.ConnectRequest.SerializeToString,
-            dbus__pb2.ConnectResponse.FromString,
-            options, channel_credentials,
-            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
-
-
-class RegistrationStub(object):
-    """register a DLT Client (DLTC) to the Global Manager (GM)
-    """
-
-    def __init__(self, channel):
-        """Constructor.
-
-        Args:
-            channel: A grpc.Channel.
-        """
-        self.register = channel.unary_unary(
-                '/dbus.Registration/register',
-                request_serializer=dbus__pb2.RegisterRequest.SerializeToString,
-                response_deserializer=dbus__pb2.RegisterResponse.FromString,
-                )
-        self.deregister = channel.unary_unary(
-                '/dbus.Registration/deregister',
-                request_serializer=dbus__pb2.DeregisterRequest.SerializeToString,
-                response_deserializer=dbus__pb2.DeregisterResponse.FromString,
-                )
-
-
-class RegistrationServicer(object):
-    """register a DLT Client (DLTC) to the Global Manager (GM)
-    """
 
     def register(self, request, context):
         """Missing associated documentation comment in .proto file."""
@@ -111,9 +63,26 @@ class RegistrationServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def handle_datamiss(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
-def add_RegistrationServicer_to_server(servicer, server):
+    def join(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_ManagerServicer_to_server(servicer, server):
     rpc_method_handlers = {
+            'connect': grpc.unary_unary_rpc_method_handler(
+                    servicer.connect,
+                    request_deserializer=dbus__pb2.ConnectRequest.FromString,
+                    response_serializer=dbus__pb2.ConnectResponse.SerializeToString,
+            ),
             'register': grpc.unary_unary_rpc_method_handler(
                     servicer.register,
                     request_deserializer=dbus__pb2.RegisterRequest.FromString,
@@ -124,16 +93,42 @@ def add_RegistrationServicer_to_server(servicer, server):
                     request_deserializer=dbus__pb2.DeregisterRequest.FromString,
                     response_serializer=dbus__pb2.DeregisterResponse.SerializeToString,
             ),
+            'handle_datamiss': grpc.unary_unary_rpc_method_handler(
+                    servicer.handle_datamiss,
+                    request_deserializer=dbus__pb2.DataMissRequest.FromString,
+                    response_serializer=dbus__pb2.DataMissResponse.SerializeToString,
+            ),
+            'join': grpc.unary_unary_rpc_method_handler(
+                    servicer.join,
+                    request_deserializer=dbus__pb2.WorkerJoinRequest.FromString,
+                    response_serializer=dbus__pb2.WorkerJoinResponse.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'dbus.Registration', rpc_method_handlers)
+            'dbus.Manager', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
 
 
  # This class is part of an EXPERIMENTAL API.
-class Registration(object):
-    """register a DLT Client (DLTC) to the Global Manager (GM)
-    """
+class Manager(object):
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def connect(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/dbus.Manager/connect',
+            dbus__pb2.ConnectRequest.SerializeToString,
+            dbus__pb2.ConnectResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
     @staticmethod
     def register(request,
@@ -146,7 +141,7 @@ class Registration(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/dbus.Registration/register',
+        return grpc.experimental.unary_unary(request, target, '/dbus.Manager/register',
             dbus__pb2.RegisterRequest.SerializeToString,
             dbus__pb2.RegisterResponse.FromString,
             options, channel_credentials,
@@ -163,61 +158,14 @@ class Registration(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/dbus.Registration/deregister',
+        return grpc.experimental.unary_unary(request, target, '/dbus.Manager/deregister',
             dbus__pb2.DeregisterRequest.SerializeToString,
             dbus__pb2.DeregisterResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
-
-class DataMissStub(object):
-    """When key is not available, CC request GM to update policy
-    """
-
-    def __init__(self, channel):
-        """Constructor.
-
-        Args:
-            channel: A grpc.Channel.
-        """
-        self.call = channel.unary_unary(
-                '/dbus.DataMiss/call',
-                request_serializer=dbus__pb2.DataMissRequest.SerializeToString,
-                response_deserializer=dbus__pb2.DataMissResponse.FromString,
-                )
-
-
-class DataMissServicer(object):
-    """When key is not available, CC request GM to update policy
-    """
-
-    def call(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-
-def add_DataMissServicer_to_server(servicer, server):
-    rpc_method_handlers = {
-            'call': grpc.unary_unary_rpc_method_handler(
-                    servicer.call,
-                    request_deserializer=dbus__pb2.DataMissRequest.FromString,
-                    response_serializer=dbus__pb2.DataMissResponse.SerializeToString,
-            ),
-    }
-    generic_handler = grpc.method_handlers_generic_handler(
-            'dbus.DataMiss', rpc_method_handlers)
-    server.add_generic_rpc_handlers((generic_handler,))
-
-
- # This class is part of an EXPERIMENTAL API.
-class DataMiss(object):
-    """When key is not available, CC request GM to update policy
-    """
-
     @staticmethod
-    def call(request,
+    def handle_datamiss(request,
             target,
             options=(),
             channel_credentials=None,
@@ -227,58 +175,14 @@ class DataMiss(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/dbus.DataMiss/call',
+        return grpc.experimental.unary_unary(request, target, '/dbus.Manager/handle_datamiss',
             dbus__pb2.DataMissRequest.SerializeToString,
             dbus__pb2.DataMissResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
-
-class WorkerJoinStub(object):
-    """Missing associated documentation comment in .proto file."""
-
-    def __init__(self, channel):
-        """Constructor.
-
-        Args:
-            channel: A grpc.Channel.
-        """
-        self.call = channel.unary_unary(
-                '/dbus.WorkerJoin/call',
-                request_serializer=dbus__pb2.WorkerJoinRequest.SerializeToString,
-                response_deserializer=dbus__pb2.WorkerJoinResponse.FromString,
-                )
-
-
-class WorkerJoinServicer(object):
-    """Missing associated documentation comment in .proto file."""
-
-    def call(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-
-def add_WorkerJoinServicer_to_server(servicer, server):
-    rpc_method_handlers = {
-            'call': grpc.unary_unary_rpc_method_handler(
-                    servicer.call,
-                    request_deserializer=dbus__pb2.WorkerJoinRequest.FromString,
-                    response_serializer=dbus__pb2.WorkerJoinResponse.SerializeToString,
-            ),
-    }
-    generic_handler = grpc.method_handlers_generic_handler(
-            'dbus.WorkerJoin', rpc_method_handlers)
-    server.add_generic_rpc_handlers((generic_handler,))
-
-
- # This class is part of an EXPERIMENTAL API.
-class WorkerJoin(object):
-    """Missing associated documentation comment in .proto file."""
-
     @staticmethod
-    def call(request,
+    def join(request,
             target,
             options=(),
             channel_credentials=None,
@@ -288,14 +192,14 @@ class WorkerJoin(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/dbus.WorkerJoin/call',
+        return grpc.experimental.unary_unary(request, target, '/dbus.Manager/join',
             dbus__pb2.WorkerJoinRequest.SerializeToString,
             dbus__pb2.WorkerJoinResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
 
-class DownloadFileStub(object):
+class ManagerWorkerStub(object):
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -304,103 +208,58 @@ class DownloadFileStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.call = channel.unary_unary(
-                '/dbus.DownloadFile/call',
+        self.download = channel.unary_unary(
+                '/dbus.ManagerWorker/download',
                 request_serializer=dbus__pb2.DownloadFileRequest.SerializeToString,
                 response_deserializer=dbus__pb2.DownloadFileResponse.FromString,
                 )
-
-
-class DownloadFileServicer(object):
-    """Missing associated documentation comment in .proto file."""
-
-    def call(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-
-def add_DownloadFileServicer_to_server(servicer, server):
-    rpc_method_handlers = {
-            'call': grpc.unary_unary_rpc_method_handler(
-                    servicer.call,
-                    request_deserializer=dbus__pb2.DownloadFileRequest.FromString,
-                    response_serializer=dbus__pb2.DownloadFileResponse.SerializeToString,
-            ),
-    }
-    generic_handler = grpc.method_handlers_generic_handler(
-            'dbus.DownloadFile', rpc_method_handlers)
-    server.add_generic_rpc_handlers((generic_handler,))
-
-
- # This class is part of an EXPERIMENTAL API.
-class DownloadFile(object):
-    """Missing associated documentation comment in .proto file."""
-
-    @staticmethod
-    def call(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/dbus.DownloadFile/call',
-            dbus__pb2.DownloadFileRequest.SerializeToString,
-            dbus__pb2.DownloadFileResponse.FromString,
-            options, channel_credentials,
-            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
-
-
-class ExtractFileStub(object):
-    """Missing associated documentation comment in .proto file."""
-
-    def __init__(self, channel):
-        """Constructor.
-
-        Args:
-            channel: A grpc.Channel.
-        """
-        self.call = channel.unary_unary(
-                '/dbus.ExtractFile/call',
+        self.extract = channel.unary_unary(
+                '/dbus.ManagerWorker/extract',
                 request_serializer=dbus__pb2.ExtractFileRequest.SerializeToString,
                 response_deserializer=dbus__pb2.ExtractFileResponse.FromString,
                 )
 
 
-class ExtractFileServicer(object):
+class ManagerWorkerServicer(object):
     """Missing associated documentation comment in .proto file."""
 
-    def call(self, request, context):
+    def download(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def extract(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
 
-def add_ExtractFileServicer_to_server(servicer, server):
+def add_ManagerWorkerServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'call': grpc.unary_unary_rpc_method_handler(
-                    servicer.call,
+            'download': grpc.unary_unary_rpc_method_handler(
+                    servicer.download,
+                    request_deserializer=dbus__pb2.DownloadFileRequest.FromString,
+                    response_serializer=dbus__pb2.DownloadFileResponse.SerializeToString,
+            ),
+            'extract': grpc.unary_unary_rpc_method_handler(
+                    servicer.extract,
                     request_deserializer=dbus__pb2.ExtractFileRequest.FromString,
                     response_serializer=dbus__pb2.ExtractFileResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'dbus.ExtractFile', rpc_method_handlers)
+            'dbus.ManagerWorker', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
 
 
  # This class is part of an EXPERIMENTAL API.
-class ExtractFile(object):
+class ManagerWorker(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def call(request,
+    def download(request,
             target,
             options=(),
             channel_credentials=None,
@@ -410,7 +269,24 @@ class ExtractFile(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/dbus.ExtractFile/call',
+        return grpc.experimental.unary_unary(request, target, '/dbus.ManagerWorker/download',
+            dbus__pb2.DownloadFileRequest.SerializeToString,
+            dbus__pb2.DownloadFileResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def extract(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/dbus.ManagerWorker/extract',
             dbus__pb2.ExtractFileRequest.SerializeToString,
             dbus__pb2.ExtractFileResponse.FromString,
             options, channel_credentials,

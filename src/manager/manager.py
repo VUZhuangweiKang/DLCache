@@ -7,8 +7,12 @@ import json, bson
 import configparser
 import multiprocessing
 import subprocess
-import grpctool.dbus_pb2 as pb
-import grpctool.dbus_pb2_grpc as pb_grpc
+try:
+    import dbus_pb2 as pb
+    import dbus_pb2_grpc as pb_grpc
+except ImportError:
+    import grpctool.dbus_pb2 as pb
+    import grpctool.dbus_pb2_grpc as pb_grpc
 from datetime import datetime
 import concurrent.futures
 from collections import defaultdict
@@ -60,8 +64,8 @@ class Manager():
         self.client_col = load_collection('Client', "mongo-schemas/client.json")
         self.job_col = load_collection('Job', "mongo-schemas/job.json")
         self.dataset_col = load_collection('Datasets', "mongo-schemas/datasets.json")
-        
-        self.workers = {}             
+ 
+        self.worker_stubs = {}
         logger.info("start global manager")
 
     def auth_client(self, cred, s3auth=None, conn_check=False):
@@ -348,8 +352,11 @@ class Manager():
         })
 
         def extend_chunk_info(raw:dict, chunk_etag, chunk_size, loc):
-            cost = self.calculate_cost(download_latency, extract_latency, df_size)
-            cost = str((chunk_size/raw['Size']) * cost)
+            if 'Cost' not in raw:
+                cost = self.calculate_cost(download_latency, extract_latency, df_size)
+                cost = str((chunk_size/raw['Size']) * cost) # for segmented data
+            else:
+                cost = raw['Cost']
             raw.update({
                 "ETag": etag,
                 "Bucket": bucket_name,
@@ -367,6 +374,7 @@ class Manager():
                 extend_chunk_info(chunk, chunk_etag, chunk['Size'], loc)
                 obj_chunks.append(chunk)
             else:
+                # file segmentation
                 segments = self.seg_tabular_chunk(chunk_etag, file_type, file_path, node_sequence)
                 for segment in segments:
                     extend_chunk_info(chunk, *segment)
@@ -380,10 +388,8 @@ class Manager():
         loc = self.assign_node(node_sequence, size)
         dst = "/{}/{}".format(loc, etag)
         logger.info('downloading file {}...'.format(dst))
-        channel = grpc.insecure_channel('{}:50052'.format(self.workers[loc]))
-        stub = pb_grpc.DownloadFileStub(channel)
         req = pb.DownloadFileRequest(s3auth=pb.S3Auth(**s3auth), bucket=bucket_name, key=key, dst='/nfs_storage/{}'.format(etag))
-        resp = stub.call(req)
+        resp = self.worker_stubs[loc].download(req)
         df_size, download_latency = resp.size, resp.cost
 
         # extract file
@@ -391,39 +397,20 @@ class Manager():
         if file_type in ['tar', 'bz2', 'zip', 'gz']:
             logger.info("extracting file {}...".format(dst))
             req = pb.ExtractFileRequest(compressed_file='/nfs_storage/{}'.format(etag))
-            stub = pb_grpc.ExtractFileStub(channel)
-            extract_latency = stub.call(req).cost
-
-            # walk through extracted files
-            if os.path.isdir(dst):
-                extend_chunk_info(chunk, etag, chunk['Size'], loc)
-                obj_chunks = [chunk]
-            else:
-                # compressed chunk (file-based/tabular)
-                obj_chunks = process_chunk_file(etag, dst)
+            extract_latency = self.worker_stubs[loc].extract(req).cost
+        
+        # save meta-info: walk through extracted files
+        if os.path.isdir(dst):
+            extend_chunk_info(chunk, etag, chunk['Size'], loc)
+            obj_chunks = [chunk]
         else:
+            # compressed chunk (file-based/tabular)
             obj_chunks = process_chunk_file(etag, dst)
-
+        
         return obj_chunks
 
-
-class WorkerJoinService(pb_grpc.WorkerJoinServicer):
-    def __init__(self, manager: Manager) -> None:
-        super().__init__()
-        self.manager = manager
-    
-    def call(self, request, context):
-        node, worker = request.node_ip, request.worker_ip
-        try:
-            self.manager.workers[node] = worker
-            logger.info("worker {} from node {} join...".format(worker, node))
-            return pb.WorkerJoinResponse(rc=True)
-        except:
-            return pb.WorkerJoinResponse(rc=False)
-
-
-class ConnectionService(pb_grpc.ConnectionServicer):
-    def __init__(self, manager: Manager) -> None:
+class ManagerService(pb_grpc.ManagerServicer):
+    def __init__(self, manager: Manager):
         super().__init__()
         self.manager = manager
 
@@ -467,12 +454,6 @@ class ConnectionService(pb_grpc.ConnectionServicer):
             resp = pb.ConnectResponse(rc=pb.RC.CONNECTED, resp="connection setup")
             logger.info("user {} connected".format(cred.username))
         return resp
-
-
-class RegistrationService(pb_grpc.RegistrationServicer):
-    def __init__(self, manager: Manager) -> None:
-        super().__init__()
-        self.manager = manager
 
     def register(self, request, context):
         cred = request.cred
@@ -617,13 +598,17 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             resp = pb.DeregisterResponse(response="failed to deregister job {}".format(jobId))
         return resp
 
+    def join(self, request, context):
+        node, worker = request.node_ip, request.worker_ip
+        try:
+            channel = grpc.insecure_channel('{}:50052'.format(worker))
+            self.manager.worker_stubs[node] = pb_grpc.ManagerWorkerStub(channel)
+            logger.info("worker {} from node {} join...".format(worker, node))
+            return pb.WorkerJoinResponse(rc=True)
+        except:
+            return pb.WorkerJoinResponse(rc=False)
 
-class DataMissService(pb_grpc.DataMissServicer):
-    def __init__(self, manager: Manager) -> None:
-        super().__init__()
-        self.manager = manager
-
-    def call(self, request, context):
+    def handle_datamiss(self, request, context):
         cred = request.cred
         rc = self.manager.auth_client(cred, conn_check=True)
         if rc != pb.RC.CONNECTED:
@@ -644,10 +629,7 @@ class DataMissService(pb_grpc.DataMissServicer):
 if __name__ == '__main__':
     manager = Manager()
     server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()))
-    pb_grpc.add_ConnectionServicer_to_server(ConnectionService(manager), server)
-    pb_grpc.add_RegistrationServicer_to_server(RegistrationService(manager), server)
-    pb_grpc.add_DataMissServicer_to_server(DataMissService(manager), server)
-    pb_grpc.add_WorkerJoinServicer_to_server(WorkerJoinService(manager), server)
+    pb_grpc.add_ManagerServicer_to_server(ManagerService(manager), server)
     server.add_insecure_port(address="{}:{}".format(manager.managerconf['bind'], manager.managerconf['port']))
     server.start()
     server.wait_for_termination()

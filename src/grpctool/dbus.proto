@@ -12,6 +12,14 @@ enum RC {
     REGISTERED = 5;
 }
 
+service Manager {
+    rpc connect (ConnectRequest) returns (ConnectResponse) {};
+    rpc register (RegisterRequest) returns (RegisterResponse) {};
+    rpc deregister (DeregisterRequest) returns (DeregisterResponse) {};
+    rpc handle_datamiss (DataMissRequest) returns (DataMissResponse) {};
+    rpc join (WorkerJoinRequest) returns (WorkerJoinResponse) {};
+}
+
 message Credential {
     required string username = 1;
     required string password = 2;
@@ -23,9 +31,6 @@ message S3Auth {
 }
 
 // set up connection between user and GM
-service Connection {
-    rpc connect (ConnectRequest) returns (ConnectResponse) {}
-}
 message ConnectRequest {
     required Credential cred = 1;
     required S3Auth s3auth = 2;
@@ -37,10 +42,6 @@ message ConnectResponse {
 }
 
 // register a DLT Client (DLTC) to the Global Manager (GM)
-service Registration {
-    rpc register (RegisterRequest) returns (RegisterResponse) {}
-    rpc deregister (DeregisterRequest) returns (DeregisterResponse) {}
-}
 message ResourceInfo { // Pod resource info, load from proc file system
     optional int64 CPUMemoryFree = 1;
     optional int64 GPUMemoryFree = 2;
@@ -99,9 +100,6 @@ message DeregisterResponse {
 }
 
 // When key is not available, CC request GM to update policy
-service DataMiss {
-    rpc call (DataMissRequest) returns (DataMissResponse) {}
-}
 message DataMissRequest {
     required Credential cred = 1;
     required string etag = 2;
@@ -110,9 +108,6 @@ message DataMissResponse {
     optional bool response = 1;
 }
 
-service WorkerJoin {
-    rpc call (WorkerJoinRequest) returns (WorkerJoinResponse) {}
-}
 message WorkerJoinRequest {
     required string node_ip = 1;
     required string worker_ip = 2;
@@ -121,8 +116,9 @@ message WorkerJoinResponse {
     required bool rc = 1;
 }
 
-service DownloadFile {
-    rpc call (DownloadFileRequest) returns (DownloadFileResponse) {}
+service ManagerWorker {
+    rpc download (DownloadFileRequest) returns (DownloadFileResponse) {};
+    rpc extract (ExtractFileRequest) returns (ExtractFileResponse) {};
 }
 message DownloadFileRequest {
     required S3Auth s3auth = 1;
@@ -133,10 +129,6 @@ message DownloadFileRequest {
 message DownloadFileResponse {
     required float size = 1;
     required float cost = 2;
-}
-
-service ExtractFile {
-    rpc call (ExtractFileRequest) returns (ExtractFileResponse) {}
 }
 message ExtractFileRequest {
     required string compressed_file = 1;

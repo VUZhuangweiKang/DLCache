@@ -3,7 +3,7 @@ RUN apt update && apt install -y python3-pip nano
 RUN mkdir app
 WORKDIR /app
 COPY client ./
-COPY grpctool ./grpctool
+COPY grpctool ./
 RUN pip3 install -r requirements.txt
 RUN chmod +x *
 RUN apt update && apt install -y nano nvidia-utils-460
