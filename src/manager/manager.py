@@ -1,12 +1,8 @@
-import faulthandler
-faulthandler.enable()
-
 import os
 import sys
 import shutil
 import grpc
-import time
-import boto3, botocore
+import boto3
 import json, bson
 import configparser
 import multiprocessing
@@ -18,6 +14,9 @@ import concurrent.futures
 from collections import defaultdict
 from pymongo.mongo_client import MongoClient
 from utils import *
+
+import faulthandler
+faulthandler.enable()
 
 
 logger = get_logger(name=__name__, level='debug')
@@ -103,62 +102,6 @@ class Manager():
         s3_client = s3_session.client('s3')
         return s3_client
 
-    # def download_file(self, client, bucket, key, etag):
-    #     """Download file from S3
-    #     Args:
-    #         client (Client): s3 client
-    #         bucket (str): s3 bucket name
-    #         key (str): object key
-    #         etag (str): entity tag
-
-    #     Returns:
-    #         (str, float, float): destination path, file size, download time
-    #     """
-    #     tmp_file = '/tmp/{}'.format(etag)
-    #     if os.path.exists(tmp_file):
-    #         size = os.path.getsize(tmp_file)
-    #         cost = size / BANDWIDTH
-    #     else:
-    #         logger.info("downloading file {} ...".format(key))
-    #         start = time.time()
-    #         try:
-    #             client.download_file(bucket, key, tmp_file)
-    #         except botocore.exceptions.ClientError as e:
-    #             if e.response["Error"]["Code"] == "404":
-    #                 logger.error("Object {} does not exist".format(key))
-    #             return -1
-    #         cost = time.time() - start
-    #         size = os.path.getsize(tmp_file)
-    #     return tmp_file, size, cost
-
-    # def extract_file(self, compressed_file):
-    #     """Decompress file from src to dst
-
-    #     Args:
-    #         src (str): compressed file path
-    #         dst (str): decompression folder/file
-
-    #     Returns:
-    #         float: time used for extracting the file
-    #     """
-    #     import tarfile, zipfile
-    #     start = time.time()
-    #     if tarfile.is_tarfile(compressed_file) or zipfile.is_zipfile(compressed_file):
-    #         if not os.path.exists(compressed_file):
-    #             os.makedirs(compressed_file)
-    #         logger.info("extracting {} ...".format(compressed_file))
-    #         src_folder = '{}-tmp'.format(compressed_file)
-    #         os.mkdir(src_folder)
-    #         os.system('pigz -dc {} | tar xC {}'.format(compressed_file, src_folder))
-    #         logger.info("extracted file {} to {} ...".format(compressed_file, src_folder))
-    #         shutil.move(src_folder, compressed_file)
-    #         os.remove(compressed_file)
-    #     else:
-    #         return 0
-
-    #     cost = time.time() - start
-    #     return cost
-
     def calculate_cost(self, download_latency, extract_latency, compressed_file_size):
         """Cost = a*(L_download + L_extraction) + (1-a)*(C_API + C_transport)
 
@@ -184,7 +127,6 @@ class Manager():
                 free_space = subprocess.check_output("df /%s | awk '{print $4}' | tail -n 1" % node, shell=True)
                 free_space = int(free_space) * 1e3
                 if free_space >= chunk_size:
-                    logger.info("assign file to node {}".format(node))
                     return node
 
     def seg_tabular_chunk(self, etag, file_type, file_path, node_sequence):
@@ -434,49 +376,32 @@ class Manager():
             return obj_chunks
 
         # download file
-        # tmp_path, df_size, download_latency = self.download_file(s3_client, bucket_name, key, etag)
-        # actual_file_size = zcat(tmp_path)
         size = chunk['Size']
         loc = self.assign_node(node_sequence, size)
-        dst = "/nfs_storage/{}".format(etag)
+        dst = "/{}/{}".format(loc, etag)
         logger.info('downloading file {}...'.format(dst))
-        
         channel = grpc.insecure_channel('{}:50052'.format(self.workers[loc]))
         stub = pb_grpc.DownloadFileStub(channel)
-        req = pb.DownloadFileRequest(s3auth=pb.S3Auth(**s3auth), bucket=bucket_name, key=key, dst=dst)
+        req = pb.DownloadFileRequest(s3auth=pb.S3Auth(**s3auth), bucket=bucket_name, key=key, dst='/nfs_storage/{}'.format(etag))
         resp = stub.call(req)
         df_size, download_latency = resp.size, resp.cost
-        
-        # move compressed file to assigned node
-        # shutil.move(tmp_path, dst)
 
         # extract file
         extract_latency = 0
         if file_type in ['tar', 'bz2', 'zip', 'gz']:
-            # extract_latency = self.extract_file(dst)
             logger.info("extracting file {}...".format(dst))
-            req = pb.ExtractFileRequest(compressed_file=dst)
+            req = pb.ExtractFileRequest(compressed_file='/nfs_storage/{}'.format(etag))
             stub = pb_grpc.ExtractFileStub(channel)
             extract_latency = stub.call(req).cost
 
             # walk through extracted files
             if os.path.isdir(dst):
-                '''!!! If the extacted entity is a folder, we currently assume any individual
-                file in the folder is smaller than the MAX_CHUNK_SIZE
-                '''
                 extend_chunk_info(chunk, etag, chunk['Size'], loc)
                 obj_chunks = [chunk]
             else:
                 # compressed chunk (file-based/tabular)
                 obj_chunks = process_chunk_file(etag, dst)
         else:
-            # uncompressed chunk (file-based/tabular)
-            # if not os.path.exists(dst):
-            #     shutil.move(tmp_path, dst)
-            # else:
-            #     os.remove(tmp_path)
-            # if not os.path.exists(dst):
-            #     shutil.copyfile(tmp_path, dst)
             obj_chunks = process_chunk_file(etag, dst)
 
         return obj_chunks

@@ -28,12 +28,13 @@ def get_ip():
     local_ip = socket.gethostbyname(hostname)
     return local_ip
 
-
+# TODO: 当文件被加压后存在于nfs_storage中，此时怎么判断是否需要重新下载文件
+# 考虑在eviction的时候直接删掉整个数据块即使是文件夹，因为无论如何都要重新下载解压
 class DownFileService(pb_grpc.DownloadFileServicer):
     
     def call(self, request, context):
         s3auth, bucket, key, dst = request.s3auth, request.bucket, request.key, request.dst
-        if os.path.exists(request.dst):
+        if os.path.exists(dst) and not os.path.isdir(dst):
             size = os.path.getsize(dst)
             cost = size / BANDWIDTH
         else:
@@ -62,8 +63,8 @@ class ExtractFileService(pb_grpc.ExtractFileServicer):
             if not os.path.exists(src_folder):
                 os.mkdir(src_folder)
             os.system('pigz -dc {} | tar xC {}'.format(compressed_file, src_folder))
-            shutil.move(src_folder, compressed_file)
             os.remove(compressed_file)
+            shutil.move(src_folder, compressed_file)
             cost = time.time() - start
         else:
             cost = 0
