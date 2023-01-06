@@ -16,9 +16,9 @@ BANDWIDTH = 100*1e6/8  # 100Mbps
 
 def get_s3_client(s3auth):
     s3_session = boto3.Session(
-        aws_access_key_id=s3auth['aws_access_key_id'],
-        aws_secret_access_key=s3auth['aws_secret_access_key'],
-        region_name=s3auth['region_name']
+        aws_access_key_id=s3auth.aws_access_key_id,
+        aws_secret_access_key=s3auth.aws_secret_access_key,
+        region_name=s3auth.region_name
     )
     s3_client = s3_session.client('s3')
     return s3_client
@@ -31,43 +31,53 @@ def get_ip():
 
 class DownFileService(pb_grpc.DownloadFileServicer):
     
-    def call(self, s3auth, bucket, key, dst):
-        client = get_s3_client(s3auth)
-        if os.path.exists(dst):
+    def call(self, request, context):
+        s3auth, bucket, key, dst = request.s3auth, request.bucket, request.key, request.dst
+        if os.path.exists(request.dst):
             size = os.path.getsize(dst)
             cost = size / BANDWIDTH
         else:
             start = time.time()
+            client = get_s3_client(s3auth)
             try:
                 client.download_file(bucket, key, dst)
             except botocore.exceptions.ClientError as e:
                 return -1
             cost = time.time() - start
             size = os.path.getsize(dst)
-        return size, cost
+        return pb.DownloadFileResponse(size=size, cost=cost)
 
 
 class ExtractFileService(pb_grpc.ExtractFileServicer):
     
-    def call(self, compressed_file):
+    def call(self, request, context):
+        compressed_file = request.compressed_file
+        print('extracting file {}...'.format(compressed_file))
         import tarfile, zipfile
         start = time.time()
         if tarfile.is_tarfile(compressed_file) or zipfile.is_zipfile(compressed_file):
             if not os.path.exists(compressed_file):
                 os.makedirs(compressed_file)
             src_folder = '{}-tmp'.format(compressed_file)
-            os.mkdir(src_folder)
+            if not os.path.exists(src_folder):
+                os.mkdir(src_folder)
             os.system('pigz -dc {} | tar xC {}'.format(compressed_file, src_folder))
             shutil.move(src_folder, compressed_file)
             os.remove(compressed_file)
+            cost = time.time() - start
         else:
-            return 0
-
-        cost = time.time() - start
-        return cost
+            cost = 0
+        return pb.ExtractFileResponse(cost=cost)
 
 
 if __name__ == '__main__':
+    node_ip = os.getenv("NODE_IP")
+    assert node_ip is not None
+    channel = grpc.insecure_channel("dlcpod-manager:50051")
+    worker_join_stub = pb_grpc.WorkerJoinStub(channel)
+    join_req = pb.WorkerJoinRequest(node_ip=node_ip, worker_ip=get_ip())
+    resp = worker_join_stub.call(join_req)
+    
     server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()))
     pb_grpc.add_DownloadFileServicer_to_server(DownFileService(), server)
     pb_grpc.add_ExtractFileServicer_to_server(ExtractFileService(), server)

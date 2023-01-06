@@ -1,3 +1,6 @@
+import faulthandler
+faulthandler.enable()
+
 import os
 import sys
 import shutil
@@ -24,7 +27,6 @@ BANDWIDTH = 100*1e6/8  # 100Mbps
 API_PRICE = 0.004/1e4
 TRANSFER_PRICE = 0.09 # per GB
 MAX_CHUNK_SIZE = 1e9
-workers = {'129.59.234.236': '10.244.1.3', '129.59.234.237': '10.244.5.6', '129.59.234.238': '10.244.2.63', '129.59.234.239': '10.244.4.6', '129.59.234.241': '10.244.3.6'}
 
 class CHUNK_STATUS:
     PREPARE = 0
@@ -60,13 +62,7 @@ class Manager():
         self.job_col = load_collection('Job', "mongo-schemas/job.json")
         self.dataset_col = load_collection('Datasets', "mongo-schemas/datasets.json")
         
-        self.download_file_stubs = {}
-        self.extract_file_stubs = {}
-        for node in workers:
-            channel = grpc.insecure_channel('{}:50052'.format(workers[node]))
-            self.download_file_stubs[node] = pb_grpc.DownloadFileStub(channel)
-            self.extract_file_stubs[node] = pb_grpc.ExtractFileStub(channel)
-                        
+        self.workers = {}             
         logger.info("start global manager")
 
     def auth_client(self, cred, s3auth=None, conn_check=False):
@@ -92,9 +88,13 @@ class Manager():
                 rc = pb.RC.FAILED
         return rc
 
-    def get_s3_client(self, cred):
+    def get_s3_auth(self, cred):
         result = self.client_col.find_one(filter={"$and": [{"Username": cred.username, "Password": cred.password}]})
         s3auth = result['S3Auth']
+        return s3auth
+    
+    def get_s3_client(self, cred):
+        s3auth = self.get_s3_auth(cred)
         s3_session = boto3.Session(
             aws_access_key_id=s3auth['aws_access_key_id'],
             aws_secret_access_key=s3auth['aws_secret_access_key'],
@@ -438,8 +438,13 @@ class Manager():
         # actual_file_size = zcat(tmp_path)
         size = chunk['Size']
         loc = self.assign_node(node_sequence, size)
-        dst = "/{}/{}".format(loc, etag)
-        resp = self.download_file_stubs[loc].call(s3auth, bucket_name, key, dst)
+        dst = "/nfs_storage/{}".format(etag)
+        logger.info('downloading file {}...'.format(dst))
+        
+        channel = grpc.insecure_channel('{}:50052'.format(self.workers[loc]))
+        stub = pb_grpc.DownloadFileStub(channel)
+        req = pb.DownloadFileRequest(s3auth=pb.S3Auth(**s3auth), bucket=bucket_name, key=key, dst=dst)
+        resp = stub.call(req)
         df_size, download_latency = resp.size, resp.cost
         
         # move compressed file to assigned node
@@ -449,7 +454,10 @@ class Manager():
         extract_latency = 0
         if file_type in ['tar', 'bz2', 'zip', 'gz']:
             # extract_latency = self.extract_file(dst)
-            extract_latency = self.extract_file_stubs[loc].call(dst).cost
+            logger.info("extracting file {}...".format(dst))
+            req = pb.ExtractFileRequest(compressed_file=dst)
+            stub = pb_grpc.ExtractFileStub(channel)
+            extract_latency = stub.call(req).cost
 
             # walk through extracted files
             if os.path.isdir(dst):
@@ -467,11 +475,26 @@ class Manager():
             #     shutil.move(tmp_path, dst)
             # else:
             #     os.remove(tmp_path)
-            if not os.path.exists(dst):
-                shutil.copyfile(tmp_path, dst)
+            # if not os.path.exists(dst):
+            #     shutil.copyfile(tmp_path, dst)
             obj_chunks = process_chunk_file(etag, dst)
 
         return obj_chunks
+
+
+class WorkerJoinService(pb_grpc.WorkerJoinServicer):
+    def __init__(self, manager: Manager) -> None:
+        super().__init__()
+        self.manager = manager
+    
+    def call(self, request, context):
+        node, worker = request.node_ip, request.worker_ip
+        try:
+            self.manager.workers[node] = worker
+            logger.info("worker {} from node {} join...".format(worker, node))
+            return pb.WorkerJoinResponse(rc=True)
+        except:
+            return pb.WorkerJoinResponse(rc=False)
 
 
 class ConnectionService(pb_grpc.ConnectionServicer):
@@ -610,7 +633,7 @@ class RegistrationService(pb_grpc.RegistrationServicer):
                     # downloading ...
                     for chunk in raw_chunks:
                         if not chunk['Exist']:
-                            futures.append(executor.submit(self.manager.clone_chunk, chunk, cred, s3_client, bucket_name, node_seq))
+                            futures.append(executor.submit(self.manager.clone_chunk, chunk, self.manager.get_s3_auth(cred), s3_client, bucket_name, node_seq))
                         elif chunk['Location'] != node_seq[0]:
                             # move the data to a node in nodesequence
                             futures.append(executor.submit(self.manager.move_chunk, chunk, node_seq))
@@ -618,38 +641,6 @@ class RegistrationService(pb_grpc.RegistrationServicer):
             for future in concurrent.futures.as_completed(futures):
                 chunks.extend(future.result())
             
-            # for l1 in ['train', 'validation', 'test']:
-            #     raw_chunks  = []
-            #     for l2 in ['samples', 'targets', 'manifests']:
-            #         raws = load_chunks(l1, l2)
-            #         if not raws:
-            #             dataset_etags[l1][l2] = []
-            #             continue
-            #         else:
-            #             dataset_etags[l1][l2] = [chunk['ChunkETag'] for chunk in raws]
-            #             for i in range(len(raws)):
-            #                 raws[i]['Category'] = l1
-            #                 if raws[i]["Exist"]:
-            #                     if raws[i]["Status"]["code"] == CHUNK_STATUS.ACTIVE:
-            #                         raws[i]["Status"]["active_count"] += 1
-            #                     else:
-            #                         raws[i]["Status"]["code"] = CHUNK_STATUS.PENDING
-            #                 else:
-            #                     raws[i]['Status'] = {"code": CHUNK_STATUS.PENDING, "active_count": 1}
-            #             raw_chunks.extend(raws)
-
-            #     # try to acquire resources for the job
-            #     if not self.manager.acquire_resources(raw_chunks, node_seq):
-            #         return pb.RegisterResponse(rc=pb.RC.FAILED, regerr=pb.RegisterError(error="failed to register the jod, disk resource is under pressure"))
-
-            #     # downloading ...
-            #     for chunk in raw_chunks:
-            #         if not chunk['Exist']:
-            #             chunks.extend(self.manager.clone_chunk(chunk, s3_client, bucket_name, node_seq))
-            #         elif chunk['Location'] != node_seq[0]:
-            #             # move the data to a node in nodesequence
-            #             chunks.extend(self.manager.move_chunk(chunk, node_seq))
-
             # write job_col and dataset_col collections
             jobInfo = {
                 "Meta": {
@@ -718,7 +709,9 @@ class DataMissService(pb_grpc.DataMissServicer):
         def download(etag):
             chunk = self.manager.dataset_col.find_one({"ChunkETag": etag})
             s3_client = self.manager.get_s3_client(cred)
-            self.manager.clone_chunk(chunk=chunk, s3_client=s3_client, bucket_name=chunk['Bucket'], node_sequence=[chunk['Location']])
+            self.manager.clone_chunk(chunk=chunk, s3auth=self.manager.get_s3_auth(cred), 
+                                     s3_client=s3_client, bucket_name=chunk['Bucket'], 
+                                     node_sequence=[chunk['Location']])
         download(request.etag)
         return pb.DataMissResponse(response=True)
 
@@ -729,6 +722,7 @@ if __name__ == '__main__':
     pb_grpc.add_ConnectionServicer_to_server(ConnectionService(manager), server)
     pb_grpc.add_RegistrationServicer_to_server(RegistrationService(manager), server)
     pb_grpc.add_DataMissServicer_to_server(DataMissService(manager), server)
+    pb_grpc.add_WorkerJoinServicer_to_server(WorkerJoinService(manager), server)
     server.add_insecure_port(address="{}:{}".format(manager.managerconf['bind'], manager.managerconf['port']))
     server.start()
     server.wait_for_termination()

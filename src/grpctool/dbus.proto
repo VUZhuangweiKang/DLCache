@@ -110,6 +110,17 @@ message DataMissResponse {
     optional bool response = 1;
 }
 
+service WorkerJoin {
+    rpc call (WorkerJoinRequest) returns (WorkerJoinResponse) {}
+}
+message WorkerJoinRequest {
+    required string node_ip = 1;
+    required string worker_ip = 2;
+}
+message WorkerJoinResponse {
+    required bool rc = 1;
+}
+
 service DownloadFile {
     rpc call (DownloadFileRequest) returns (DownloadFileResponse) {}
 }
@@ -120,8 +131,8 @@ message DownloadFileRequest {
     required string dst = 4;
 }
 message DownloadFileResponse {
-    required string size = 1;
-    required string cost = 2;
+    required float size = 1;
+    required float cost = 2;
 }
 
 service ExtractFile {
@@ -131,7 +142,7 @@ message ExtractFileRequest {
     required string compressed_file = 1;
 }
 message ExtractFileResponse {
-    required string cost = 1;
+    required float cost = 1;
 }
 
 // CC periodically sends log messages tO GM

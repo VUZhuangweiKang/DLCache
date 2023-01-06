@@ -7,4 +7,5 @@ COPY manager-worker .
 COPY grpctool ./grpctool
 RUN pip install -r requirements.txt
 RUN chmod +x *
-CMD [ "python3", "worker.py" ]
+# CMD [ "python3", "worker.py" ]
+CMD ["bash"]

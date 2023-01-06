@@ -21,42 +21,16 @@ spec:
         - name: listen-port
           containerPort: 50052
         volumeMounts:
-        - name: 129-59-234-236
-          mountPath: /129.59.234.236
-        - name: 129-59-234-237
-          mountPath: /129.59.234.237
-        - name: 129-59-234-238
-          mountPath: /129.59.234.238
-        - name: 129-59-234-239
-          mountPath: /129.59.234.239
-        - name: 129-59-234-240
-          mountPath: /129.59.234.240
-        - name: 129-59-234-241
-          mountPath: /129.59.234.241
+        - name: nfs-storage
+          mountPath: /nfs_storage
         stdin: true
         tty: true
+        env:
+        - name: NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
       volumes:
-        - name: 129-59-234-236
-          nfs: 
-            server: 129.59.234.236
-            path: /nfs_storage
-        - name: 129-59-234-237
-          nfs: 
-            server: 129.59.234.237
-            path: /nfs_storage
-        - name: 129-59-234-238
-          nfs: 
-            server: 129.59.234.238
-            path: /nfs_storage
-        - name: 129-59-234-239
-          nfs: 
-            server: 129.59.234.239
-            path: /nfs_storage
-        - name: 129-59-234-240
-          nfs: 
-            server: 129.59.234.240
-            path: /nfs_storage
-        - name: 129-59-234-241
-          nfs: 
-            server: 129.59.234.241
+        - name: nfs-storage
+          hostPath:
             path: /nfs_storage
