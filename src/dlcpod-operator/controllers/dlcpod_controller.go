@@ -20,9 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/ioutil"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -49,7 +49,7 @@ const (
 	PodKind       = "Pod"
 	SecretKind    = "Secret"
 	ConfigMapKind = "ConfigMap"
-	ClientImage   = "zhuangweikang/dlcpod-dev:client"
+	ClientImage   = "zhuangweikang/dlcache-dev:client"
 )
 
 // DLCPodReconciler reconciles a DLCPod object
@@ -247,7 +247,10 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		for _, prefix := range keys {
 			worker := func(wg *sync.WaitGroup, page *s3.ListObjectsV2Output) {
 				for _, obj := range page.Contents {
-					etags = append(etags, *obj.ETag)
+					if obj.Size > 0 {
+						clean_etag := regexp.MustCompile(`[^a-zA-Z0-9 \s- ]+`).ReplaceAllString(*obj.ETag, "")
+						etags = append(etags, clean_etag)
+					}
 				}
 				wg.Done()
 			}
@@ -289,34 +292,32 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		},
 	}
 
-	var existingETags []string
-	existingPaths := map[string]bool{}
+	nodeToExistEtagNum := map[string]int{}
+	etagToNode := map[string]string{}
 
-	// list existing files on NFS
+	// list existing etags on NFS
 	for _, node := range nodes.Items {
-		err := filepath.Walk(fmt.Sprintf("/%s", node.Status.Addresses[0].Address), func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil
-			}
-			// Operations are based on chunk, so if we see a folder, this folder should be an uncompressed chunk
-			// if info.IsDir() {
-			// 	return nil
-			// }
-			existingPaths[path] = true
-			return nil
-		})
+		addr := node.Status.Addresses[0].Address
+		files, err := ioutil.ReadDir(fmt.Sprintf("/%s", addr))
 		if err != nil {
-			return nil
+			continue
+		}
+		for _, f := range files {
+			etagToNode[f.Name()] = addr
 		}
 	}
 
 	// find existing etags over all ETags
+	var totalETags int
+	var totalExistingEtags int
 	for dataset := range etags {
 		for data := range etags[dataset] {
 			for _, etag := range etags[dataset][data] {
-				if _, ok := existingPaths[etag]; ok {
-					existingETags = append(existingETags, etag)
+				if _, ok := etagToNode[etag]; ok {
+					nodeToExistEtagNum[etagToNode[etag]] += 1
+					totalExistingEtags += 1
 				}
+				totalETags += 1
 			}
 		}
 	}
@@ -332,43 +333,13 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 			allocatableGPU = 0
 		}
 		allocatableResource[node.Status.Addresses[0].Address] = map[string]int64{
-			"storage":        allocatable.Storage().Value(),
+			"storage":        allocatable.StorageEphemeral().Value(),
 			"nvidia.com/gpu": allocatableGPU,
 		}
 	}
-	var totalCapacity float64
+	var totalCapacity float64 = 0
 	for node := range allocatableResource {
 		totalCapacity += float64(allocatableResource[node]["storage"])
-	}
-
-	/*
-		weights[node] = (#existingETagsOnNode/#totalETags) + (1-#totalExistingETags/#totalETags)*(allocataleNodeSpace/totalCapacity)
-	*/
-	if len(existingETags) > 0 {
-		for _, etag := range existingETags {
-			if val, ok := weights[etag]; ok {
-				weights[etag] = val + 1
-			} else {
-				weights[etag] = 1
-			}
-		}
-		for node := range weights {
-			weights[node] = float64(weights[node] / float64(len(etags)))
-		}
-		r := 1 - (float64(len(existingETags)) / float64(len(etags)))
-		for _, node := range nodes.Items {
-			node := node.Status.Addresses[0].Address
-			freeDisk := allocatableResource[node]["storage"]
-			if _, ok := weights[node]; ok {
-				weights[node] += r * float64(freeDisk) / totalCapacity
-			} else {
-				weights[node] = float64(freeDisk) / totalCapacity
-			}
-		}
-	} else {
-		for _, node := range nodes.Items {
-			weights[node.Status.Addresses[0].Address] = float64(allocatableResource[node.Name]["storage"]) / totalCapacity
-		}
 	}
 
 	/*
@@ -380,20 +351,36 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		gpu := job.Resources.Requests["nvidia.com/gpu"]
 		requestGPU += gpu.Value()
 	}
+
+	/*
+		weights[node] = (allocatableGPU >= requestGPU) + (#existingETagsOnNode/#totalETags) + \
+						(1-#totalExistingETags/#totalETags)*(allocatableNodeSpace/totalCapacity)
+	*/
+	for _, node := range nodes.Items {
+		addr := node.Status.Addresses[0].Address
+		var left float64 = 0.0
+		if val, ok := nodeToExistEtagNum[addr]; ok {
+			left = float64(val) / float64(totalETags)
+		}
+		right := (1.0 - float64(totalExistingEtags)/float64(totalETags)) * float64(allocatableResource[addr]["storage"]) / totalCapacity
+		weights[addr] = left + right
+		if allocatableResource[addr]["nvidia.com/gpu"] >= requestGPU {
+			weights[addr] += 1.0
+		}
+	}
+
 	sort.SliceStable(nodeAddresses, func(i, j int) bool {
 		return weights[nodeAddresses[i]] > weights[nodeAddresses[j]]
 	})
-	schedule := [][]string{}
+
+	// generate schedule
+	var schedule [][]string
 	i := 0
 	for ; i < len(nodeAddresses); i++ {
 		address := nodeAddresses[i]
 		hostname := addressHostMap[address]
 		pair := []string{address, hostname}
-		if allocatableResource[address]["nvidia.com/gpu"] >= requestGPU {
-			schedule = append([][]string{pair}, schedule...)
-		} else {
-			schedule = append(schedule, pair)
-		}
+		schedule = append(schedule, pair)
 	}
 	return schedule
 }

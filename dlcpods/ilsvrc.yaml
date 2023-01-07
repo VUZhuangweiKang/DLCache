@@ -6,6 +6,9 @@ metadata:
 spec:
   secret:
     name: dlcpod-client-credentials
+  nodeSelector:
+    kubernetes.io/hostname: "isislab27"
+  nodeName: isislab27
   jobs:
   - name: job
     image: zhuangweikang/imagedatasets-dev:latest
@@ -19,11 +22,6 @@ spec:
             - ILSVRC/train/samples
           manifests: 
             - ILSVRC/train/manifest.csv
-        validation:
-          samples:
-            - ILSVRC/val/samples
-          manifests: 
-            - ILSVRC/val/manifest.csv
     qos:
       usecache: true
       MaxPartMill: 10000

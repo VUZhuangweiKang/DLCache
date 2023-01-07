@@ -7,12 +7,8 @@ import json, bson
 import configparser
 import multiprocessing
 import subprocess
-try:
-    import dbus_pb2 as pb
-    import dbus_pb2_grpc as pb_grpc
-except ImportError:
-    import grpctool.dbus_pb2 as pb
-    import grpctool.dbus_pb2_grpc as pb_grpc
+import databus.dbus_pb2 as pb
+import databus.dbus_pb2_grpc as pb_grpc
 from datetime import datetime
 import concurrent.futures
 from collections import defaultdict
@@ -395,9 +391,10 @@ class Manager():
         # extract file
         extract_latency = 0
         if file_type in ['tar', 'bz2', 'zip', 'gz']:
-            logger.info("extracting file {}...".format(dst))
             req = pb.ExtractFileRequest(compressed_file='/nfs_storage/{}'.format(etag))
             extract_latency = self.worker_stubs[loc].extract(req).cost
+            if extract_latency > 0:
+                logger.info("extracted file {}...".format(dst))
         
         # save meta-info: walk through extracted files
         if os.path.isdir(dst):

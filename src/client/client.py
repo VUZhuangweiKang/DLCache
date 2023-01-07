@@ -4,12 +4,8 @@ import json
 import time
 import math
 import glob
-try:
-    import dbus_pb2 as pb
-    import dbus_pb2_grpc as pb_grpc
-except ImportError:
-    import grpctool.dbus_pb2 as pb
-    import grpctool.dbus_pb2_grpc as pb_grpc
+import databus.dbus_pb2 as pb
+import databus.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import numpy as np
 from pymongo import MongoClient

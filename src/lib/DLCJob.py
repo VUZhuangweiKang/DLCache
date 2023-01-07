@@ -1,14 +1,12 @@
 import os
 import json
-import bson
 import math
 import random
 import numpy as np
 import time
-from datetime import datetime
 import grpc
-import grpctool.dbus_pb2 as pb
-import grpctool.dbus_pb2_grpc as pb_grpc
+import databus.dbus_pb2 as pb
+import databus.dbus_pb2_grpc as pb_grpc
 import threading
 import queue
 from typing import (
@@ -26,7 +24,6 @@ from typing import (
     TypeVar,
 )
 from collections import defaultdict
-import itertools
 import zmq
 import torch
 import torch.multiprocessing as multiprocessing
@@ -37,6 +34,7 @@ from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 import torch.utils.data._utils.worker as worker
 import torch.utils.data._utils.signal_handling as signal_handling
 from utils import *
+import warnings
 warnings.filterwarnings("ignore")
 
 cpu_count = multiprocessing.cpu_count()
@@ -94,10 +92,10 @@ class DLCJobDataset(Generic[T_co]):
         manager_uri = "dlcpod-manager:50051"
         channel = grpc.insecure_channel(manager_uri)
         cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
-        stub = pb_grpc.DataMissStub(channel)
+        stub = pb_grpc.ManagerStub(channel)
         while True:
             miss_etag = self._miss_queue.get(block=True)
-            stub.call(pb.DataMissRequest(cred=cred, etag=miss_etag))
+            stub.handle_datamiss(pb.DataMissRequest(cred=cred, etag=miss_etag))
             
     # manifest files for mapping object path from cloud to local
     def read_samples_manifest(self):
@@ -159,9 +157,7 @@ class DLCJobDataset(Generic[T_co]):
                     print('miss file {}'.format(tmpfs_path))
                     if os.path.exists(nfs_path):
                         self.cache_miss_hist[1] += 1
-                        # os.system('cp {} {}'.format(nfs_path, '/runtime{}'.format(nfs_path))) # NFS --> tmpfs
-                        shutil.copyfile(nfs_path, tmpfs_path)
-                        # while os.stat(nfs_path).st_size != os.stat(tmpfs_path).st_size: pass
+                        shutil.copyfile(nfs_path, tmpfs_path) # NFS --> tmpfs
                         return self.__getitem__(index)
                     else:
                         print(nfs_path)

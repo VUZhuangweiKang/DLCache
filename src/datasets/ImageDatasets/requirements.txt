@@ -6,3 +6,5 @@ zmq
 numpy
 pillow
 pandas
+grpcio
+protobuf

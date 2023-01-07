@@ -1,7 +1,5 @@
 import os
 import psutil
-import shutil
-import warnings
 
 def read_secret(arg):
     path = '/secret/{}'.format(arg)

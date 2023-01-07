@@ -7,12 +7,8 @@ import concurrent.futures
 import multiprocessing
 import socket
 import grpc
-try:
-    import dbus_pb2 as pb
-    import dbus_pb2_grpc as pb_grpc
-except ImportError:
-    import grpctool.dbus_pb2 as pb
-    import grpctool.dbus_pb2_grpc as pb_grpc
+import databus.dbus_pb2 as pb
+import databus.dbus_pb2_grpc as pb_grpc
 
 
 BANDWIDTH = 100*1e6/8  # 100Mbps
@@ -57,10 +53,9 @@ class ManagerWorkerService(pb_grpc.ManagerWorkerServicer):
 
     def extract(self, request, context):
         compressed_file = request.compressed_file
-        print('extracting file {}...'.format(compressed_file))
         import tarfile, zipfile
         start = time.time()
-        if tarfile.is_tarfile(compressed_file) or zipfile.is_zipfile(compressed_file):
+        if not os.path.isdir(compressed_file) and (tarfile.is_tarfile(compressed_file) or zipfile.is_zipfile(compressed_file)):
             if not os.path.exists(compressed_file):
                 os.makedirs(compressed_file)
             src_folder = '{}-tmp'.format(compressed_file)
