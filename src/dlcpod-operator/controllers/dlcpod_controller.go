@@ -425,17 +425,26 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	var jobNode corev1.Node
 	for _, node := range nodes.Items {
 		nodeip := node.Status.Addresses[0].Address
+		// for local NFS server, we directly mount to the NFS mount point
 		if nodeip == dlcpod.Spec.NodeSequence[0] {
 			jobNode = node
+			volumes = append(volumes, corev1.Volume{
+				Name: strings.ReplaceAll(nodeip, ".", "-"),
+				VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+					Path: "/nfs_storage",
+				}},
+			})
+		} else {
+			volumes = append(volumes, corev1.Volume{
+				Name: strings.ReplaceAll(nodeip, ".", "-"),
+				VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{
+					Server:   nodeip,
+					Path:     "/nfs_storage",
+					ReadOnly: false,
+				}},
+			})
 		}
-		volumes = append(volumes, corev1.Volume{
-			Name: strings.ReplaceAll(nodeip, ".", "-"),
-			VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{
-				Server:   nodeip,
-				Path:     "/nfs_storage",
-				ReadOnly: false,
-			}},
-		})
+
 		vol_mounts = append(vol_mounts, corev1.VolumeMount{
 			Name:      strings.ReplaceAll(nodeip, ".", "-"),
 			MountPath: fmt.Sprintf("/%s", nodeip),

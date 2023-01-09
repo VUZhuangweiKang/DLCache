@@ -1,5 +1,5 @@
 FROM ubuntu:20.04
-RUN apt update && apt install -y python3-pip nano
+RUN apt update && apt install -y python3-pip nano nfs-common
 RUN mkdir app
 WORKDIR /app
 COPY client ./

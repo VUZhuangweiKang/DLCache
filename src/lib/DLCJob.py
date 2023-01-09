@@ -9,6 +9,7 @@ import databus.dbus_pb2 as pb
 import databus.dbus_pb2_grpc as pb_grpc
 import threading
 import queue
+import shutil
 from typing import (
     Callable,
     Dict,
@@ -33,7 +34,7 @@ from torch.utils.data import _utils
 from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
 import torch.utils.data._utils.worker as worker
 import torch.utils.data._utils.signal_handling as signal_handling
-from utils import *
+from lib.utils import *
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -154,13 +155,16 @@ class DLCJobDataset(Generic[T_co]):
                 except FileNotFoundError as ex:
                     nfs_path = self.samples_nfs_paths[index]
                     tmpfs_path = '/runtime{}'.format(nfs_path)
-                    print('miss file {}'.format(tmpfs_path))
+                    parent_dir = '/'.join(tmpfs_path.split("/")[:-1])
+                    if not os.path.exists(parent_dir):
+                        os.system('mkdir -p {}'.format(parent_dir))
+                    print('cache miss: {}'.format(tmpfs_path))
                     if os.path.exists(nfs_path):
                         self.cache_miss_hist[1] += 1
                         shutil.copyfile(nfs_path, tmpfs_path) # NFS --> tmpfs
                         return self.__getitem__(index)
                     else:
-                        print(nfs_path)
+                        print("file miss: {}".format(nfs_path))
                         miss_etag = ex.filename.split('/')[-1]
                         self._miss_queue.put(miss_etag)
                         sub_idx = random.randint(index+1, len(self) - 1)
@@ -294,7 +298,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._num_workers = opt_num_workers
         self._autoscale_workers = autoscale_workers
         self._prefetch_factor = loader.prefetch_factor
-        self._tune_freq = cpu_count * self._prefetch_factor
+        self._tune_freq = self._num_workers * self._prefetch_factor
         self.lazy = self._dataset.lazy
         
         # sockets for communication with client
@@ -458,7 +462,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         num_workers = self._active_workers.value
         
         # buffer `num_batches` load time measurements
-        if len(self._realtime_load_perf[num_workers]) > self._tune_freq:
+        if len(self._realtime_load_perf[num_workers]) == self._tune_freq:
             self._realtime_load_perf[num_workers].clear()
 
         if self._rcvd_idx == 1 or (self._rcvd_idx % self._tune_freq == 0):
@@ -616,18 +620,19 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._try_put_index()
         return data
 
-    def _next_data(self):
-        start = time.time()
-        
+    def _next_data(self):        
         if self._last_iter_time is not None:
             if len(self._req_time) == self._tune_freq:
-                self._req_time.pop(0)
+                self._req_time.clear()
             self._req_time.append(time.time() - self._last_iter_time)
 
         '''
         fetch_time would be np.nan in the first iteration
         '''
-        msg = {'send_idx': self._send_idx, 'rcvd_idx': self._rcvd_idx, 'active_workers': self._active_workers.value, 'fetch_time': np.mean(self._fetch_time)}
+        msg = {'send_idx': self._send_idx+1, 
+               'rcvd_idx': self._rcvd_idx, 
+               'active_workers': self._active_workers.value, 
+               'req_time': np.mean(self._req_time)}
         self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), json.dumps(msg).encode('utf-8')])
         
         while True:
@@ -678,12 +683,14 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         # ensure the `num_workers` is consensus while reading the batch
         # we skip the first batch because the reset function needs to prefetch data synchronously
         if self._rcvd_idx > 1:
-            if active_workers is not None:
-                self._realtime_load_perf[active_workers].append(time.time() - start)
+            if active_workers is not None and self._last_iter_time is not None:
+                if len(self._realtime_load_perf[active_workers]) == self._tune_freq:
+                    self._realtime_load_perf[active_workers].clear()
+                self._realtime_load_perf[active_workers].append(time.time() - self._last_iter_time)
                 
             if fetch_time is not None:
-                if len(self._fetch_time) > self._tune_freq:
-                    self._fetch_time.pop(0)
+                if len(self._fetch_time) == self._tune_freq:
+                    self._fetch_time.clear()
                 self._fetch_time.append(fetch_time)
             
             if self._autoscale_workers:

@@ -10,7 +10,7 @@ from google.protobuf.json_format import ParseDict
 import numpy as np
 from pymongo import MongoClient
 import concurrent
-import multiprocessing
+import torch.multiprocessing as multiprocessing
 import shutil
 import zmq
 from datetime import datetime
@@ -67,14 +67,16 @@ class Client(object):
                 logger.info("connect to server")
             
             resp = self.registerJob()
-            mongo_client = MongoClient(resp.mongoUri, connect=False)
+            mongo_client = MongoClient(resp.mongoUri, connect=True)
             self.dataset_col = mongo_client.Cacher.Datasets
             self.job_col = mongo_client.Cacher.Job
 
             self.create_mappings(resp.jobId)
             # DL application is blocked until this file is writen
-            with open('/share/{}.json'.format(job['name']), 'w') as f:
-                json.dump(job, f)
+            path = '/share/{}.json'.format(job['name'])
+            if not os.path.exists(path):
+                with open(path, 'w') as f:
+                    json.dump(job, f)
             logger.info('registered job {}, assigned jobId is {}'.format(job['name'], resp.jobId))
         
         context = zmq.Context()
@@ -149,52 +151,59 @@ class Client(object):
                 ])
                 for chunk in chunks_iter:
                     cloud_path, loc, chunk_etag = chunk['Key'], chunk["Location"], chunk['ChunkETag']
-                    local_path = '/runtime/{}/{}'.format(loc, chunk_etag)
-                    # decompressed folder, so key has the .tar.gz extension
-                    if os.path.isdir(local_path):
+                    nfs_path = '/{}/{}'.format(loc, chunk_etag)
+                    cache_path = '/runtime{}'.format(nfs_path)
+                    # decompressed folder
+                    if os.path.isdir(nfs_path):
                         # We assume data won't be immediately deleted after being downloaded by Manager.
-                        for root, dirs, files in os.walk(local_path):
+                        for root, dirs, files in os.walk(nfs_path):
                             for name in files:
                                 p = os.path.join(root, name)
-                                dummy_cloud_path = cloud_path + p.replace(local_path, '')
-                                data[dummy_cloud_path] = p
+                                dummy_cloud_path = cloud_path + p.replace(nfs_path, '')
+                                data[dummy_cloud_path] = '/runtime{}'.format(p)
                     else:
-                        data[cloud_path] = local_path
+                        data[cloud_path] = cache_path
             return data
 
         for dataset_type in job_info['ChunkETags']:
             chunk_etags = job_info['ChunkETags'][dataset_type]
             samples_manifest = load(chunk_etags['samples'])
             targets_manifest = load(chunk_etags['targets'])
-            with open('/share/{}_samples_manifests.json'.format(dataset_type), 'w') as f:
-                json.dump(samples_manifest, f)
-            if len(targets_manifest) > 0:
+            path = '/share/{}_samples_manifests.json'.format(dataset_type)
+            if not os.path.exists(path):
+                with open(path, 'w') as f:
+                    json.dump(samples_manifest, f)
+            path = '/share/{}_targets_manifests.json'.format(dataset_type)
+            if not os.path.exists(path) and len(targets_manifest) > 0:
                 with open('/share/{}_targets_manifests.json'.format(dataset_type), 'w') as f:
                     json.dump(targets_manifest)
     
     def async_mongo_opt(self, mongo_opt_queue):
         while True:
-            if len(mongo_opt_queue) == 0: continue
-            func, args = mongo_opt_queue.pop()
+            func, args = mongo_opt_queue.get()
             if func == 'update_many':
                 self.dataset_col.update_many(*args)
                 
-    def load_cache(self, send_idx_queue, load_time):
+    def load_cache(self, send_idx_queue, copy_time):
         while True:
-            if len(send_idx_queue) == 0: continue
-            dataset_type, idx, start_from = send_idx_queue.pop(0)
-            logger.info('load cache for batch {}'.format((dataset_type, idx, start_from)))
+            dataset_type, idx, start_from = send_idx_queue.get()
+            while start_from >= len(self.tmpfs_paths[dataset_type][idx]):
+                idx += 1
+                start_from -= len(self.tmpfs_paths[dataset_type][idx])
+            
+            batch_size = len(self.tmpfs_paths[dataset_type][idx])
+            logger.info('load cache for batch {}, remaining {}'.format((dataset_type, idx, start_from), send_idx_queue.qsize()))
             t = time.time()
-                
-            # update chunk status to ACTIVE
+            
+            # update chunk status
             chunk_etags = []
             for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:
-                chunk_etags.append(sample_path.split('/')[-1])
+                chunk_etags.append(sample_path.split('/')[3])
                 if target_path:
-                    chunk_etags.append(target_path.split('/')[-1])
-                    
+                    chunk_etags.append(target_path.split('/')[3])
+            chunk_etags = list(set(chunk_etags))
             now = datetime.utcnow().timestamp()
-            self.mongo_opt_queue.append(('update_many', [{"ChunkETag": {"$in": chunk_etags}}, 
+            self.mongo_opt_queue.put(('update_many', [{"ChunkETag": {"$in": chunk_etags}}, 
                 {
                         "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
                         "$inc": {"Status.active_count": 1},
@@ -206,42 +215,60 @@ class Client(object):
                     nfs_path = tmpfs_path.replace('/runtime', '')
                     if os.path.exists(nfs_path):
                         root_folder = '/'.join(nfs_path.split('/')[:-1])
-                        if not os.path.exists(root_folder):
-                            os.makedirs(root_folder)
-                        if not os.path.exists(tmpfs_path):
-                            shutil.copyfile(nfs_path, tmpfs_path)
-                        return
+                        while True:
+                            if not os.path.exists(root_folder):
+                                os.makedirs(root_folder, exist_ok=True)
+                            try:
+                                shutil.copyfile(nfs_path, tmpfs_path)
+                                return
+                            except FileNotFoundError as ex:
+                                continue
                     print('failed to copy {}'.format(nfs_path))
                     etag = nfs_path.split('/')[-1]
                     self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                     futures = []
                     for sample_path, target_path in self.tmpfs_paths[dataset_type][idx][start_from:]:
                         futures.append(executor.submit(docopy, sample_path))
                         if target_path is not None:
                             futures.append(executor.submit(docopy, target_path))
                     concurrent.futures.wait(futures)
-                load_time.append(time.time()-t)
+                
+                # for sample_path, target_path in self.tmpfs_paths[dataset_type][idx][start_from:]:
+                #     docopy(sample_path)
+                #     if target_path is not None:
+                #         docopy(target_path)
+
+                # only record full batch
+                if batch_size-start_from > 0:
+                    dur = time.time() - t
+                    copy_time.append(batch_size * dur/(batch_size-start_from))
+                    print('copy {} images: {}'.format(batch_size-start_from, dur))
             
             del chunk_etags, dataset_type, idx, start_from
 
     def release_cache(self, rcvd_idx_queue):
         while True:
-            if len(rcvd_idx_queue) == 0: continue
-            dataset_type, idx = rcvd_idx_queue.pop()
+            dataset_type, idx = rcvd_idx_queue.get()
             if idx < len(self.tmpfs_paths[dataset_type]):
                 def release(path):
                     if os.path.exists(path):
                         os.remove(path)
                 
-                futures = []
+                # futures = []
+                # for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:            
+                #     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                #         futures.append(executor.submit(release, sample_path))
+                #         if target_path:
+                #             futures.append(executor.submit(release, target_path))
+                        # concurrent.futures.wait(futures)
+                        
                 for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:            
-                    with concurrent.futures.ThreadPoolExecutor(multiprocessing.cpu_count()) as executor:
-                        futures.append(executor.submit(release, sample_path))
-                        if target_path:
-                            futures.append(executor.submit(release, target_path))
-                        concurrent.futures.wait(futures)
+                    release(sample_path)
+                    if target_path:
+                        release(target_path)
+    
                 logger.info('release cache for batch {}'.format(idx))
                                     
     def expire_chunks(self, dataset_type):
@@ -254,7 +281,7 @@ class Client(object):
                     etags.append(target_path.split("/")[-1])
         
         now = datetime.utcnow().timestamp()
-        self.mongo_opt_queue.append(('update_many', [{
+        self.mongo_opt_queue.put(('update_many', [{
                 "ChunkETag": {"$in": etags},
                 "Status.active_count": 1
             },
@@ -263,7 +290,7 @@ class Client(object):
                 "Status.active_count": 0,
                 "Status.cool_down_init": bson.timestamp.Timestamp(int(now), inc=1)}
             }]))
-        self.mongo_opt_queue.append(('update_many', [{
+        self.mongo_opt_queue.put(('update_many', [{
                 "ChunkETag": {"$in": etags},
                 "Status.active_count": {"$gt": 1}
             },
@@ -278,9 +305,10 @@ class Client(object):
     def process_events(self):
         prefetch_factor = None
         batch_size = None
+        window_size = None
         # clear runtime cache
         for path in glob.glob('/runtime/*'):
-            shutil.rmtree(path)
+            shutil.rmtree(path, ignore_errors=True)
             os.mkdir(path)
         while True:
             socks = dict(self.poller.poll())
@@ -290,7 +318,8 @@ class Client(object):
                 if topic == "init":    
                     data = json.loads(data)
                     prefetch_factor = data['prefetch_factor']
-                    
+                    num_workers = data['active_workers']
+                    window_size = num_workers * prefetch_factor
                     with open('/share/{}_samples_manifests.json'.format(dataset_type), 'r') as f:
                         samples_tmpfs_paths = np.array(list(json.load(f).values()))
                     targets_tmpfs_paths = None
@@ -305,9 +334,8 @@ class Client(object):
                     self.tmpfs_paths[dataset_type] = batched_nfs_paths
                     
                     if self.load_cache_proc is not None:
-                        while len(self.send_idx_queue) > 0 and self.send_idx_queue[0][1] > 8:
-                            self.send_idx_queue.pop(0)
-                            self.load_time.pop(0)
+                        while self.send_idx_queue.qsize() > 0 and self.send_idx_queue[0][1] > window_size:
+                            self.send_idx_queue.get_nowait()
                         
                         while self.load_cache_proc.is_alive():
                             self.load_cache_proc.terminate()
@@ -326,12 +354,12 @@ class Client(object):
                         del self.load_cache_proc, self.release_cache_proc, self.mongo_opt_proc
                     
                     manager = multiprocessing.Manager()
-                    self.load_time = manager.list()
-                    self.send_idx_queue = manager.list()
-                    self.rcvd_idx_queue = manager.list()
-                    self.mongo_opt_queue = manager.list()
+                    self.copy_time = manager.list()
+                    self.send_idx_queue = manager.Queue()
+                    self.rcvd_idx_queue = manager.Queue()
+                    self.mongo_opt_queue = manager.Queue()
                     
-                    self.load_cache_proc = multiprocessing.Process(target=self.load_cache, args=(self.send_idx_queue, self.load_time), daemon=True)
+                    self.load_cache_proc = multiprocessing.Process(target=self.load_cache, args=(self.send_idx_queue, self.copy_time), daemon=True)
                     self.release_cache_proc = multiprocessing.Process(target=self.release_cache, args=(self.rcvd_idx_queue,), daemon=True)
                     self.mongo_opt_proc = multiprocessing.Process(target=self.async_mongo_opt, args=(self.mongo_opt_queue,), daemon=True)
                     
@@ -347,42 +375,56 @@ class Client(object):
                 if topic == "loadCache":
                     data = json.loads(data)
                     '''
-                    Dataloader spends fetch_time / active_workers time to fetch 1 batch, 
-                    while client spends load_time to move 1 batch from NFS to tmpfs.
-                    1. If load_time < fetch_time / active_workers, client only need to push 1 batch into memory 
+                    Dataloader spends `req_time` time to fetch 1 batch, 
+                    while client spends `copy_time` to move 1 batch from NFS to tmpfs.
+                    1. If copy_time < req_time, client only need to push 1 batch into memory 
                         when it recieve the loadCache messgae.
                     2. Otherwise, cache missing may occur. To mitigate the situation in the remaining batches, 
                         the client can start loading cache from the position of k samples behind the starting position of each batch.
-                        k = (active_workers * load_time) / fetch_time
-                    Overall, we can say k = floor((active_workers * load_time) / fetch_time)
+                        k = batch_size * (copy_time - req_time) / copy_time
                     '''
+                    window_size = data['active_workers'] * prefetch_factor
                     if data['rcvd_idx'] == len(self.tmpfs_paths[dataset_type]):
                         continue
                     batch_size = len(self.tmpfs_paths[dataset_type][0])
                     # clean up pending batches, and prepare to load the next epoch
                     if data['send_idx'] == len(self.tmpfs_paths[dataset_type]):
-                        if data['send_idx'] - data['rcvd_idx'] == data['active_workers'] * prefetch_factor:
-                            try:
-                                while len(self.send_idx_queue) > 0:
-                                    item = self.send_idx_queue.pop(0)
+                        if data['send_idx'] - data['rcvd_idx'] == window_size:
+                            while True:
+                                try:
+                                    item = self.send_idx_queue.get_nowait()
                                     logger.info('pop item from queue: {}'.format(item))
-                            except:
-                                pass
-                        data['send_idx'] = (data['rcvd_idx'] + data['active_workers'] * prefetch_factor) % len(self.tmpfs_paths[dataset_type])
+                                except:
+                                    break
+                        data['send_idx'] = (data['rcvd_idx'] + window_size) % len(self.tmpfs_paths[dataset_type])
 
                     send_idx = data['send_idx']
-                    if np.isnan(data['fetch_time']) or len(self.load_time) == 0:
+                    if np.isnan(data['req_time']) or len(self.copy_time) == 0:
                         k = 0
                     else:
-                        avg_load_time = np.mean(self.load_time)
-                        # k = avg_load_time * data['active_workers'] / data['fetch_time']
-                        k = avg_load_time / data['fetch_time']
-                        k = math.ceil(batch_size * (k-1) / k) if k > 1 else 0
+                        avg_copy_time = np.mean(self.copy_time)
+                        print(avg_copy_time, data['req_time'])
+                        if data['req_time'] > avg_copy_time:
+                            k = 0
+                        else:
+                            k = math.ceil(batch_size * (1 - data['req_time']/avg_copy_time))
                     
-                    self.send_idx_queue.insert(0, (dataset_type, send_idx, k))
+                    if len(self.copy_time) >= window_size:
+                        self.copy_time.pop(0)
+                    
+                    '''
+                    Due to measurement error, there might be backlog in send_idx_queue.
+                    We skip those indexes to avoid cascading backlog.
+                    '''
+                    while True:
+                        try:
+                            self.send_idx_queue.get_nowait()
+                        except:
+                            break
+                    self.send_idx_queue.put((dataset_type, send_idx, k))
                 elif topic == "releaseCache":
                     idx = int(data)
-                    self.rcvd_idx_queue.append((dataset_type, idx))
+                    self.rcvd_idx_queue.put((dataset_type, idx))
                 elif topic == "expireChunk":
                     if self.cool_down_proc is not None and self.cool_down_proc.is_alive():
                         self.cool_down_proc.terminate()
