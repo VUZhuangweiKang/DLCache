@@ -38,7 +38,7 @@ from lib.utils import *
 import warnings
 warnings.filterwarnings("ignore")
 
-cpu_count = multiprocessing.cpu_count()
+cpu_count = multiprocessing.cpu_count() - 4
 cores = np.arange(1, cpu_count+1)
 init_channel = 'ipc:///share/init.ipc'
 ipc_channel = 'ipc:///share/runtime.ipc'
@@ -145,7 +145,6 @@ class DLCJobDataset(Generic[T_co]):
         raise NotImplementedError
             
     def __getitem__(self, index: int):
-        # print(self.cache_miss_hist)
         if self.lazy:
             while True:
                 try:

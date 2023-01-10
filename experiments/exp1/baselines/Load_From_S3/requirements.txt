@@ -1,6 +1,0 @@
-torch
-torchvision
-numpy
-pillow
-pandas
-boto3

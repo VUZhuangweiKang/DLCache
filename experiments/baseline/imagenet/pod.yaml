@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: imagenet-baseline
+spec:
+  containers:
+  - name: app
+    image: zhuangweikang/imagenet-baseline:latest
+    tty: true
+    stdin: true
+    volumeMounts:
+      - name: isislab27
+        mountPath: /129.59.234.237
+      - name: isislab28
+        mountPath: /129.59.234.238
+      - name: isislab29
+        mountPath: /129.59.234.239
+      - name: isislab30
+        mountPath: /129.59.234.240
+      - name: isislab31
+        mountPath: /129.59.234.241
+      - name: shmem
+        mountPath: /dev/shm
+      - name: local-nfs
+        mountPath: /nfs_storage
+  volumes:
+    - name: shmem
+      hostPath:
+        path: /dev/shm
+        type: Directory
+    - name: local-nfs
+      hostPath:
+        path: /nfs_storage
+    - name: isislab27
+      nfs: 
+        server: 129.59.234.237
+        path: /nfs_storage
+    - name: isislab28
+      nfs: 
+        server: 129.59.234.238
+        path: /nfs_storage
+    - name: isislab29
+      nfs: 
+        server: 129.59.234.239
+        path: /nfs_storage
+    - name: isislab30
+      nfs: 
+        server: 129.59.234.240
+        path: /nfs_storage
+    - name: isislab31
+      nfs: 
+        server: 129.59.234.241
+        path: /nfs_storage
+  nodeName: isislab27
