@@ -9,6 +9,7 @@ import databus.dbus_pb2 as pb
 import databus.dbus_pb2_grpc as pb_grpc
 import threading
 import queue
+import pickle
 import shutil
 from typing import (
     Callable,
@@ -86,7 +87,7 @@ class DLCJobDataset(Generic[T_co]):
         self._miss_queue = multiprocessing.Queue()
         self._handle_miss_proc = multiprocessing.Process(target=self._handle_miss, daemon=True)
         self._handle_miss_proc.start()
-        self.cache_miss_hist = [0, 0]
+        self.cache_hits = 0
     
     def _handle_miss(self):
         # grpc consumes high memory
@@ -149,21 +150,21 @@ class DLCJobDataset(Generic[T_co]):
             while True:
                 try:
                     val = self.__getItem__(index)
-                    self.cache_miss_hist[0] += 1
+                    self.cache_hits += 1
                     return val
                 except FileNotFoundError as ex:
+                    self.cache_hits -= 1  # avoid count cache_hist multiple times
                     nfs_path = self.samples_nfs_paths[index]
                     tmpfs_path = '/runtime{}'.format(nfs_path)
                     parent_dir = '/'.join(tmpfs_path.split("/")[:-1])
                     if not os.path.exists(parent_dir):
                         os.system('mkdir -p {}'.format(parent_dir))
-                    print('cache miss: {}'.format(tmpfs_path))
+                    # print('cache miss: {}'.format(tmpfs_path))
                     if os.path.exists(nfs_path):
-                        self.cache_miss_hist[1] += 1
                         shutil.copyfile(nfs_path, tmpfs_path) # NFS --> tmpfs
                         return self.__getitem__(index)
                     else:
-                        print("file miss: {}".format(nfs_path))
+                        # print("file miss: {}".format(nfs_path))
                         miss_etag = ex.filename.split('/')[-1]
                         self._miss_queue.put(miss_etag)
                         sub_idx = random.randint(index+1, len(self) - 1)
@@ -220,7 +221,7 @@ class DLCJobDataLoader(DataLoader):
             num_workers = self._iterator._active_workers.value
         else:
             num_workers = self.num_workers
-            
+        
         self._iterator = _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.autoscale_workers, self.realtime_load_perf, 
                                                self.history_load_perf, self.tune_iters, self.socket_req, self.socket_pub)
 
@@ -342,7 +343,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 "active_workers": self._active_workers.value,
                 "prefetch_factor": self._prefetch_factor
             }
-            self._socket_req.send_multipart([b"init", self._dataset.dataset_type.encode('utf-8'), json.dumps(msg).encode('utf-8')])
+            self._socket_req.send_multipart([b"init", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
             self._socket_req.recv()
             print('init: {}'.format(time.time()-t))
             
@@ -632,7 +633,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                'rcvd_idx': self._rcvd_idx, 
                'active_workers': self._active_workers.value, 
                'req_time': np.mean(self._req_time)}
-        self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), json.dumps(msg).encode('utf-8')])
+        self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
         
         while True:
             try:
@@ -671,7 +672,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 # epoch is down
                 if self._partition_idx == self._dataset.num_partitions-1:
                     self._partition_idx = 0
-                    
                     raise StopIteration
                 else: 
                     # data in the current part have been consumed    
@@ -726,6 +726,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         assert self._workers_done_event.is_set() == shutdown
 
     def _shutdown_workers(self):
+        self._socket_pub.send_multipart([b'stopIteration', self._dataset.dataset_type.encode('utf-8'), b''])
+        
         # Called when shutting down this `_MultiProcessingDataLoaderIter`.
         # See NOTE [ Data Loader Multiprocessing Shutdown Logic ] for details on
         # the logic of this function.

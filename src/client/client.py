@@ -14,6 +14,7 @@ import torch.multiprocessing as multiprocessing
 import shutil
 import zmq
 from datetime import datetime
+import pickle
 from collections import defaultdict
 import concurrent.futures
 import bson
@@ -84,7 +85,7 @@ class Client(object):
         self.socket_rep.bind(init_channel)
         self.socket_sub = context.socket(zmq.SUB)
         self.socket_sub.bind(ipc_channel)
-        for topic in [b'loadCache', b'releaseCache', b'expireChunk']:
+        for topic in [b'loadCache', b'releaseCache', b'expireChunk', b'stopIteration']:
             self.socket_sub.setsockopt(zmq.SUBSCRIBE, topic)
         
         self.poller = zmq.Poller()
@@ -192,7 +193,7 @@ class Client(object):
                 start_from -= len(self.tmpfs_paths[dataset_type][idx])
             
             batch_size = len(self.tmpfs_paths[dataset_type][idx])
-            logger.info('load cache for batch {}, remaining {}'.format((dataset_type, idx, start_from), send_idx_queue.qsize()))
+            # logger.info('load cache for batch {}, remaining {}'.format((dataset_type, idx, start_from), send_idx_queue.qsize()))
             t = time.time()
             
             # update chunk status
@@ -227,7 +228,7 @@ class Client(object):
                     etag = nfs_path.split('/')[-1]
                     self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                     futures = []
                     for sample_path, target_path in self.tmpfs_paths[dataset_type][idx][start_from:]:
                         futures.append(executor.submit(docopy, sample_path))
@@ -244,32 +245,41 @@ class Client(object):
                 if batch_size-start_from > 0:
                     dur = time.time() - t
                     copy_time.append(batch_size * dur/(batch_size-start_from))
-                    print('copy {} images: {}'.format(batch_size-start_from, dur))
+                    # print('copy {} images: {}'.format(batch_size-start_from, dur))
             
             del chunk_etags, dataset_type, idx, start_from
 
-    def release_cache(self, rcvd_idx_queue):
+    def release_cache(self, rcvd_idx_queue, cache_usage):
         while True:
             dataset_type, idx = rcvd_idx_queue.get()
+            cache_usage.append(count_files('/runtime'))
             if idx < len(self.tmpfs_paths[dataset_type]):
-                def release(path):
-                    if os.path.exists(path):
-                        os.remove(path)
+                def release(paths):
+                    try:
+                        os.system('rm -r {}'.format(paths))
+                    except:
+                        pass
                 
                 # futures = []
                 # for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:            
-                #     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                #     with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                 #         futures.append(executor.submit(release, sample_path))
                 #         if target_path:
                 #             futures.append(executor.submit(release, target_path))
-                        # concurrent.futures.wait(futures)
-                        
-                for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:            
-                    release(sample_path)
+                #         concurrent.futures.wait(futures)
+                
+                sample_paths = ''
+                target_paths = ''   
+                for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:      
+                    sample_paths += sample_path + ' '
                     if target_path:
-                        release(target_path)
-    
-                logger.info('release cache for batch {}'.format(idx))
+                        target_paths += target_path + ' '
+                              
+                release(sample_paths)
+                if len(target_paths) > 0:
+                    release(target_paths)
+
+                # logger.info('release cache for batch {}'.format(idx))
                                     
     def expire_chunks(self, dataset_type):
         time.sleep(COOL_DOWN_SEC)
@@ -302,21 +312,29 @@ class Client(object):
                 }
             }]))
     
+    @staticmethod
+    def clear_runtime():
+        for root, dirs, files in os.walk('/runtime', topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            for name in dirs:
+                shutil.rmtree(os.path.join(root, name))
+                            
     def process_events(self):
         prefetch_factor = None
         batch_size = None
         window_size = None
         # clear runtime cache
-        for path in glob.glob('/runtime/*'):
-            shutil.rmtree(path, ignore_errors=True)
-            os.mkdir(path)
+        self.clear_runtime()
+
         while True:
             socks = dict(self.poller.poll())
             if self.socket_rep in socks and socks[self.socket_rep] == zmq.POLLIN:
                 topic, dataset_type, data = self.socket_rep.recv_multipart()
-                topic, dataset_type, data = topic.decode("utf-8"), dataset_type.decode('utf-8'), data.decode("utf-8")
-                if topic == "init":    
-                    data = json.loads(data)
+                topic, dataset_type = topic.decode("utf-8"), dataset_type.decode('utf-8')
+                if topic == "init":
+                    self.socket_rep.send(b'')
+                    data = pickle.loads(data)
                     prefetch_factor = data['prefetch_factor']
                     num_workers = data['active_workers']
                     window_size = num_workers * prefetch_factor
@@ -327,11 +345,11 @@ class Client(object):
                         with open('/share/{}_targets_manifests.json'.format(dataset_type), 'r') as f:
                             targets_tmpfs_paths = np.array(list(json.load(f).values()))
                         
-                    batched_nfs_paths = []
+                    batched_tmpfs_paths = []
                     for batch in data['paths']:
-                        batched_nfs_paths.append(list(zip(samples_tmpfs_paths[batch], \
+                        batched_tmpfs_paths.append(list(zip(samples_tmpfs_paths[batch], \
                             targets_tmpfs_paths[batch] if targets_tmpfs_paths else [None]*len(batch))))
-                    self.tmpfs_paths[dataset_type] = batched_nfs_paths
+                    self.tmpfs_paths[dataset_type] = batched_tmpfs_paths
                     
                     if self.load_cache_proc is not None:
                         while self.send_idx_queue.qsize() > 0 and self.send_idx_queue[0][1] > window_size:
@@ -358,22 +376,21 @@ class Client(object):
                     self.send_idx_queue = manager.Queue()
                     self.rcvd_idx_queue = manager.Queue()
                     self.mongo_opt_queue = manager.Queue()
+                    self.cache_usage = manager.list()
                     
                     self.load_cache_proc = multiprocessing.Process(target=self.load_cache, args=(self.send_idx_queue, self.copy_time), daemon=True)
-                    self.release_cache_proc = multiprocessing.Process(target=self.release_cache, args=(self.rcvd_idx_queue,), daemon=True)
+                    self.release_cache_proc = multiprocessing.Process(target=self.release_cache, args=(self.rcvd_idx_queue, self.cache_usage), daemon=True)
                     self.mongo_opt_proc = multiprocessing.Process(target=self.async_mongo_opt, args=(self.mongo_opt_queue,), daemon=True)
                     
                     self.load_cache_proc.start()
                     self.release_cache_proc.start()
                     self.mongo_opt_proc.start()
-                    
-                    self.socket_rep.send(b'')
             if self.socket_sub in socks and socks[self.socket_sub] == zmq.POLLIN:
                 topic, dataset_type, data = self.socket_sub.recv_multipart()
-                topic, dataset_type, data = topic.decode("utf-8"), dataset_type.decode('utf-8'), data.decode("utf-8")
+                topic, dataset_type = topic.decode("utf-8"), dataset_type.decode('utf-8')
                 # logger.info('recv msg: {} {}'.format(topic, data))
                 if topic == "loadCache":
-                    data = json.loads(data)
+                    data = pickle.loads(data)
                     '''
                     Dataloader spends `req_time` time to fetch 1 batch, 
                     while client spends `copy_time` to move 1 batch from NFS to tmpfs.
@@ -403,7 +420,7 @@ class Client(object):
                         k = 0
                     else:
                         avg_copy_time = np.mean(self.copy_time)
-                        print(avg_copy_time, data['req_time'])
+                        # print(avg_copy_time, data['req_time'])
                         if data['req_time'] > avg_copy_time:
                             k = 0
                         else:
@@ -430,6 +447,10 @@ class Client(object):
                         self.cool_down_proc.terminate()
                     self.cool_down_proc = multiprocessing.Process(target=self.expire_chunks, args=(dataset_type,), daemon=True)
                     self.cool_down_proc.start()
+                elif topic == "stopIteration":
+                    if len(self.cache_usage) > 0:
+                        np.save('/share/{}_cache_usage.npy'.format(dataset_type), self.cache_usage)
+                    self.clear_runtime()
 
 
 if __name__ == '__main__':

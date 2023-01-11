@@ -1,1 +1,0 @@
-python3 main.py --arch resnet18 --dataset cifar10 --pretrained -p 1

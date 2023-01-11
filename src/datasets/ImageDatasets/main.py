@@ -5,6 +5,7 @@ import shutil
 import time
 import warnings
 from enum import Enum
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -46,6 +47,8 @@ parser.add_argument('-b', '--batch-size', default=256, type=int,
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
+parser.add_argument('--mini-batches', default=0, type=int, metavar="N", 
+                    help="the number of mini-batches for each epoch")
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -257,12 +260,14 @@ def main_worker(gpu, ngpus_per_node, args):
             train_dataset, batch_size=args.batch_size,
             num_workers=args.workers, pin_memory=True, sampler=train_sampler, autoscale_workers=args.autoscale_dataloader)
     
+    summary = []
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        dur = train(train_loader, model, criterion, optimizer, epoch, args)
+        summary.append(dur)
 
         # # evaluate on validation set
         # acc1 = validate(val_loader, model, criterion, args)
@@ -283,6 +288,8 @@ def main_worker(gpu, ngpus_per_node, args):
         #         'scheduler' : scheduler.state_dict()
         #     }, is_best)
 
+    summary = np.array(summary)
+    np.save('exp.npy', summary)
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -300,10 +307,16 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
     t = time.time()
     end = time.time()
+    if args.mini_batches == 0:
+        num_batches = len(train_loader)
+    else:
+        num_batches = args.mini_batches
+    
+    load_time = 0
     for i, (images, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
-
+        load_time += time.time() - end
         # if args.gpu is not None:
         #     images = images.cuda(args.gpu, non_blocking=True)
         # if torch.cuda.is_available():
@@ -328,12 +341,16 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         batch_time.update(time.time() - end)
         
         time.sleep(args.sim_compute_time)
+
+        if i % args.print_freq == 0:
+            progress.display(i + 1)
+        
+        if i == num_batches:
+            break
         end = time.time()
-
-        # if i % args.print_freq == 0:
-        #     progress.display(i + 1)
+        
     print('Total time: {}'.format(time.time()-t))
-
+    return load_time
 
 def validate(val_loader, model, criterion, args):
 

@@ -54,3 +54,9 @@ def get_gpu_free_mem():
         return total_free
     except:
         return 0
+    
+def count_files(dir):
+    count = 0
+    for root_dir, cur_dir, files in os.walk(dir):
+        count += len(files)
+    return count
