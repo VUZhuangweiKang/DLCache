@@ -629,11 +629,12 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         '''
         fetch_time would be np.nan in the first iteration
         '''
-        msg = {'send_idx': self._send_idx+1, 
-               'rcvd_idx': self._rcvd_idx, 
-               'active_workers': self._active_workers.value, 
-               'req_time': np.mean(self._req_time)}
-        self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
+        if self.lazy:
+            msg = {'send_idx': self._send_idx+1, 
+                'rcvd_idx': self._rcvd_idx, 
+                'active_workers': self._active_workers.value, 
+                'req_time': np.mean(self._req_time)}
+            self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
         
         while True:
             try:
@@ -646,7 +647,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                     self._rcvd_idx += 1
                 else:
                     if not self._persistent_workers:
-                        self._socket_pub.send_multipart([b"expireChunk", self._dataset.dataset_type.encode('utf-8'), b""])
+                        if self.lazy:
+                            self._socket_pub.send_multipart([b"expireChunk", self._dataset.dataset_type.encode('utf-8'), b""])
                         self._shutdown_workers()
                     raise StopIteration
 
@@ -695,7 +697,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             if self._autoscale_workers:
                 self._tune_worker_num()
         
-        self._socket_pub.send_multipart([b"releaseCache", self._dataset.dataset_type.encode('utf-8'), str(self._rcvd_idx-1).encode('utf-8')])
+        if self.lazy:
+            self._socket_pub.send_multipart([b"releaseCache", self._dataset.dataset_type.encode('utf-8'), str(self._rcvd_idx-1).encode('utf-8')])
         self._last_iter_time = time.time()
         return data
         

@@ -2,7 +2,7 @@ import pandas as pd
 import torch
 import sys
 sys.path.insert(0, '../')
-from DLCJob import DLCJobDataset
+from lib.DLCJob import DLCJobDataset
 
 
 class DDoSDataset(DLCJobDataset):

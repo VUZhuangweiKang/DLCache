@@ -10,7 +10,7 @@ from google.protobuf.json_format import ParseDict
 import numpy as np
 from pymongo import MongoClient
 import concurrent
-import torch.multiprocessing as multiprocessing
+import multiprocessing
 import shutil
 import zmq
 from datetime import datetime

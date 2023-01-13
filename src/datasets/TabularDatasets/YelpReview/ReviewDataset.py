@@ -4,7 +4,7 @@ import string
 from collections import Counter
 import sys
 sys.path.insert(0, '../')
-from DLCJob import *
+from lib.DLCJob import *
 
 
 class Vocabulary(object):

@@ -6,9 +6,7 @@ metadata:
 spec:
   secret:
     name: dlcpod-client-credentials
-  nodeSelector:
-    kubernetes.io/hostname: "isislab27"
-  nodeName: isislab27
+  nodeName: isislab29
   jobs:
   - name: job
     image: zhuangweikang/imagedatasets-dev:latest

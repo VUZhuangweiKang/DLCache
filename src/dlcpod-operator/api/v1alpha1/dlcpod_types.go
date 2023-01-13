@@ -203,6 +203,7 @@ type DLCPodSpec struct {
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
+	// +optional
 	NodeName string `json:"nodeName,omitempty"`
 
 	// Host networking requested for this pod. Use the host's network namespace.

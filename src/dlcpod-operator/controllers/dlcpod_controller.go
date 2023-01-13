@@ -64,6 +64,15 @@ func checkErr(err error) {
 	}
 }
 
+func contains(s []string, str string) bool {
+	for _, v := range s {
+		if v == str {
+			return true
+		}
+	}
+	return false
+}
+
 //+kubebuilder:rbac:groups=docgroup.com,resources=dlcpods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=docgroup.com,resources=dlcpods/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=docgroup.com,resources=dlcpods/finalizers,verbs=update
@@ -104,13 +113,6 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 		// create pod
 		pod, err := r.createPod(ctx, &dlcpod)
-		var selectNode string
-		if len(dlcpod.Spec.NodeSelector) == 0 {
-			selectNode = hostnames[0]
-		} else {
-			selectNode = pod.Spec.NodeName
-		}
-		pod.Spec.NodeName = selectNode
 		if err != nil {
 			log.Error(err, fmt.Sprintf("error in creating pod %s: %s.", pod.Name, err.Error()))
 			return ctrl.Result{}, err
@@ -423,11 +425,63 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	err := r.List(ctx, nodes, &client.ListOptions{})
 	checkErr(err)
 	var jobNode corev1.Node
+
+	// select node by user specified NodeSelector
+	flag := false
+	for key := range dlcpod.Spec.NodeSelector {
+		for _, node := range nodes.Items {
+			if val, ok := node.Labels[key]; ok {
+				if val == dlcpod.Spec.NodeSelector[key] {
+					jobNode = node
+					flag = true
+					break
+				}
+			}
+		}
+		if flag {
+			break
+		}
+	}
+
+	// select node by user specified NodeName
+	if !flag {
+		for _, node := range nodes.Items {
+			if node.Status.Addresses[1].Address == dlcpod.Spec.NodeName {
+				jobNode = node
+				flag = true
+				break
+			}
+		}
+	}
+
+	// select node based on scheduler decision
+	if !flag {
+		for _, node := range nodes.Items {
+			if node.Status.Addresses[0].Address == dlcpod.Spec.NodeSequence[0] {
+				jobNode = node
+				flag = true
+				break
+			}
+		}
+	}
+
+	// move the jobNode to the head of NodeSequence
+	if jobNode.Status.Addresses[0].Address != dlcpod.Spec.NodeSequence[0] {
+		for i := 0; i < len(dlcpod.Spec.NodeSequence); i++ {
+			if dlcpod.Spec.NodeSequence[i] == jobNode.Status.Addresses[0].Address {
+				dlcpod.Spec.NodeSequence = append(dlcpod.Spec.NodeSequence[:i], dlcpod.Spec.NodeSequence[i+1:]...)
+				break
+			}
+		}
+		dlcpod.Spec.NodeSequence = append(dlcpod.Spec.NodeSequence[:1], dlcpod.Spec.NodeSequence[0:]...)
+		dlcpod.Spec.NodeSequence[0] = jobNode.Status.Addresses[0].Address
+	}
+
 	for _, node := range nodes.Items {
 		nodeip := node.Status.Addresses[0].Address
+
 		// for local NFS server, we directly mount to the NFS mount point
-		if nodeip == dlcpod.Spec.NodeSequence[0] {
-			jobNode = node
+		if nodeip == jobNode.Status.Addresses[0].Address {
 			volumes = append(volumes, corev1.Volume{
 				Name: strings.ReplaceAll(nodeip, ".", "-"),
 				VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
