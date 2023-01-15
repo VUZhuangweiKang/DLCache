@@ -625,7 +625,7 @@ class ManagerService(pb_grpc.ManagerServicer):
 
 if __name__ == '__main__':
     manager = Manager()
-    server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()))
+    server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=1))
     pb_grpc.add_ManagerServicer_to_server(ManagerService(manager), server)
     server.add_insecure_port(address="{}:{}".format(manager.managerconf['bind'], manager.managerconf['port']))
     server.start()

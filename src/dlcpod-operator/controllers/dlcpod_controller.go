@@ -33,6 +33,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -390,6 +391,7 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPod) (corev1.Pod, error) {
 	var pod corev1.Pod
 	spec := dlcpod.Spec
+	hostPathDir := corev1.HostPathDirectory
 	volumes := []corev1.Volume{
 		{
 			Name:         "secret",
@@ -404,8 +406,11 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 		{
-			Name:         "shmem",
-			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev/shm"}},
+			Name: "shmem",
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+				Path: "/dev/shm",
+				Type: &hostPathDir,
+			}},
 		},
 		{
 			Name:         "runtime",
@@ -481,11 +486,13 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		nodeip := node.Status.Addresses[0].Address
 
 		// for local NFS server, we directly mount to the NFS mount point
+		hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 		if nodeip == jobNode.Status.Addresses[0].Address {
 			volumes = append(volumes, corev1.Volume{
 				Name: strings.ReplaceAll(nodeip, ".", "-"),
 				VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
 					Path: "/nfs_storage",
+					Type: &hostPathDirectoryOrCreate,
 				}},
 			})
 		} else {
@@ -512,13 +519,13 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		allocGPU = 1
 	}
 	var containers []corev1.Container
-	// alph := 0.8
+	alph := 0.8
 	for _, job := range spec.Jobs {
 		env := job.Env
 		env = append(env, corev1.EnvVar{Name: "JOBNAME", Value: job.Name})
-		// cpuLimit := int64(alph * float64(alloc.Cpu().MilliValue()/allocGPU/int64(len(spec.Jobs))))
-		// memoryLimit := int64(alph * float64(alloc.Memory().MilliValue()/allocGPU/int64(len(spec.Jobs))))
-		// ephemeralStorageLimit := int64(alph * float64(alloc.StorageEphemeral().MilliValue()/allocGPU/int64(len(spec.Jobs))))
+		cpuLimit := int64(alph * float64(alloc.Cpu().MilliValue()/allocGPU/int64(len(spec.Jobs))))
+		memoryLimit := int64(alph * float64(alloc.Memory().MilliValue()/allocGPU/int64(len(spec.Jobs))))
+		ephemeralStorageLimit := int64(alph * float64(alloc.StorageEphemeral().MilliValue()/allocGPU/int64(len(spec.Jobs))))
 		// gpuLimit := job.Resources.Limits["nvidia.com/gpu"]
 		container := corev1.Container{
 			Name:            job.Name,
@@ -532,12 +539,12 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 			Ports:           job.Ports,
 			Lifecycle:       job.Lifecycle,
 			Resources: corev1.ResourceRequirements{
-				// Limits: corev1.ResourceList{
-				// 	"cpu":               *resource.NewMilliQuantity(cpuLimit, resource.DecimalSI),
-				// 	"memory":            *resource.NewMilliQuantity(memoryLimit, resource.DecimalSI),
-				// 	"ephemeral-storage": *resource.NewMilliQuantity(ephemeralStorageLimit, resource.DecimalSI),
-				// 	"nvidia.com/gpu":    *resource.NewQuantity(gpuLimit.Value(), resource.DecimalSI),
-				// },
+				Limits: corev1.ResourceList{
+					"cpu":               *resource.NewMilliQuantity(cpuLimit, resource.DecimalSI),
+					"memory":            *resource.NewMilliQuantity(memoryLimit, resource.DecimalSI),
+					"ephemeral-storage": *resource.NewMilliQuantity(ephemeralStorageLimit, resource.DecimalSI),
+					// "nvidia.com/gpu":    *resource.NewQuantity(gpuLimit.Value(), resource.DecimalSI),
+				},
 				Requests: job.Resources.Requests,
 			},
 			TTY:   job.TTY,

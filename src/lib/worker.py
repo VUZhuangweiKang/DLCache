@@ -303,7 +303,6 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                 init_exception = None
             else:
                 try:
-                    t = time.time()
                     data = fetcher.fetch(index)
                 except Exception as e:
                     if isinstance(e, StopIteration) and dataset_kind == _DatasetKind.Iterable:
@@ -326,6 +325,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                 freq = None
             else:
                 freq = get_time - last_get_time
+
             data_queue.put((idx, data, _num_workers, freq))
             last_get_time = get_time
             del data, idx, index, r  # save memory

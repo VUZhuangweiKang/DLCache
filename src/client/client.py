@@ -215,31 +215,30 @@ class Client(object):
                 def docopy(tmpfs_path):
                     nfs_path = tmpfs_path.replace('/runtime', '')
                     if os.path.exists(nfs_path):
-                        root_folder = '/'.join(nfs_path.split('/')[:-1])
                         while True:
-                            if not os.path.exists(root_folder):
-                                os.makedirs(root_folder, exist_ok=True)
                             try:
                                 shutil.copyfile(nfs_path, tmpfs_path)
                                 return
-                            except FileNotFoundError as ex:
-                                continue
+                            except Exception as ex:
+                                root_folder = '/'.join(tmpfs_path.split('/')[:-1])
+                                os.makedirs(root_folder, exist_ok=True)
+                        
                     print('failed to copy {}'.format(nfs_path))
                     etag = nfs_path.split('/')[-1]
                     self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-                    futures = []
-                    for sample_path, target_path in self.tmpfs_paths[dataset_type][idx][start_from:]:
-                        futures.append(executor.submit(docopy, sample_path))
-                        if target_path is not None:
-                            futures.append(executor.submit(docopy, target_path))
-                    concurrent.futures.wait(futures)
+                # futures = []
+                # with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                #     for sample_path, target_path in self.tmpfs_paths[dataset_type][idx][start_from:]:
+                #         futures.append(executor.submit(docopy, sample_path))
+                #         if target_path is not None:
+                #             futures.append(executor.submit(docopy, target_path))
+                # concurrent.futures.wait(futures)
                 
-                # for sample_path, target_path in self.tmpfs_paths[dataset_type][idx][start_from:]:
-                #     docopy(sample_path)
-                #     if target_path is not None:
-                #         docopy(target_path)
+                for sample_path, target_path in self.tmpfs_paths[dataset_type][idx][start_from:]:
+                    docopy(sample_path)
+                    if target_path is not None:
+                        docopy(target_path)
 
                 # only record full batch
                 if batch_size-start_from > 0:
@@ -256,7 +255,8 @@ class Client(object):
             if idx < len(self.tmpfs_paths[dataset_type]):
                 def release(paths):
                     try:
-                        os.system('rm -r {}'.format(paths))
+                        if len(paths) > 0:
+                            os.system('rm -r {}'.format(paths))
                     except:
                         pass
                 
@@ -270,11 +270,12 @@ class Client(object):
                 
                 sample_paths = ''
                 target_paths = ''   
-                for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:      
-                    sample_paths += sample_path + ' '
-                    if target_path:
+                for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:   
+                    if os.path.exists(sample_path):   
+                        sample_paths += sample_path + ' '
+                    if target_path and os.path.exists(target_path):
                         target_paths += target_path + ' '
-                              
+                      
                 release(sample_paths)
                 if len(target_paths) > 0:
                     release(target_paths)
@@ -315,10 +316,15 @@ class Client(object):
     @staticmethod
     def clear_runtime():
         for root, dirs, files in os.walk('/runtime', topdown=False):
-            for name in files:
-                os.remove(os.path.join(root, name))
-            for name in dirs:
-                shutil.rmtree(os.path.join(root, name))
+            while True:
+                try:
+                    for name in files:
+                        os.remove(os.path.join(root, name))
+                    for name in dirs:
+                        shutil.rmtree(os.path.join(root, name))
+                    break
+                except:
+                    pass
                             
     def process_events(self):
         prefetch_factor = None

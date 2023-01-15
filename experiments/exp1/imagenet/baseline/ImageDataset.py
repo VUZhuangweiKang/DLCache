@@ -18,8 +18,8 @@ class ImageDataset(Dataset):
     
     def __getitem__(self, index: int):
         path, target = self.samples[index], self.targets[index]
-        img = Image.open(path)
-        img = img.convert("RGB")
+        with Image.open(path) as img:
+            img = img.convert("RGB")
         if self.transform is not None:
             img = self.transform(img)
         if self.target_transform is not None:

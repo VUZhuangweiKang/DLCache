@@ -1,10 +1,12 @@
 from PIL import Image
 from lib.DLCJob import DLCJobDataset
+import numpy as np
 
 
 class ImageDataset(DLCJobDataset):
-    def __init__(self, dataset_type: str = 'train', transform=None):
+    def __init__(self, dataset_type: str = 'train', transform=None, target_transform=None):
         self.transform = transform
+        self.target_transform = target_transform
         self.images = []
         self.labels = []
         super().__init__(dataset_type)
@@ -15,14 +17,18 @@ class ImageDataset(DLCJobDataset):
         for image in sample_files:
             self.images.append(self.samples_manifest[image])
             self.labels.append(cls_idx[image.split('/')[-2]])
+        self.images = np.array(self.images)
+        self.labels = np.array(self.labels)
 
-    def __getItem__(self, index):
-        img = Image.open(self.images[index])
-        img = img.convert("RGB")
+    def _getitem(self, index: int):
+        path, target = self.images[index], self.labels[index]
+        with Image.open(path) as img:
+            img = img.convert("RGB")
         if self.transform is not None:
             img = self.transform(img)
-        label = self.labels[index]
-        return img, label
-    
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
+
     def __len__(self) -> int:
         return len(self.images)

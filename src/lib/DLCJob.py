@@ -7,47 +7,48 @@ import time
 import grpc
 import databus.dbus_pb2 as pb
 import databus.dbus_pb2_grpc as pb_grpc
+import zmq
 import threading
 import queue
 import pickle
 import shutil
 from typing import (
-    Callable,
-    Dict,
-    Generic,
     Iterable,
-    Iterator,
+    Callable,
     List,
     Any,
     Union,
     Optional,
     Sequence,
-    Tuple,
     TypeVar,
 )
 from collections import defaultdict
-import zmq
 import torch
 import torch.multiprocessing as multiprocessing
-from torch.utils.data import DataLoader, Sampler
+from torch.utils.data import DataLoader, Dataset, Sampler, _utils
 from torch.utils.data.dataloader import _BaseDataLoaderIter
-from torch.utils.data import _utils
-from torch.utils.data.dataloader import _worker_init_fn_t, _collate_fn_t
-import torch.utils.data._utils.worker as worker
-import torch.utils.data._utils.signal_handling as signal_handling
-from lib.utils import *
+
 import warnings
 warnings.filterwarnings("ignore")
 
-cpu_count = multiprocessing.cpu_count() - 4
-cores = np.arange(1, cpu_count+1)
 init_channel = 'ipc:///share/init.ipc'
 ipc_channel = 'ipc:///share/runtime.ipc'
 
 T_co = TypeVar('T_co', covariant=True)
+T = TypeVar('T')
+_worker_init_fn_t = Callable[[int], None]
+_collate_fn_t = Callable[[List[T]], Any]
 
 
-class DLCJobDataset(Generic[T_co]):
+def read_secret(arg):
+    path = '/secret/{}'.format(arg)
+    assert os.path.exists(path)
+    with open(path, 'r') as f:
+        data = f.read().strip()
+    return data
+
+        
+class DLCJobDataset(Dataset[T_co]):
     def __init__(self, dataset_type='train'):
         """An abstract class subclassing the torch.utils.data.Dataset class
         
@@ -112,18 +113,19 @@ class DLCJobDataset(Generic[T_co]):
             return {}
     def get_samples_nfs_paths(self):
         paths = list(self.samples_manifest.values())
-        paths = [path.replace('/runtime', '') for path in paths]
+        paths = np.array([path.replace('/runtime', '') for path in paths])
         return paths
     def get_targets_nfs_paths(self):
         paths = list(self.targets_manifest.values())
-        paths = [path.replace('/runtime', '') for path in paths]
+        paths = np.array([path.replace('/runtime', '') for path in paths])
         return paths
     
     def _load_partition_data(self, partition_idx=0):
+        keys = np.array(list(self.samples_manifest.keys()))
         if self.lazy:
-            self._process(list(self.samples_manifest.keys()), list(self.targets_manifest.keys()))
+            self._process(keys, list(self.targets_manifest.keys()))
         else:
-            self._process([list(self.samples_manifest.keys())[partition_idx]], [list(self.targets_manifest.keys())[partition_idx]])
+            self._process([keys[partition_idx]], [list(self.targets_manifest.keys())[partition_idx]])
     
     def _process(self, sample_files: List[str], target_files: List[str]=None):
         r"""Given the cloud keys of input files,
@@ -135,58 +137,60 @@ class DLCJobDataset(Generic[T_co]):
         """
         raise NotImplementedError
     
-    def __getItem__(self, index: int):     
+    def _getitem(self, index: int):
         r"""get the sample and target at the given index
         Args:
             index (int): Index
 
         Returns:
             (Any): Sample and meta data, optionally transformed by the respective transforms.
-        """       
+        """ 
         raise NotImplementedError
-            
+
     def __getitem__(self, index: int):
         if self.lazy:
-            while True:
-                try:
-                    val = self.__getItem__(index)
-                    self.cache_hits += 1
-                    return val
-                except FileNotFoundError as ex:
-                    self.cache_hits -= 1  # avoid count cache_hist multiple times
-                    nfs_path = self.samples_nfs_paths[index]
-                    tmpfs_path = '/runtime{}'.format(nfs_path)
-                    parent_dir = '/'.join(tmpfs_path.split("/")[:-1])
-                    if not os.path.exists(parent_dir):
-                        os.system('mkdir -p {}'.format(parent_dir))
-                    # print('cache miss: {}'.format(tmpfs_path))
-                    if os.path.exists(nfs_path):
-                        shutil.copyfile(nfs_path, tmpfs_path) # NFS --> tmpfs
-                        return self.__getitem__(index)
-                    else:
-                        # print("file miss: {}".format(nfs_path))
-                        miss_etag = ex.filename.split('/')[-1]
-                        self._miss_queue.put(miss_etag)
-                        sub_idx = random.randint(index+1, len(self) - 1)
-                        return self.__getitem__(sub_idx)
-                except:
-                    continue
+            try:
+                val = self._getitem(index)
+                self.cache_hits += 1
+                return val
+            except FileNotFoundError:
+                return self.__missing__(index)
         else:
-            return self.__getItem__(index)
+            return self._getitem(index)
+    
+    def __missing__(self, index: int):
+        nfs_path = self.samples_nfs_paths[index]
+        tmpfs_path = '/runtime{}'.format(nfs_path)
+        try:
+            # shutil.copyfile(nfs_path, tmpfs_path) # NFS --> tmpfs
+            os.symlink(nfs_path, tmpfs_path)
+        except FileNotFoundError:
+            parent_dir = '/'.join(tmpfs_path.split("/")[:-1])
+            if not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
+                os.symlink(nfs_path, tmpfs_path)
+            else:
+                miss_etag = nfs_path.split('/')[2]
+                self._miss_queue.put(miss_etag)
+                index = random.randint(index+1, len(self) - 1)
+        finally:
+            return self._getitem(index)
     
     def __len__(self) -> int:
         raise NotImplementedError
 
 
-class DLCJobDataLoader(DataLoader):
-    def __init__(self, dataset: DLCJobDataset[T_co], batch_size: Optional[int] = 1,
+class DLCJobDataLoader(DataLoader[T_co]):
+    _iterator: Optional['_BaseDataLoaderIter']
+    __initialized = False
+    def __init__(self, dataset: Dataset[T_co], batch_size: Optional[int] = 1,
                  shuffle: Optional[bool] = None, sampler: Union[Sampler, Iterable, None] = None,
                  batch_sampler: Union[Sampler[Sequence], Iterable[Sequence], None] = None,
                  num_workers: int = 0, collate_fn: Optional[_collate_fn_t] = None,
                  pin_memory: bool = False, drop_last: bool = False,
                  timeout: float = 0, worker_init_fn: Optional[_worker_init_fn_t] = None,
-                 multiprocessing_context=None, generator=None,
-                 *, prefetch_factor: int = 2, persistent_workers: bool = False, autoscale_workers: bool = True,
+                 multiprocessing_context=None, generator=None, prefetch_factor: int = 2, 
+                 persistent_workers: bool = False, autoscale_workers: bool = True,
                  pin_memory_device: str = ""):
         super().__init__(dataset, batch_size, shuffle, sampler, batch_sampler, num_workers, collate_fn, 
                          pin_memory, drop_last, timeout, worker_init_fn, multiprocessing_context, generator,
@@ -196,17 +200,13 @@ class DLCJobDataLoader(DataLoader):
         assert self.num_workers > 0
         assert self.prefetch_factor > 0
         
+        self.__initialized = True
+        self._iterator = None
+
         self.check_worker_number_rationality()
         self.num_batches = len(self)
         self.autoscale_workers = autoscale_workers
         self.init_tunner()
-        
-        context = zmq.Context()
-        self.socket_req = context.socket(zmq.REQ)
-        self.socket_req.connect(init_channel)
-
-        self.socket_pub = context.socket(zmq.PUB)
-        self.socket_pub.connect(ipc_channel)
     
     def init_tunner(self):
         self.tune_iters = 0
@@ -222,10 +222,15 @@ class DLCJobDataLoader(DataLoader):
         else:
             num_workers = self.num_workers
         
-        self._iterator = _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.autoscale_workers, self.realtime_load_perf, 
-                                               self.history_load_perf, self.tune_iters, self.socket_req, self.socket_pub)
-
-        return self._iterator
+        return _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.autoscale_workers, self.realtime_load_perf, self.history_load_perf, self.tune_iters)
+    
+    def __setattr__(self, attr, val):
+        if self.__initialized and attr in (
+                'batch_size', 'batch_sampler', 'sampler', 'drop_last', 'dataset', 'persistent_workers'):
+            raise ValueError('{} attribute should not be set after {} is '
+                             'initialized'.format(attr, self.__class__.__name__))
+            
+        super(DLCJobDataLoader, self).__setattr__(attr, val)
         
 
 class StatefulCycleIterator:        
@@ -290,8 +295,7 @@ class StatefulCycleIterator:
         
 class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
     def __init__(self, loader, num_batches, opt_num_workers, autoscale_workers: bool = True, 
-                 realtime_load_perf: defaultdict = None, history_load_perf: np.array = None, tune_iters: int = None, 
-                 socket_req: zmq.Socket = None, socket_pub: zmq.Socket = None):
+                 realtime_load_perf: defaultdict = None, history_load_perf: np.array = None, tune_iters: int = None):
         super(_DLCJobDataLoaderIter, self).__init__(loader)
         
         self._num_batches = num_batches
@@ -302,8 +306,12 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self.lazy = self._dataset.lazy
         
         # sockets for communication with client
-        self._socket_req = socket_req
-        self._socket_pub = socket_pub
+        zmq_context = zmq.Context()
+        self._socket_req = zmq_context.socket(zmq.REQ)
+        self._socket_req.connect(init_channel)
+
+        self._socket_pub = zmq_context.socket(zmq.PUB)
+        self._socket_pub.connect(ipc_channel)
         
         if loader.multiprocessing_context is None:
             multiprocessing_context = multiprocessing
@@ -318,14 +326,15 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         # if isinstance(self._dataset, (IterDataPipe, MapDataPipe)):
         #     self._worker_init_fn = functools.partial(_sharding_worker_init_fn, self._worker_init_fn, self._world_size, self._rank)
                 
+        manager = multiprocessing_context.Manager()
+        self._active_workers = manager.Value('_active_workers', 0)
+        
         # No certainty which module multiprocessing_context is
         self._worker_result_queue = multiprocessing_context.Queue()  # type: ignore[var-annotated]
         self._worker_pids_set = False
         self._shutdown = False
         self._workers_done_event = multiprocessing_context.Event()
-
-        manager = multiprocessing.Manager()
-        self._active_workers = manager.Value('_active_workers', 0)
+        
         self._index_queues = []
         self._workers = []
         self._worker_queue_idx_cycle = None
@@ -335,7 +344,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         # send batch sampler indexes to client
         # instruct client to init Cache
         if self.lazy:
-            t = time.time()
             sampler_iter = iter(self._index_sampler)
             batches = [batch for batch in sampler_iter]
             msg = {
@@ -345,7 +353,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             }
             self._socket_req.send_multipart([b"init", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
             self._socket_req.recv()
-            print('init: {}'.format(time.time()-t))
             
         if self._pin_memory:
             self._pin_memory_thread_done_event = threading.Event()
@@ -384,8 +391,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._partition_idx = 0
         
         # .pid can be None only before process is spawned (not the case, so ignore)
-        signal_handling._set_worker_pids(id(self), tuple(w.pid for w in self._workers))  # type: ignore[misc]
-        signal_handling._set_SIGCHLD_handler()
+        _utils.signal_handling._set_worker_pids(id(self), tuple(w.pid for w in self._workers))  # type: ignore[misc]
+        _utils.signal_handling._set_SIGCHLD_handler()
         self._worker_pids_set = True
         
         self._tune_iters = tune_iters
@@ -418,11 +425,11 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         # We resume the prefetching in case it was enabled
         if not first_iter:
             for idx in range(self._active_workers.value):
-                self._index_queues[idx].put(worker._ResumeIteration(self._shared_seed))
+                self._index_queues[idx].put(_utils.worker._ResumeIteration(self._shared_seed))
             resume_iteration_cnt = self._active_workers.value
             while resume_iteration_cnt > 0:
                 return_idx, return_data = self._get_data()
-                if isinstance(return_idx, worker._ResumeIteration):
+                if isinstance(return_idx, _utils.worker._ResumeIteration):
                     assert return_data is None
                     resume_iteration_cnt -= 1
                     
@@ -437,10 +444,12 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
 
         idx_queue = self._multiprocessing_context.Queue()
         idx_queue.cancel_join_thread()
-        w = self._multiprocessing_context.Process(target=worker._worker_loop,
-                                                 args=(self._dataset_kind, self._dataset, idx_queue, self._worker_result_queue, self._workers_done_event,
+        w = self._multiprocessing_context.Process(target=_utils.worker._worker_loop,
+                                                  args=(self._dataset_kind, self._dataset, idx_queue, self._worker_result_queue, self._workers_done_event,
                                                           self._auto_collation, self._collate_fn, self._drop_last, self._base_seed, self._worker_init_fn,
-                                                          worker_id, self._active_workers, self._persistent_workers, self._shared_seed))
+                                                          worker_id, self._active_workers, self._persistent_workers, self._shared_seed),
+                                                  name='DLCJobDataLoader(worker:{})'.format(worker_id))
+        
         w.daemon = True
         w.start()
         self._index_queues.append(idx_queue)
@@ -492,6 +501,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 else:
                     self._history_load_perf[num_workers] = mean(self._realtime_load_perf[num_workers])
 
+            cpu_count = multiprocessing.cpu_count()
             if est_num_workers == np.inf:
                 new_num_workers = num_workers
             elif est_num_workers > cpu_count:
@@ -615,9 +625,9 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
     
     def _process_data(self, data):    
         self._rcvd_idx += 1
-        if isinstance(data, worker.ExceptionWrapper):
-            data.reraise()
         self._try_put_index()
+        if isinstance(data, _utils.worker.ExceptionWrapper):
+            data.reraise()
         return data
 
     def _next_data(self):        
@@ -788,7 +798,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 #        error detection mechanism here in this function, as it
                 #        doesn't provide a SIGCHLD handler.
                 if self._worker_pids_set:
-                    signal_handling._remove_worker_pids(id(self))
+                    _utils.signal_handling._remove_worker_pids(id(self))
                     self._worker_pids_set = False
                 for w in self._workers:
                     if w.is_alive():

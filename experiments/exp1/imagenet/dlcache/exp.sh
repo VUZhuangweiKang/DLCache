@@ -3,12 +3,11 @@
 # According to the benchmark results in https://lambdalabs.com/gpu-benchmarks,
 # the training time of ResNet-50 range from 135 to 1197 images/s.
 # Therefore, we set the compute time as 0.4s - 4.0s with batch size 512.
-# compute_time=( 0.4 1.2 2.0 2.8 3.6 4.0 )
-compute_time=( 0.4 )
-node="129.59.234.239"
-pod="ilsvrc-1"
+compute_time=( 0.4 1.2 2.0 2.8 3.6 4.0 )
+node="129.59.234.237"
+pod="ilsvrc27"
 
-for((i=1;i<6;i++))
+for((i=4;i<6;i++))
 do
     for t in ${compute_time[*]}
     do
