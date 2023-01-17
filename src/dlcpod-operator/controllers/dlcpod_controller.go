@@ -33,7 +33,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -519,13 +518,13 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		allocGPU = 1
 	}
 	var containers []corev1.Container
-	alph := 0.8
+	// alph := 0.8
 	for _, job := range spec.Jobs {
 		env := job.Env
 		env = append(env, corev1.EnvVar{Name: "JOBNAME", Value: job.Name})
-		cpuLimit := int64(alph * float64(alloc.Cpu().MilliValue()/allocGPU/int64(len(spec.Jobs))))
-		memoryLimit := int64(alph * float64(alloc.Memory().MilliValue()/allocGPU/int64(len(spec.Jobs))))
-		ephemeralStorageLimit := int64(alph * float64(alloc.StorageEphemeral().MilliValue()/allocGPU/int64(len(spec.Jobs))))
+		// cpuLimit := int64(alph * float64(alloc.Cpu().MilliValue()/allocGPU/int64(len(spec.Jobs))))
+		// memoryLimit := int64(alph * float64(alloc.Memory().MilliValue()/allocGPU/int64(len(spec.Jobs))))
+		// ephemeralStorageLimit := int64(alph * float64(alloc.StorageEphemeral().MilliValue()/allocGPU/int64(len(spec.Jobs))))
 		// gpuLimit := job.Resources.Limits["nvidia.com/gpu"]
 		container := corev1.Container{
 			Name:            job.Name,
@@ -538,15 +537,15 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 			VolumeMounts:    vol_mounts,
 			Ports:           job.Ports,
 			Lifecycle:       job.Lifecycle,
-			Resources: corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
-					"cpu":               *resource.NewMilliQuantity(cpuLimit, resource.DecimalSI),
-					"memory":            *resource.NewMilliQuantity(memoryLimit, resource.DecimalSI),
-					"ephemeral-storage": *resource.NewMilliQuantity(ephemeralStorageLimit, resource.DecimalSI),
-					// "nvidia.com/gpu":    *resource.NewQuantity(gpuLimit.Value(), resource.DecimalSI),
-				},
-				Requests: job.Resources.Requests,
-			},
+			// Resources: corev1.ResourceRequirements{
+			// 	Limits: corev1.ResourceList{
+			// 		"cpu":               *resource.NewMilliQuantity(cpuLimit, resource.DecimalSI),
+			// 		"memory":            *resource.NewMilliQuantity(memoryLimit, resource.DecimalSI),
+			// 		"ephemeral-storage": *resource.NewMilliQuantity(ephemeralStorageLimit, resource.DecimalSI),
+			// 		// "nvidia.com/gpu":    *resource.NewQuantity(gpuLimit.Value(), resource.DecimalSI),
+			// 	},
+			// 	Requests: job.Resources.Requests,
+			// },
 			TTY:   job.TTY,
 			Stdin: job.Stdin,
 		}

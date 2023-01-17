@@ -40,16 +40,29 @@ class _MapDatasetFetcher(_BaseDatasetFetcher):
     def __init__(self, dataset, auto_collation, collate_fn, drop_last):
         super(_MapDatasetFetcher, self).__init__(dataset, auto_collation, collate_fn, drop_last)
 
+    # def fetch(self, possibly_batched_index):
+    #     if self.auto_collation:
+    #         fn = lambda idx: self.dataset[idx]
+    #         data = []
+    #         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    #             futures = []
+    #             for idx in possibly_batched_index:
+    #                 futures.append(executor.submit(fn, idx))
+    #             for future in concurrent.futures.as_completed(futures):
+    #                 data.append(future.result())
+    #     else:
+    #         data = self.dataset[possibly_batched_index]
+    #     return self.collate_fn(data)
+    
     def fetch(self, possibly_batched_index):
         if self.auto_collation:
-            fn = lambda idx: self.dataset[idx]
             data = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                futures = []
-                for idx in possibly_batched_index:
-                    futures.append(executor.submit(fn, idx))
-                for future in concurrent.futures.as_completed(futures):
-                    data.append(future.result())
+            miss = []
+            for idx in possibly_batched_index:
+                item, miss_etag = self.dataset[idx]
+                data.append(item)
+                if miss_etag:  
+                    miss.append(miss_etag)
         else:
-            data = self.dataset[possibly_batched_index]
-        return self.collate_fn(data)
+            data, miss = self.dataset[possibly_batched_index]
+        return self.collate_fn(data), miss

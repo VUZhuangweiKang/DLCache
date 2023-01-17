@@ -1,6 +1,6 @@
 from PIL import Image
 from lib.DLCJob import DLCJobDataset
-import numpy as np
+import os
 
 
 class ImageDataset(DLCJobDataset):
@@ -11,17 +11,18 @@ class ImageDataset(DLCJobDataset):
         self.labels = []
         super().__init__(dataset_type)
         
-    def _process(self, sample_files, target_files=None):
-        cls_names = list(set([path.split('/')[-2] for path in sample_files]))
-        cls_idx = {cls_names[i]: i for i in range(len(cls_names))}    
-        for image in sample_files:
-            self.images.append(self.samples_manifest[image])
-            self.labels.append(cls_idx[image.split('/')[-2]])
-        self.images = np.array(self.images)
-        self.labels = np.array(self.labels)
+    def _process(self, samples_manifest: dict, targets_manifest:dict = None):
+        cls_idx = {}
+        for image in samples_manifest:
+            self.images.append(samples_manifest[image])
+            label = image.split('/')[-2]
+            if label not in cls_idx:
+                cls_idx[label] = len(cls_idx)
+            self.labels.append(cls_idx[label])
 
     def _getitem(self, index: int):
         path, target = self.images[index], self.labels[index]
+        path = path.replace("/runtime", "")
         with Image.open(path) as img:
             img = img.convert("RGB")
         if self.transform is not None:

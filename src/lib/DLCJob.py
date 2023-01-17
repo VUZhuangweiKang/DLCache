@@ -3,15 +3,8 @@ import json
 import math
 import random
 import numpy as np
-import time
-import grpc
-import databus.dbus_pb2 as pb
-import databus.dbus_pb2_grpc as pb_grpc
-import zmq
 import threading
 import queue
-import pickle
-import shutil
 from typing import (
     Iterable,
     Callable,
@@ -22,12 +15,16 @@ from typing import (
     Sequence,
     TypeVar,
 )
+import shutil
 from collections import defaultdict
 import torch
 import torch.multiprocessing as multiprocessing
 from torch.utils.data import DataLoader, Dataset, Sampler, _utils
 from torch.utils.data.dataloader import _BaseDataLoaderIter
 
+import time
+import pickle
+import zmq
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -48,7 +45,7 @@ def read_secret(arg):
     return data
 
         
-class DLCJobDataset(Dataset[T_co]):
+class DLCJobDataset(Dataset[T_co]):    
     def __init__(self, dataset_type='train'):
         """An abstract class subclassing the torch.utils.data.Dataset class
         
@@ -78,56 +75,32 @@ class DLCJobDataset(Dataset[T_co]):
             job_meta = json.load(f)
         self.lazy = job_meta['qos']['LazyLoading']
         
-        self.samples_manifest = self.read_samples_manifest()
-        self.targets_manifest = self.read_targets_manifest()
-        self.samples_nfs_paths = self.get_samples_nfs_paths()
-        self.targets_nfs_paths = self.get_targets_nfs_paths()
-        
         self.num_partitions = 1 if self.lazy else len(self.samples_manifest)
         self._load_partition_data()
-        self._miss_queue = multiprocessing.Queue()
-        self._handle_miss_proc = multiprocessing.Process(target=self._handle_miss, daemon=True)
-        self._handle_miss_proc.start()
         self.cache_hits = 0
     
-    def _handle_miss(self):
-        # grpc consumes high memory
-        manager_uri = "dlcpod-manager:50051"
-        channel = grpc.insecure_channel(manager_uri)
-        cred = pb.Credential(username=read_secret('dlcache_user'), password=read_secret('dlcache_pwd'))
-        stub = pb_grpc.ManagerStub(channel)
-        while True:
-            miss_etag = self._miss_queue.get(block=True)
-            stub.handle_datamiss(pb.DataMissRequest(cred=cred, etag=miss_etag))
-            
     # manifest files for mapping object path from cloud to local
-    def read_samples_manifest(self):
-        with open('/share/{}_samples_manifests.json'.format(self.dataset_type), 'r') as f:
-            return json.load(f)
-    def read_targets_manifest(self):
-        p = '/share/{}_targets_manifests.json'.format(self.dataset_type)
+    @property
+    def samples_manifest(self):
+        with open('/share/{}_samples_manifests.pkl'.format(self.dataset_type), 'rb') as f:
+            return pickle.load(f)
+
+    @property
+    def targets_manifest(self):
+        p = '/share/{}_targets_manifests.pkl'.format(self.dataset_type)
         if os.path.exists(p):
-            with open(p, 'r') as f:
-                return json.load(f)
+            with open(p, 'rb') as f:
+                return pickle.load(f)
         else:
-            return {}
-    def get_samples_nfs_paths(self):
-        paths = list(self.samples_manifest.values())
-        paths = np.array([path.replace('/runtime', '') for path in paths])
-        return paths
-    def get_targets_nfs_paths(self):
-        paths = list(self.targets_manifest.values())
-        paths = np.array([path.replace('/runtime', '') for path in paths])
-        return paths
+            return None
     
     def _load_partition_data(self, partition_idx=0):
-        keys = np.array(list(self.samples_manifest.keys()))
         if self.lazy:
-            self._process(keys, list(self.targets_manifest.keys()))
+            self._process(self.samples_manifest, self.targets_manifest)
         else:
-            self._process([keys[partition_idx]], [list(self.targets_manifest.keys())[partition_idx]])
+            self._process(dict(self.samples_manifest.items()[partition_idx]), dict(self.targets_manifest.items()[partition_idx]))
     
-    def _process(self, sample_files: List[str], target_files: List[str]=None):
+    def _process(self, samples_manifest: dict, targets_manifest: dict=None):
         r"""Given the cloud keys of input files,
         you need to use the samples_manifest and targets_manifest to 
         generate X, Y that can be iterated in the __getItem__ function.
@@ -152,36 +125,45 @@ class DLCJobDataset(Dataset[T_co]):
             try:
                 val = self._getitem(index)
                 self.cache_hits += 1
-                return val
-            except FileNotFoundError:
-                return self.__missing__(index)
+                return (val, None)
+            except FileNotFoundError as ex:
+                return self.__missing__(index, ex.filename)
         else:
-            return self._getitem(index)
+            return (self._getitem(index), None)
     
-    def __missing__(self, index: int):
-        nfs_path = self.samples_nfs_paths[index]
-        tmpfs_path = '/runtime{}'.format(nfs_path)
+    def __missing__(self, index: int, filename: str):
+        tmpfs_path = filename
+        nfs_path = tmpfs_path.replace('/runtime', '')
+        miss_etag = None
         try:
-            # shutil.copyfile(nfs_path, tmpfs_path) # NFS --> tmpfs
             os.symlink(nfs_path, tmpfs_path)
-        except FileNotFoundError:
+        except FileNotFoundError as ex:
             parent_dir = '/'.join(tmpfs_path.split("/")[:-1])
             if not os.path.exists(parent_dir):
                 os.makedirs(parent_dir, exist_ok=True)
                 os.symlink(nfs_path, tmpfs_path)
-            else:
+            elif ex.filename == nfs_path:
                 miss_etag = nfs_path.split('/')[2]
-                self._miss_queue.put(miss_etag)
                 index = random.randint(index+1, len(self) - 1)
+            else:
+                raise ex
         finally:
-            return self._getitem(index)
+            return (self._getitem(index), miss_etag)
     
     def __len__(self) -> int:
         raise NotImplementedError
 
 
 class DLCJobDataLoader(DataLoader[T_co]):
-    _iterator: Optional['_BaseDataLoaderIter']
+    dataset: Dataset[T_co]
+    batch_size: Optional[int]
+    num_workers: int
+    pin_memory: bool
+    drop_last: bool
+    timeout: float
+    sampler: Sampler
+    prefetch_factor: int
+    _iterator : Optional['_BaseDataLoaderIter']
     __initialized = False
     def __init__(self, dataset: Dataset[T_co], batch_size: Optional[int] = 1,
                  shuffle: Optional[bool] = None, sampler: Union[Sampler, Iterable, None] = None,
@@ -295,7 +277,7 @@ class StatefulCycleIterator:
         
 class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
     def __init__(self, loader, num_batches, opt_num_workers, autoscale_workers: bool = True, 
-                 realtime_load_perf: defaultdict = None, history_load_perf: np.array = None, tune_iters: int = None):
+                 realtime_load_perf: defaultdict = None, history_load_perf: defaultdict = None, tune_iters: int = None):
         super(_DLCJobDataLoaderIter, self).__init__(loader)
         
         self._num_batches = num_batches
@@ -309,9 +291,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         zmq_context = zmq.Context()
         self._socket_req = zmq_context.socket(zmq.REQ)
         self._socket_req.connect(init_channel)
-
         self._socket_pub = zmq_context.socket(zmq.PUB)
-        self._socket_pub.connect(ipc_channel)
+        self._socket_pub.bind(ipc_channel)
         
         if loader.multiprocessing_context is None:
             multiprocessing_context = multiprocessing
@@ -325,9 +306,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         #   Additional worker init function will take care of sharding in MP and Distributed
         # if isinstance(self._dataset, (IterDataPipe, MapDataPipe)):
         #     self._worker_init_fn = functools.partial(_sharding_worker_init_fn, self._worker_init_fn, self._world_size, self._rank)
-                
-        manager = multiprocessing_context.Manager()
-        self._active_workers = manager.Value('_active_workers', 0)
+    
+        self._active_workers = multiprocessing_context.Value('i', 0)
         
         # No certainty which module multiprocessing_context is
         self._worker_result_queue = multiprocessing_context.Queue()  # type: ignore[var-annotated]
@@ -447,8 +427,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         w = self._multiprocessing_context.Process(target=_utils.worker._worker_loop,
                                                   args=(self._dataset_kind, self._dataset, idx_queue, self._worker_result_queue, self._workers_done_event,
                                                           self._auto_collation, self._collate_fn, self._drop_last, self._base_seed, self._worker_init_fn,
-                                                          worker_id, self._active_workers, self._persistent_workers, self._shared_seed),
-                                                  name='DLCJobDataLoader(worker:{})'.format(worker_id))
+                                                          worker_id, self._active_workers, self._persistent_workers))
         
         w.daemon = True
         w.start()
@@ -630,7 +609,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             data.reraise()
         return data
 
-    def _next_data(self):        
+    def _next_data(self):
         if self._last_iter_time is not None:
             if len(self._req_time) == self._tune_freq:
                 self._req_time.clear()
@@ -670,7 +649,11 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                     break
                 
                 assert not self._shutdown and self._tasks_outstanding > 0
-                idx, data, active_workers, fetch_time  = self._get_data()
+                idx, data, active_workers, fetch_time, miss  = self._get_data()
+                
+                if miss:
+                    self._socket_pub.send_multipart([b'missETags', self._dataset.dataset_type.encode('utf-8'), pickle.dumps(miss)])
+                    
                 self._tasks_outstanding -= 1
 
                 if idx != self._rcvd_idx:

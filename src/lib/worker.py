@@ -202,7 +202,7 @@ def _generate_state(base_seed, worker_id):
 
 def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                      auto_collation, collate_fn, drop_last, base_seed, init_fn, worker_id,
-                     num_workers, persistent_workers, shared_seed):
+                     num_workers, persistent_workers):
     try:
         # Initialize C side signal handlers for SIGBUS and SIGSEGV. Python signal
         # module's handlers are executed after Python returns from C low-level
@@ -222,12 +222,6 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
 
         from torch.utils.data import IterDataPipe
         from torch.utils.data.graph_settings import apply_shuffle_seed
-        
-        shared_rng = torch.Generator()
-        if isinstance(dataset, IterDataPipe):
-            assert shared_seed is not None
-            shared_rng.manual_seed(shared_seed)
-            dataset = apply_shuffle_seed(dataset, shared_rng)
 
         global _worker_info
         _worker_info = WorkerInfo(id=worker_id, num_workers=num_workers.value,
@@ -274,11 +268,6 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                 # Acknowledge the main process
                 data_queue.put((r, None))
                 iteration_end = False
-                
-                if isinstance(dataset, IterDataPipe):
-                    assert r.seed is not None
-                    shared_rng.manual_seed(r.seed)
-                    dataset = apply_shuffle_seed(dataset, shared_rng)
 
                 # Recreate the fetcher for worker-reuse policy
                 fetcher = _DatasetKind.create_fetcher(
@@ -303,7 +292,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                 init_exception = None
             else:
                 try:
-                    data = fetcher.fetch(index)
+                    data, miss = fetcher.fetch(index)
                 except Exception as e:
                     if isinstance(e, StopIteration) and dataset_kind == _DatasetKind.Iterable:
                         data = _IterableDatasetStopIteration(worker_id)
@@ -317,6 +306,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                         # See NOTE [ Python Traceback Reference Cycle Problem ]
                         data = ExceptionWrapper(
                             where="in DataLoader worker process {}".format(worker_id))
+                        miss = None
                     
             wn2 = num_workers.value
             
@@ -326,9 +316,9 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             else:
                 freq = get_time - last_get_time
 
-            data_queue.put((idx, data, _num_workers, freq))
+            data_queue.put((idx, data, _num_workers, freq, miss))
             last_get_time = get_time
-            del data, idx, index, r  # save memory
+            del data, idx, index, r, _num_workers, wn1, wn2, freq, miss  # save memory
     except KeyboardInterrupt:
         # Main process will raise KeyboardInterrupt anyways.
         pass

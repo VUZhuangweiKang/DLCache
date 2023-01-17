@@ -9,7 +9,6 @@ import databus.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import numpy as np
 from pymongo import MongoClient
-import concurrent
 import multiprocessing
 import shutil
 import zmq
@@ -17,6 +16,7 @@ from datetime import datetime
 import pickle
 from collections import defaultdict
 import concurrent.futures
+import gc
 import bson
 from utils import *
 
@@ -84,8 +84,8 @@ class Client(object):
         self.socket_rep = context.socket(zmq.REP)
         self.socket_rep.bind(init_channel)
         self.socket_sub = context.socket(zmq.SUB)
-        self.socket_sub.bind(ipc_channel)
-        for topic in [b'loadCache', b'releaseCache', b'expireChunk', b'stopIteration']:
+        self.socket_sub.connect(ipc_channel)
+        for topic in [b'loadCache', b'releaseCache', b'expireChunk', b'stopIteration', b'missETags']:
             self.socket_sub.setsockopt(zmq.SUBSCRIBE, topic)
         
         self.poller = zmq.Poller()
@@ -170,14 +170,14 @@ class Client(object):
             chunk_etags = job_info['ChunkETags'][dataset_type]
             samples_manifest = load(chunk_etags['samples'])
             targets_manifest = load(chunk_etags['targets'])
-            path = '/share/{}_samples_manifests.json'.format(dataset_type)
+            path = '/share/{}_samples_manifests.pkl'.format(dataset_type)
             if not os.path.exists(path):
-                with open(path, 'w') as f:
-                    json.dump(samples_manifest, f)
-            path = '/share/{}_targets_manifests.json'.format(dataset_type)
+                with open(path, 'wb') as f:
+                    pickle.dump(samples_manifest, f)
+            path = '/share/{}_targets_manifests.pkl'.format(dataset_type)
             if not os.path.exists(path) and len(targets_manifest) > 0:
-                with open('/share/{}_targets_manifests.json'.format(dataset_type), 'w') as f:
-                    json.dump(targets_manifest)
+                with open('/share/{}_targets_manifests.pkl'.format(dataset_type), 'wb') as f:
+                    pickle.dump(targets_manifest)
     
     def async_mongo_opt(self, mongo_opt_queue):
         while True:
@@ -185,7 +185,7 @@ class Client(object):
             if func == 'update_many':
                 self.dataset_col.update_many(*args)
                 
-    def load_cache(self, send_idx_queue, copy_time):
+    def load_cache(self, send_idx_queue, copy_time):        
         while True:
             dataset_type, idx, start_from = send_idx_queue.get()
             while start_from >= len(self.tmpfs_paths[dataset_type][idx]):
@@ -344,11 +344,11 @@ class Client(object):
                     prefetch_factor = data['prefetch_factor']
                     num_workers = data['active_workers']
                     window_size = num_workers * prefetch_factor
-                    with open('/share/{}_samples_manifests.json'.format(dataset_type), 'r') as f:
-                        samples_tmpfs_paths = np.array(list(json.load(f).values()))
+                    with open('/share/{}_samples_manifests.pkl'.format(dataset_type), 'rb') as f:
+                        samples_tmpfs_paths = np.array(list(pickle.load(f).values()))
                     targets_tmpfs_paths = None
-                    if os.path.exists('/share/{}_targets_manifests.json'.format(dataset_type)):
-                        with open('/share/{}_targets_manifests.json'.format(dataset_type), 'r') as f:
+                    if os.path.exists('/share/{}_targets_manifests.pkl'.format(dataset_type)):
+                        with open('/share/{}_targets_manifests.pkl'.format(dataset_type), 'rb') as f:
                             targets_tmpfs_paths = np.array(list(json.load(f).values()))
                         
                     batched_tmpfs_paths = []
@@ -379,9 +379,9 @@ class Client(object):
                     
                     manager = multiprocessing.Manager()
                     self.copy_time = manager.list()
-                    self.send_idx_queue = manager.Queue()
-                    self.rcvd_idx_queue = manager.Queue()
-                    self.mongo_opt_queue = manager.Queue()
+                    self.send_idx_queue = multiprocessing.Queue()
+                    self.rcvd_idx_queue = multiprocessing.Queue()
+                    self.mongo_opt_queue = multiprocessing.Queue()
                     self.cache_usage = manager.list()
                     
                     self.load_cache_proc = multiprocessing.Process(target=self.load_cache, args=(self.send_idx_queue, self.copy_time), daemon=True)
@@ -457,6 +457,10 @@ class Client(object):
                     if len(self.cache_usage) > 0:
                         np.save('/share/{}_cache_usage.npy'.format(dataset_type), self.cache_usage)
                     self.clear_runtime()
+                elif topic == "missETags":
+                    for etag in pickle.loads(data):
+                        self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
+            gc.collect()
 
 
 if __name__ == '__main__':
