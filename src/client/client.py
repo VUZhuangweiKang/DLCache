@@ -1,23 +1,24 @@
-import grpc
-import signal
-import json
+
 import time
 import math
 import glob
+import shutil
+import zmq
+import pickle
+import gc
+import signal
+import json, bson
+import numpy as np
+import multiprocessing
+import concurrent.futures
+from pymongo import MongoClient
+from datetime import datetime
+from collections import defaultdict
+
+import grpc
 import databus.dbus_pb2 as pb
 import databus.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
-import numpy as np
-from pymongo import MongoClient
-import multiprocessing
-import shutil
-import zmq
-from datetime import datetime
-import pickle
-from collections import defaultdict
-import concurrent.futures
-import gc
-import bson
 from utils import *
 
 
@@ -379,9 +380,9 @@ class Client(object):
                     
                     manager = multiprocessing.Manager()
                     self.copy_time = manager.list()
-                    self.send_idx_queue = multiprocessing.Queue()
-                    self.rcvd_idx_queue = multiprocessing.Queue()
-                    self.mongo_opt_queue = multiprocessing.Queue()
+                    self.send_idx_queue = manager.Queue()
+                    self.rcvd_idx_queue = manager.Queue()
+                    self.mongo_opt_queue = manager.Queue()
                     self.cache_usage = manager.list()
                     
                     self.load_cache_proc = multiprocessing.Process(target=self.load_cache, args=(self.send_idx_queue, self.copy_time), daemon=True)

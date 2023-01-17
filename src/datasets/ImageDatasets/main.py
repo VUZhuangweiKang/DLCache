@@ -1,5 +1,5 @@
-import argparse
 import os
+import argparse
 import random
 import shutil
 import time
@@ -19,6 +19,7 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.models as models
 from torch.utils.data import Subset
+
 from ImageDataset import ImageDataset
 from lib.DLCJob import DLCJobDataLoader
 
@@ -514,6 +515,4 @@ def accuracy(output, target, topk=(1,)):
 
 
 if __name__ == '__main__':
-    import torch.multiprocessing as mp
-    mp.set_start_method("spawn", force=True)
     main()

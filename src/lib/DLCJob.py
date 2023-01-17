@@ -101,8 +101,7 @@ class DLCJobDataset(Dataset[T_co]):
             self._process(dict(self.samples_manifest.items()[partition_idx]), dict(self.targets_manifest.items()[partition_idx]))
     
     def _process(self, samples_manifest: dict, targets_manifest: dict=None):
-        r"""Given the cloud keys of input files,
-        you need to use the samples_manifest and targets_manifest to 
+        r"""Given the manifests, you may use them to 
         generate X, Y that can be iterated in the __getItem__ function.
         
         Raises:
