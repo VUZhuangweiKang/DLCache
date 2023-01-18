@@ -44,15 +44,19 @@ class _MapDatasetFetcher(_BaseDatasetFetcher):
     #     if self.auto_collation:
     #         fn = lambda idx: self.dataset[idx]
     #         data = []
-    #         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    #         miss = []
+    #         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
     #             futures = []
     #             for idx in possibly_batched_index:
     #                 futures.append(executor.submit(fn, idx))
     #             for future in concurrent.futures.as_completed(futures):
-    #                 data.append(future.result())
+    #                 item, miss_etag = future.result()
+    #                 data.append(item)
+    #                 if miss_etag:
+    #                     miss.append(miss_etag)
     #     else:
-    #         data = self.dataset[possibly_batched_index]
-    #     return self.collate_fn(data)
+    #         data, miss = self.dataset[possibly_batched_index]
+    #     return self.collate_fn(data), miss
     
     def fetch(self, possibly_batched_index):
         if self.auto_collation:

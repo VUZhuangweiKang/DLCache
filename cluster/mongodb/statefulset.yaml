@@ -4,7 +4,7 @@ metadata:
   name: mongo
 spec:
   serviceName: mongo
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: mongo
@@ -25,7 +25,8 @@ spec:
           - name: MONGO_INITDB_ROOT_PASSWORD_FILE
             value: /etc/k8-test/admin/MONGO_ROOT_PASSWORD
         command: ["/bin/sh"]
-        args: ["-c", "mongod --replSet=rs0 --bind_ip_all"]
+        # args: ["-c", "mongod --replSet=rs0 --bind_ip_all"]
+        args: ["-c", "mongod --bind_ip_all"]
         ports:
         - name: mongo-port
           containerPort: 27017

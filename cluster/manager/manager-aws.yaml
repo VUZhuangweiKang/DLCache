@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dlcpod-manager
+  labels:
+    app: manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: manager
+  template:
+    metadata:
+      labels:
+        app: manager
+    spec:
+      containers:
+      - name: dlcpod-manager
+        image: zhuangweikang/dlcache-dev:manager
+        imagePullPolicy: Always
+        command: ["bash"]
+        ports:
+        - name: listen-port
+          containerPort: 50051
+        volumeMounts:
+        - name: configuration
+          mountPath: /configs/manager
+        - name: 172-31-92-64
+          mountPath: /172.31.92.64
+        - name: 172-31-87-22
+          mountPath: /172.31.87.22
+        stdin: true
+        tty: true
+      volumes:
+        - name: configuration
+          configMap:
+            name: dlcpod-manager-config
+        - name: 172-31-92-64
+          nfs: 
+            server: 172.31.92.64
+            path: /nfs_storage
+        - name: 172-31-87-22
+          nfs: 
+            server: 172.31.87.22
+            path: /nfs_storage

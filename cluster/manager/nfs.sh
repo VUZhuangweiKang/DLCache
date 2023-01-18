@@ -15,13 +15,13 @@ sudo exportfs -rv
 sudo systemctl restart nfs-kernel-server
 sudo apt-get install cachefilesd
 sudo nano /etc/default/cachefilesd
-RUN=yes
+# RUN=yes
 
 
 machines=("129.59.234.237" "129.59.234.238" "129.59.234.239" "129.59.234.240" "129.59.234.241")
 for mach in "${machines[@]}"; do
     sudo mkdir /$mach
-    # sudo mount -t nfs $mach:/nfs_storage /$mach
-    sudo mount -t nfs $mach:/nfs_storage /$mach -o fsc
+    sudo mount -t nfs $mach:/nfs_storage /$mach
+    # sudo mount -t nfs $mach:/nfs_storage /$mach -o fsc
     sudo service cachefilesd restart
 done

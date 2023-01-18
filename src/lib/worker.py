@@ -286,7 +286,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             idx, index = r
             data: Union[_IterableDatasetStopIteration, ExceptionWrapper]
             
-            wn1 = num_workers.value
+            # wn1 = num_workers.value
             if init_exception is not None:
                 data = init_exception
                 init_exception = None
@@ -308,9 +308,10 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                             where="in DataLoader worker process {}".format(worker_id))
                         miss = None
                     
-            wn2 = num_workers.value
+            # wn2 = num_workers.value
             
-            _num_workers = None if wn1 != wn2 else wn1
+            # _num_workers = None if wn1 != wn2 else wn1
+            _num_workers = 4
             if last_get_time is None:
                 freq = None
             else:
@@ -318,7 +319,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
 
             data_queue.put((idx, data, _num_workers, freq, miss))
             last_get_time = get_time
-            del data, idx, index, r, _num_workers, wn1, wn2, freq, miss  # save memory
+            del data, idx, index, r, _num_workers, freq, miss  # save memory
     except KeyboardInterrupt:
         # Main process will raise KeyboardInterrupt anyways.
         pass

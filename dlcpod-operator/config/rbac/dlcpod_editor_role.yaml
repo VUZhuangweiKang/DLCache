@@ -1,0 +1,24 @@
+# permissions for end users to edit dlcpods.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dlcpod-editor-role
+rules:
+- apiGroups:
+  - docgroup.com
+  resources:
+  - dlcpods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - docgroup.com
+  resources:
+  - dlcpods/status
+  verbs:
+  - get

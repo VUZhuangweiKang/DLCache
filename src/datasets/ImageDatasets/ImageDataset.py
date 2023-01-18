@@ -22,7 +22,6 @@ class ImageDataset(DLCJobDataset):
 
     def _getitem(self, index: int):
         path, target = self.images[index], self.labels[index]
-        path = path.replace("/runtime", "")
         with Image.open(path) as img:
             img = img.convert("RGB")
         if self.transform is not None:

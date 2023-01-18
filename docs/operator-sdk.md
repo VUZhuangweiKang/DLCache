@@ -32,7 +32,7 @@ chmod +x operator-sdk_${OS}_${ARCH} && sudo mv operator-sdk_${OS}_${ARCH} /usr/l
 
 # create an operator
 ```shell
-operator-sdk init dlcpod-operator --domain com --repo=github.com/VUZhuangweiKang/DLCache/tree/main/dlcpod-operator
+operator-sdk init dlcpod-operator --domain com --repo=github.com/VUZhuangweiKang/DLCache/tree/main/src/dlcpod-operator
 operator-sdk create api --group docgroup --version=v1alpha1 --kind=DLCPod --resource=true --controller=true
 
 make generate

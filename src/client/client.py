@@ -19,6 +19,7 @@ import grpc
 import databus.dbus_pb2 as pb
 import databus.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
+import pyfastcopy
 from utils import *
 
 
