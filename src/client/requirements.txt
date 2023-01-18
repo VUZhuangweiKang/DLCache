@@ -5,3 +5,4 @@ numpy
 nvidia-ml-py3
 pymongo
 zmq
+pyfastcopy

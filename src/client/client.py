@@ -9,12 +9,12 @@ import gc
 import signal
 import json, bson
 import numpy as np
-import multiprocessing
+import multiprocessing as mp
 import concurrent.futures
 from pymongo import MongoClient
 from datetime import datetime
 from collections import defaultdict
-
+from queue import Empty
 import grpc
 import databus.dbus_pb2 as pb
 import databus.dbus_pb2_grpc as pb_grpc
@@ -197,22 +197,6 @@ class Client(object):
             batch_size = len(self.tmpfs_paths[dataset_type][idx])
             # logger.info('load cache for batch {}, remaining {}'.format((dataset_type, idx, start_from), send_idx_queue.qsize()))
             t = time.time()
-            
-            # update chunk status
-            chunk_etags = []
-            for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:
-                chunk_etags.append(sample_path.split('/')[3])
-                if target_path:
-                    chunk_etags.append(target_path.split('/')[3])
-            chunk_etags = list(set(chunk_etags))
-            now = datetime.utcnow().timestamp()
-            self.mongo_opt_queue.put(('update_many', [{"ChunkETag": {"$in": chunk_etags}}, 
-                {
-                        "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
-                        "$inc": {"Status.active_count": 1},
-                        "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
-                }]))
-            
             if idx < len(self.tmpfs_paths[dataset_type]):
                 def docopy(tmpfs_path):
                     nfs_path = tmpfs_path.replace('/runtime', '')
@@ -230,7 +214,7 @@ class Client(object):
                     self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
 
                 # futures = []
-                # with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                # with concurrent.futures.ThreadPoolExecutor(max_workers=mp.cpu_count()) as executor:
                 #     for sample_path, target_path in self.tmpfs_paths[dataset_type][idx][start_from:]:
                 #         futures.append(executor.submit(docopy, sample_path))
                 #         if target_path is not None:
@@ -241,14 +225,26 @@ class Client(object):
                     docopy(sample_path)
                     if target_path is not None:
                         docopy(target_path)
-
-                # only record full batch
-                if batch_size-start_from > 0:
-                    dur = time.time() - t
-                    copy_time.append(batch_size * dur/(batch_size-start_from))
-                    # print('copy {} images: {}'.format(batch_size-start_from, dur))
+                        
+                dur = time.time() - t
+                copy_time.append(batch_size * dur/(batch_size-start_from))
+                print('expect hit rate: {}'.format((batch_size-start_from)/batch_size))
             
-            del chunk_etags, dataset_type, idx, start_from
+            # update chunk status
+            chunk_etags = []
+            for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:
+                chunk_etags.append(sample_path.split('/')[3])
+                if target_path:
+                    chunk_etags.append(target_path.split('/')[3])
+            chunk_etags = list(set(chunk_etags))
+            now = datetime.utcnow().timestamp()
+            self.mongo_opt_queue.put(('update_many', [{"ChunkETag": {"$in": chunk_etags}}, 
+                {
+                        "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
+                        "$inc": {"Status.active_count": 1},
+                        "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
+                }]))
+            # del chunk_etags, dataset_type, idx, start_from
 
     def release_cache(self, rcvd_idx_queue, cache_usage):
         while True:
@@ -264,7 +260,7 @@ class Client(object):
                 
                 # futures = []
                 # for sample_path, target_path in self.tmpfs_paths[dataset_type][idx]:            
-                #     with concurrent.futures.ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+                #     with concurrent.futures.ThreadPoolExecutor(max_workers=mp.cpu_count()) as executor:
                 #         futures.append(executor.submit(release, sample_path))
                 #         if target_path:
                 #             futures.append(executor.submit(release, target_path))
@@ -334,7 +330,7 @@ class Client(object):
         window_size = None
         # clear runtime cache
         self.clear_runtime()
-
+            
         while True:
             socks = dict(self.poller.poll())
             if self.socket_rep in socks and socks[self.socket_rep] == zmq.POLLIN:
@@ -352,47 +348,31 @@ class Client(object):
                     if os.path.exists('/share/{}_targets_manifests.pkl'.format(dataset_type)):
                         with open('/share/{}_targets_manifests.pkl'.format(dataset_type), 'rb') as f:
                             targets_tmpfs_paths = np.array(list(json.load(f).values()))
-                        
+
                     batched_tmpfs_paths = []
                     for batch in data['paths']:
                         batched_tmpfs_paths.append(list(zip(samples_tmpfs_paths[batch], \
                             targets_tmpfs_paths[batch] if targets_tmpfs_paths else [None]*len(batch))))
                     self.tmpfs_paths[dataset_type] = batched_tmpfs_paths
                     
-                    if self.load_cache_proc is not None:
-                        while self.send_idx_queue.qsize() > 0 and self.send_idx_queue[0][1] > window_size:
-                            self.send_idx_queue.get_nowait()
-                        
-                        while self.load_cache_proc.is_alive():
-                            self.load_cache_proc.terminate()
-                        else:
-                            self.load_cache_proc.close()
-                            
-                        while self.release_cache_proc.is_alive():
-                            self.release_cache_proc.terminate()
-                        else:
-                            self.release_cache_proc.close()
-                        
-                        while self.mongo_opt_proc.is_alive():
-                            self.mongo_opt_proc.terminate()
-                        else:
-                            self.mongo_opt_proc.close()
-                        del self.load_cache_proc, self.release_cache_proc, self.mongo_opt_proc
+                    self.send_idx_queue = mp.Queue()
+                    self.send_idx_queue.cancel_join_thread()
+                    self.rcvd_idx_queue = mp.Queue()
+                    self.rcvd_idx_queue.cancel_join_thread()
+                    self.mongo_opt_queue = mp.Queue()
+                    self.mongo_opt_queue.cancel_join_thread()
                     
-                    manager = multiprocessing.Manager()
+                    manager = mp.Manager()
                     self.copy_time = manager.list()
-                    self.send_idx_queue = manager.Queue()
-                    self.rcvd_idx_queue = manager.Queue()
-                    self.mongo_opt_queue = manager.Queue()
                     self.cache_usage = manager.list()
-                    
-                    self.load_cache_proc = multiprocessing.Process(target=self.load_cache, args=(self.send_idx_queue, self.copy_time), daemon=True)
-                    self.release_cache_proc = multiprocessing.Process(target=self.release_cache, args=(self.rcvd_idx_queue, self.cache_usage), daemon=True)
-                    self.mongo_opt_proc = multiprocessing.Process(target=self.async_mongo_opt, args=(self.mongo_opt_queue,), daemon=True)
-                    
+        
+                    self.load_cache_proc = mp.Process(target=self.load_cache, args=(self.send_idx_queue, self.copy_time), daemon=True)
+                    self.release_cache_proc = mp.Process(target=self.release_cache, args=(self.rcvd_idx_queue, self.cache_usage), daemon=True)
+                    self.mongo_opt_proc = mp.Process(target=self.async_mongo_opt, args=(self.mongo_opt_queue,), daemon=True)
                     self.load_cache_proc.start()
                     self.release_cache_proc.start()
                     self.mongo_opt_proc.start()
+                    
             if self.socket_sub in socks and socks[self.socket_sub] == zmq.POLLIN:
                 topic, dataset_type, data = self.socket_sub.recv_multipart()
                 topic, dataset_type = topic.decode("utf-8"), dataset_type.decode('utf-8')
@@ -427,12 +407,12 @@ class Client(object):
                     if np.isnan(data['req_time']) or len(self.copy_time) == 0:
                         k = 0
                     else:
-                        avg_copy_time = np.mean(self.copy_time)
-                        # print(avg_copy_time, data['req_time'])
-                        if data['req_time'] > avg_copy_time:
+                        cp_time = np.median(self.copy_time)
+                        # print(cp_time, data['req_time'])
+                        if data['req_time'] >= cp_time:
                             k = 0
                         else:
-                            k = math.ceil(batch_size * (1 - data['req_time']/avg_copy_time))
+                            k = math.ceil(batch_size * (1 - data['req_time']/cp_time))
                     
                     if len(self.copy_time) >= window_size:
                         self.copy_time.pop(0)
@@ -444,6 +424,7 @@ class Client(object):
                     while True:
                         try:
                             self.send_idx_queue.get_nowait()
+                            print('clear backlog...')
                         except:
                             break
                     self.send_idx_queue.put((dataset_type, send_idx, k))
@@ -453,16 +434,23 @@ class Client(object):
                 elif topic == "expireChunk":
                     if self.cool_down_proc is not None and self.cool_down_proc.is_alive():
                         self.cool_down_proc.terminate()
-                    self.cool_down_proc = multiprocessing.Process(target=self.expire_chunks, args=(dataset_type,), daemon=True)
+                    self.cool_down_proc = mp.Process(target=self.expire_chunks, args=(dataset_type,), daemon=True)
                     self.cool_down_proc.start()
                 elif topic == "stopIteration":
                     if len(self.cache_usage) > 0:
-                        np.save('/share/{}_cache_usage.npy'.format(dataset_type), self.cache_usage)
+                        np.save('{}_cache_usage.npy'.format(dataset_type), self.cache_usage)
                     self.clear_runtime()
+                    
+                    terminate = lambda proc: proc.terminate()
+                    terminate(self.load_cache_proc)
+                    terminate(self.release_cache_proc)
+                    terminate(self.mongo_opt_proc)
+                    del self.load_cache_proc, self.release_cache_proc, self.mongo_opt_proc
+                    del self.send_idx_queue, self.rcvd_idx_queue, self.mongo_opt_queue, self.copy_time, self.cache_usage
+
                 elif topic == "missETags":
                     for etag in pickle.loads(data):
                         self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
-            gc.collect()
 
 
 if __name__ == '__main__':

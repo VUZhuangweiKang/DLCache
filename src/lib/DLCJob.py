@@ -131,16 +131,15 @@ class DLCJobDataset(Dataset[T_co]):
             return (self._getitem(index), None)
     
     def __missing__(self, index: int, filename: str):
-        tmpfs_path = filename
-        nfs_path = tmpfs_path.replace('/runtime', '')
+        nfs_path = filename.replace('/runtime', '')
         miss_etag = None
         try:
-            os.symlink(nfs_path, tmpfs_path)
+            os.symlink(nfs_path, filename)
         except FileNotFoundError as ex:
-            parent_dir = '/'.join(tmpfs_path.split("/")[:-1])
+            parent_dir = '/'.join(filename.split("/")[:-1])
             if not os.path.exists(parent_dir):
                 os.makedirs(parent_dir, exist_ok=True)
-                os.symlink(nfs_path, tmpfs_path)
+                os.symlink(nfs_path, filename)
             elif ex.filename == nfs_path:
                 miss_etag = nfs_path.split('/')[2]
                 index = random.randint(index+1, len(self) - 1)

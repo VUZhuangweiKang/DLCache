@@ -301,16 +301,23 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     # switch to train mode
     model.train()
 
-    t = time.time()
-    end = time.time()
-    load_time = 0
     if args.mini_batches == 0:
         num_batches = len(train_loader)
     else:
         num_batches = args.mini_batches
-    for i, (images, target) in enumerate(train_loader):
+        
+    t = time.time()
+    end = time.time()
+    load_time = 0
+    # for i, (images, target) in enumerate(train_loader):
+    train_iter = iter(train_loader)
+    for i in range(num_batches):
+        
         # measure data loading time
-        load_time += time.time() - end
+        t1 = time.time()
+        images, target = next(train_iter)
+        load_time += time.time() - t1
+        
         data_time.update(time.time() - end)
 
         # if args.gpu is not None:
@@ -335,14 +342,15 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         # measure elapsed time
         batch_time.update(time.time() - end)
-        time.sleep(args.sim_compute_time)
-        end = time.time()
-
         if i % args.print_freq == 0:
             progress.display(i + 1)
         
         if i == num_batches:
             break
+        
+        time.sleep(args.sim_compute_time)
+        end = time.time()
+        
     print('Total Time: {}'.format(time.time()-t))
     return load_time
 
