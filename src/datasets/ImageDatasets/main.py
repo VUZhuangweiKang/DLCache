@@ -297,7 +297,7 @@ def main_worker(gpu, ngpus_per_node, args):
         #     }, is_best)
 
     summary = np.array(summary)
-    np.save('exp.npy', summary)
+    np.save('load_time.npy', summary)
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')

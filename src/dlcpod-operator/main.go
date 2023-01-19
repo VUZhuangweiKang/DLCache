@@ -1,5 +1,5 @@
 /*
-Copyright 2022.
+Copyright 2023.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,8 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	docgroupv1alpha1 "github.com/VUZhuangweiKang/DLCache/tree/main/dlcpod-operator/api/v1alpha1"
-	"github.com/VUZhuangweiKang/DLCache/tree/main/dlcpod-operator/controllers"
+	docgroupv1alpha1 "github.com/VUZhuangweiKang/DLCache/tree/main/src/dlcpod-operator/api/v1alpha1"
+	"github.com/VUZhuangweiKang/DLCache/tree/main/src/dlcpod-operator/controllers"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -71,7 +71,7 @@ func main() {
 		Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "1f6077b6.com",
+		LeaderElectionID:       "e6b0a843.com",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
