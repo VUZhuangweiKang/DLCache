@@ -75,6 +75,9 @@ class DLCJobDataset(Dataset[T_co]):
             job_meta = json.load(f)
         self.lazy = job_meta['qos']['LazyLoading']
         
+        self._samples: List = []
+        self._targets: List = []
+    
         self.num_partitions = 1 if self.lazy else len(self.samples_manifest)
         self._load_partition_data()
         self.cache_hits = 0
@@ -93,12 +96,13 @@ class DLCJobDataset(Dataset[T_co]):
                 return pickle.load(f)
         else:
             return None
-    
+        
     def _load_partition_data(self, partition_idx=0):
         if self.lazy:
             self._process(self.samples_manifest, self.targets_manifest)
         else:
             self._process(dict(self.samples_manifest.items()[partition_idx]), dict(self.targets_manifest.items()[partition_idx]))
+        assert len(self._samples) > 0
     
     def _process(self, samples_manifest: dict, targets_manifest: dict=None):
         r"""Given the manifests, you may use them to 
@@ -108,48 +112,38 @@ class DLCJobDataset(Dataset[T_co]):
             NotImplementedError: _description_
         """
         raise NotImplementedError
-    
-    def _getitem(self, index: int):
-        r"""get the sample and target at the given index
-        Args:
-            index (int): Index
 
-        Returns:
-            (Any): Sample and meta data, optionally transformed by the respective transforms.
-        """ 
+    def _load(self, sample_item, target_item = None):
         raise NotImplementedError
-
+    
     def __getitem__(self, index: int):
         if self.lazy:
+            sample_item = self._samples[index]
+            target_item = self._targets[index] if self._targets else None
             try:
-                val = self._getitem(index)
+                val = self._load(sample_item, target_item)
                 self.cache_hits += 1
                 return (val, None)
-            except FileNotFoundError as ex:
-                return self.__missing__(index, ex.filename)
+            except FileNotFoundError:  # cache miss
+                try:
+                    sample_item = sample_item.replace('/runtime', '')
+                    if self.targets_manifest: # target item is a file
+                        if self._targets and not os.path.exists(target_item):
+                            target_item = target_item.replace('/runtime', '')
+                    val = self._load(sample_item, target_item)
+                    return (val, None)
+                except FileNotFoundError: # nfs miss
+                    miss_etag = sample_item.split('/')[2]
+                    if self.targets_manifest: # target item is a file
+                        miss_etag += ' ' + target_item.split('/')[2]
+                    index = random.randint(index+1, len(self) - 1)
+                    rlt = self.__getitem__(index)
+                    return (rlt[0], miss_etag)
         else:
-            return (self._getitem(index), None)
-    
-    def __missing__(self, index: int, filename: str):
-        nfs_path = filename.replace('/runtime', '')
-        miss_etag = None
-        try:
-            os.symlink(nfs_path, filename)
-        except FileNotFoundError as ex:
-            parent_dir = '/'.join(filename.split("/")[:-1])
-            if not os.path.exists(parent_dir):
-                os.makedirs(parent_dir, exist_ok=True)
-                os.symlink(nfs_path, filename)
-            elif ex.filename == nfs_path:
-                miss_etag = nfs_path.split('/')[2]
-                index = random.randint(index+1, len(self) - 1)
-            else:
-                raise ex
-        finally:
-            return (self._getitem(index), miss_etag)
+            return (self._load(index), None)
     
     def __len__(self) -> int:
-        raise NotImplementedError
+        return len(self._samples)
 
 
 class DLCJobDataLoader(DataLoader[T_co]):
