@@ -124,7 +124,7 @@ class DLCJobDataset(Dataset[T_co]):
                 val = self._load(sample_item, target_item)
                 self.cache_hits += 1
                 return (val, None)
-            except FileNotFoundError:  # cache miss
+            except Exception:  # cache miss
                 try:
                     sample_item = sample_item.replace('/runtime', '')
                     if self.targets_manifest: # target item is a file
@@ -132,7 +132,7 @@ class DLCJobDataset(Dataset[T_co]):
                             target_item = target_item.replace('/runtime', '')
                     val = self._load(sample_item, target_item)
                     return (val, None)
-                except FileNotFoundError: # nfs miss
+                except Exception: # nfs miss
                     miss_etag = sample_item.split('/')[2]
                     if self.targets_manifest: # target item is a file
                         miss_etag += ' ' + target_item.split('/')[2]
