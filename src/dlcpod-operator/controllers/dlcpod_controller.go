@@ -580,7 +580,7 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		Spec: corev1.PodSpec{
 			Volumes:       volumes,
 			Containers:    containers,
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy: corev1.RestartPolicyAlways,
 			NodeName:      jobNode.Name,
 			HostNetwork:   spec.HostNetwork,
 		},

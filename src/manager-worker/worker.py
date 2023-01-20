@@ -44,7 +44,8 @@ class ManagerWorkerService(pb_grpc.ManagerWorkerServicer):
             start = time.time()
             client = get_s3_client(s3auth)
             try:
-                client.download_file(bucket, key, dst)
+                if not os.path.exists(dst):
+                    client.download_file(bucket, key, dst)
             except botocore.exceptions.ClientError as e:
                 return -1
             cost = time.time() - start
