@@ -345,9 +345,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         if i % args.print_freq == 0:
             progress.display(i + 1)
         
-        if i == num_batches:
-            break
-        
         time.sleep(args.sim_compute_time)
         end = time.time()
         
