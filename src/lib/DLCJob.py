@@ -25,6 +25,7 @@ from torch.utils.data.dataloader import _BaseDataLoaderIter
 import time
 import pickle
 import zmq
+import gc
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -36,7 +37,7 @@ T = TypeVar('T')
 _worker_init_fn_t = Callable[[int], None]
 _collate_fn_t = Callable[[List[T]], Any]
 
-
+cpu_count = multiprocessing.cpu_count()
 def read_secret(arg):
     path = '/secret/{}'.format(arg)
     assert os.path.exists(path)
@@ -188,11 +189,13 @@ class DLCJobDataLoader(DataLoader[T_co]):
         self.history_load_perf = defaultdict(float)
 
     def _get_iterator(self) -> '_BaseDataLoaderIter':        
-        if self.autoscale_workers and self._iterator is not None:
+        if  self._iterator is not None:
             self.tune_iters = self._iterator._tune_iters
             self.realtime_load_perf = self._iterator._realtime_load_perf
             self.history_load_perf = self._iterator._history_load_perf
             num_workers = self._iterator._active_workers.value
+        elif self.autoscale_workers:
+            num_workers = cpu_count
         else:
             num_workers = self.num_workers
         
@@ -273,10 +276,10 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         super(_DLCJobDataLoaderIter, self).__init__(loader)
         
         self._num_batches = num_batches
-        self._num_workers = opt_num_workers
         self._autoscale_workers = autoscale_workers
+        self._num_workers = opt_num_workers
         self._prefetch_factor = loader.prefetch_factor
-        self._tune_freq = self._num_workers * self._prefetch_factor
+        self._tune_freq = self._num_workers
         self.lazy = self._dataset.lazy
         
         # sockets for communication with client
@@ -472,21 +475,22 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 else:
                     self._history_load_perf[num_workers] = mean(self._realtime_load_perf[num_workers])
 
-            cpu_count = multiprocessing.cpu_count()
             if est_num_workers == np.inf:
                 new_num_workers = num_workers
             elif est_num_workers > cpu_count:
                 # we assume the load time follows a normal distribution
                 loc, scale = math.ceil(3*cpu_count/4), math.ceil(cpu_count/4)
-                new_num_workers = min(math.ceil(np.random.normal(loc=loc, scale=scale, size=1)[0]), cpu_count)
+                new_num_workers = min(math.ceil(np.random.normal(loc=loc, scale=scale, size=1)[0]), cpu_count)        
                 new_num_workers = max(1, new_num_workers)
                 
                 # if the worker number has been sampled, use worker number with min load time
                 if new_num_workers in self._history_load_perf:
                     new_num_workers = sorted(self._history_load_perf.items(), key=lambda item: item[1])[0][0]
+                
             else:
                 new_num_workers = est_num_workers
             
+            print('estimated worker num: {}, new worker num: {}'.format(est_num_workers, self._active_workers.value))
             # commit the tunning action
             delta = new_num_workers - num_workers
             for _ in range(abs(delta)):
@@ -505,7 +509,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                     
             if self._history_load_perf[num_workers] is not None:
                 self._tune_iters += 1
-            print('change worker num to: {}'.format(self._active_workers.value))
 
     def _try_put_index(self):    
         try:
@@ -615,7 +618,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 'rcvd_idx': self._rcvd_idx, 
                 'active_workers': self._active_workers.value, 
                 'req_time': np.mean(self._req_time)}
-            self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
+            if np.mean(self._req_time) < np.mean(self._fetch_time):
+                self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
         
         while True:
             try:
@@ -678,10 +682,10 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 if len(self._fetch_time) == self._tune_freq:
                     self._fetch_time.clear()
                 self._fetch_time.append(fetch_time)
-            
+                    
             if self._autoscale_workers:
                 self._tune_worker_num()
-        
+
         if self.lazy:
             self._socket_pub.send_multipart([b"releaseCache", self._dataset.dataset_type.encode('utf-8'), str(self._rcvd_idx-1).encode('utf-8')])
         self._last_iter_time = time.time()

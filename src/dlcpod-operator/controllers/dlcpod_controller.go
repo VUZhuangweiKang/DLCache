@@ -201,14 +201,38 @@ func (r *DLCPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{}, nil
 }
 
+func (r *DLCPodReconciler) filterNodes(ctx context.Context) []corev1.Node {
+	allnodes := &corev1.NodeList{}
+	err := r.List(ctx, allnodes, &client.ListOptions{})
+	checkErr(err)
+	nodes := []corev1.Node{}
+	activeNodeStatus := map[corev1.NodeConditionType]corev1.ConditionStatus{
+		"NetworkUnavailable": "False",
+		"PIDPressure":        "False",
+		"DiskPressure":       "False",
+		"MemoryPressure":     "False",
+		"Ready":              "True",
+	}
+	for _, node := range allnodes.Items {
+		pass_status_check := true
+		for _, condition := range node.Status.Conditions {
+			if condition.Status != activeNodeStatus[condition.Type] {
+				pass_status_check = false
+			}
+		}
+		if pass_status_check {
+			nodes = append(nodes, node)
+		}
+	}
+	return nodes
+}
+
 func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPod) [][]string {
 	spec := dlcpod.Spec
-	nodes := &corev1.NodeList{}
-	err := r.List(ctx, nodes, &client.ListOptions{})
-	checkErr(err)
+	nodes := r.filterNodes(ctx)
 	nodeAddresses := []string{}
 	addressHostMap := map[string]string{}
-	for _, node := range nodes.Items {
+	for _, node := range nodes {
 		addr := node.Status.Addresses[0].Address
 		hostname := node.Status.Addresses[1].Address
 		nodeAddresses = append(nodeAddresses, addr)
@@ -217,7 +241,7 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 
 	// get dataset Etags (MD5 Hash) from S3
 	var secret corev1.Secret
-	err = r.Get(ctx, types.NamespacedName{Namespace: dlcpod.Namespace, Name: spec.Secret.Name}, &secret)
+	err := r.Get(ctx, types.NamespacedName{Namespace: dlcpod.Namespace, Name: spec.Secret.Name}, &secret)
 	checkErr(err)
 
 	// connect to S3
@@ -298,7 +322,7 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	etagToNode := map[string]string{}
 
 	// list existing etags on NFS
-	for _, node := range nodes.Items {
+	for _, node := range nodes {
 		addr := node.Status.Addresses[0].Address
 		files, err := ioutil.ReadDir(fmt.Sprintf("/%s", addr))
 		if err != nil {
@@ -327,7 +351,7 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 	// generate scheduling policy
 	weights := map[string]float64{}
 	allocatableResource := map[string]map[string]int64{}
-	for _, node := range nodes.Items {
+	for _, node := range nodes {
 		allocatable := node.Status.Allocatable
 		gpus := allocatable["nvidia.com/gpu"]
 		allocatableGPU, ok := gpus.AsInt64()
@@ -358,7 +382,7 @@ func (r *DLCPodReconciler) scheduler(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		weights[node] = (allocatableGPU >= requestGPU) + (#existingETagsOnNode/#totalETags) + \
 						(1-#totalExistingETags/#totalETags)*(allocatableNodeSpace/totalCapacity)
 	*/
-	for _, node := range nodes.Items {
+	for _, node := range nodes {
 		addr := node.Status.Addresses[0].Address
 		var left float64 = 0.0
 		if val, ok := nodeToExistEtagNum[addr]; ok {
@@ -425,15 +449,12 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		{Name: "runtime", MountPath: "/runtime"},
 		{Name: "shmem", MountPath: "/dev/shm"},
 	}
-	nodes := &corev1.NodeList{}
-	err := r.List(ctx, nodes, &client.ListOptions{})
-	checkErr(err)
 	var jobNode corev1.Node
-
+	nodes := r.filterNodes(ctx)
 	// select node by user specified NodeSelector
 	flag := false
 	for key := range dlcpod.Spec.NodeSelector {
-		for _, node := range nodes.Items {
+		for _, node := range nodes {
 			if val, ok := node.Labels[key]; ok {
 				if val == dlcpod.Spec.NodeSelector[key] {
 					jobNode = node
@@ -449,7 +470,7 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 
 	// select node by user specified NodeName
 	if !flag {
-		for _, node := range nodes.Items {
+		for _, node := range nodes {
 			if node.Status.Addresses[1].Address == dlcpod.Spec.NodeName {
 				jobNode = node
 				flag = true
@@ -460,7 +481,7 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 
 	// select node based on scheduler decision
 	if !flag {
-		for _, node := range nodes.Items {
+		for _, node := range nodes {
 			if node.Status.Addresses[0].Address == dlcpod.Spec.NodeSequence[0] {
 				jobNode = node
 				flag = true
@@ -481,7 +502,7 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		dlcpod.Spec.NodeSequence[0] = jobNode.Status.Addresses[0].Address
 	}
 
-	for _, node := range nodes.Items {
+	for _, node := range nodes {
 		nodeip := node.Status.Addresses[0].Address
 
 		// for local NFS server, we directly mount to the NFS mount point
@@ -586,7 +607,7 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		},
 	}
 
-	err = ctrl.SetControllerReference(dlcpod, &pod, r.Scheme)
+	err := ctrl.SetControllerReference(dlcpod, &pod, r.Scheme)
 	checkErr(err)
 	return pod, nil
 }

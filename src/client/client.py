@@ -20,6 +20,7 @@ import databus.dbus_pb2 as pb
 import databus.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import pyfastcopy
+import psutil
 from utils import *
 
 
@@ -220,6 +221,8 @@ class Client(object):
                 #             futures.append(executor.submit(docopy, target_path))
                 # concurrent.futures.wait(futures)
                 
+                # avoid memory pressure
+                # if psutil.virtual_memory().percent < 80.0:
                 for sample_path, target_path in tmpfs_paths[dataset_type][idx][start_from:]:
                     docopy(sample_path)
                     if target_path is not None:
@@ -362,6 +365,8 @@ class Client(object):
                     self.load_cache_proc.start()
                     self.release_cache_proc.start()
                     self.mongo_opt_proc.start()
+                    
+                    del batched_tmpfs_paths, targets_tmpfs_paths, samples_tmpfs_paths
         
             if self.socket_sub in socks and socks[self.socket_sub] == zmq.POLLIN:
                 topic, dataset_type, data = self.socket_sub.recv_multipart()
@@ -442,6 +447,8 @@ class Client(object):
                     for etag in pickle.loads(data):
                         self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
 
-
+                del socks, topic, dataset_type, data
+                
+    
 if __name__ == '__main__':
     client = Client()
