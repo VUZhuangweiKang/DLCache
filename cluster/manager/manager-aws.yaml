@@ -49,3 +49,4 @@ spec:
           nfs: 
             server: 172.31.90.206
             path: /nfs_storage
+      nodeName: ip-172-31-87-22
