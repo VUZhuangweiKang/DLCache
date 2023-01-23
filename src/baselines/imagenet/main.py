@@ -7,6 +7,7 @@ import warnings
 from enum import Enum
 import math
 import numpy as np
+import psutil
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -311,6 +312,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     load_time = 0
     # for i, (images, target) in enumerate(train_loader):
     train_iter = iter(train_loader)
+    memory_log = []
     for i in range(num_batches):
         
         # measure data loading time
@@ -345,10 +347,14 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         if i % args.print_freq == 0:
             progress.display(i + 1)
         
+        if i % 2 == 0:
+            memory_log.append(psutil.virtual_memory().percent)
+            
         time.sleep(args.sim_compute_time)
         end = time.time()
         
     print('Total Time: {}'.format(time.time()-t))
+    np.save('memory_usage.npy', memory_log)
     return load_time
 
 

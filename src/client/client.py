@@ -20,7 +20,6 @@ import databus.dbus_pb2 as pb
 import databus.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
 import pyfastcopy
-import psutil
 from utils import *
 
 
@@ -221,8 +220,6 @@ class Client(object):
                 #             futures.append(executor.submit(docopy, target_path))
                 # concurrent.futures.wait(futures)
                 
-                # avoid memory pressure
-                # if psutil.virtual_memory().percent < 80.0:
                 for sample_path, target_path in tmpfs_paths[dataset_type][idx][start_from:]:
                     docopy(sample_path)
                     if target_path is not None:

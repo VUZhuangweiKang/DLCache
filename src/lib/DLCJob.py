@@ -26,6 +26,7 @@ import time
 import pickle
 import zmq
 import gc
+import psutil
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -38,6 +39,8 @@ _worker_init_fn_t = Callable[[int], None]
 _collate_fn_t = Callable[[List[T]], Any]
 
 cpu_count = multiprocessing.cpu_count()
+memory_watermark = 90
+
 def read_secret(arg):
     path = '/secret/{}'.format(arg)
     assert os.path.exists(path)
@@ -181,25 +184,18 @@ class DLCJobDataLoader(DataLoader[T_co]):
         self.check_worker_number_rationality()
         self.num_batches = len(self)
         self.autoscale_workers = autoscale_workers
-        self.init_tunner()
-    
-    def init_tunner(self):
         self.tune_iters = 0
-        self.realtime_load_perf = defaultdict(list)
-        self.history_load_perf = defaultdict(float)
 
     def _get_iterator(self) -> '_BaseDataLoaderIter':        
         if  self._iterator is not None:
             self.tune_iters = self._iterator._tune_iters
-            self.realtime_load_perf = self._iterator._realtime_load_perf
-            self.history_load_perf = self._iterator._history_load_perf
             num_workers = self._iterator._active_workers.value
         elif self.autoscale_workers:
             num_workers = cpu_count
         else:
             num_workers = self.num_workers
         
-        return _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.autoscale_workers, self.realtime_load_perf, self.history_load_perf, self.tune_iters)
+        return _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.autoscale_workers, self.tune_iters)
     
     def __setattr__(self, attr, val):
         if self.__initialized and attr in (
@@ -271,15 +267,14 @@ class StatefulCycleIterator:
         
         
 class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
-    def __init__(self, loader, num_batches, opt_num_workers, autoscale_workers: bool = True, 
-                 realtime_load_perf: defaultdict = None, history_load_perf: defaultdict = None, tune_iters: int = None):
+    def __init__(self, loader, num_batches, opt_num_workers, autoscale_workers: bool = True, tune_iters: int = None):
         super(_DLCJobDataLoaderIter, self).__init__(loader)
         
         self._num_batches = num_batches
         self._autoscale_workers = autoscale_workers
         self._num_workers = opt_num_workers
         self._prefetch_factor = loader.prefetch_factor
-        self._tune_freq = self._num_workers
+        self._tune_freq = 2
         self.lazy = self._dataset.lazy
         
         # sockets for communication with client
@@ -371,8 +366,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._worker_pids_set = True
         
         self._tune_iters = tune_iters
-        self._realtime_load_perf = realtime_load_perf
-        self._history_load_perf = history_load_perf
+        self._worker_num_hist = []
+        self._memory_usage = []
         self._reset(loader, first_iter=True)
         
     def _reset(self, loader, first_iter=False):    
@@ -436,79 +431,38 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         if self._worker_queue_idx_cycle.deactive_worker():
             self._active_workers.value -= 1
     
-    def _reset_tunner(self):
-        self._history_load_perf = defaultdict(float)
-        self._realtime_load_perf = defaultdict(list)  # the latest `num_batches` # of load time
-    
     def _tune_worker_num(self):
-        mean, median = np.mean, np.median
         num_workers = self._active_workers.value
         
-        # buffer `num_batches` load time measurements
-        if len(self._realtime_load_perf[num_workers]) == self._tune_freq:
-            self._realtime_load_perf[num_workers].clear()
-
-        if self._rcvd_idx == 1 or (self._rcvd_idx % self._tune_freq == 0):
-            
-            # get rid of inacurrant measurements
-            if self._realtime_load_perf[num_workers] is None:
-                return
-            
+        if self._rcvd_idx == 1 or (self._rcvd_idx % self._tune_freq == 0): 
             # estimate required workers by comparing req and load time
             if len(self._fetch_time) > 0 and len(self._req_time) > 0:
-                est_num_workers = math.ceil(median(self._fetch_time) / median(self._req_time))
+                est_num_workers = math.ceil(np.median(self._fetch_time) / np.median(self._req_time))
             else:
                 est_num_workers = np.inf
             
-            '''
-            update worker weights,
-            we omit the first batch to avoid data reloading time spent in the reset function
-            '''
-            if self._rcvd_idx > 1:
-                if num_workers in self._history_load_perf:
-                    '''
-                    due to the measurement jitter, we use the alpha to balance historical and 
-                    the latest performance measurement. 
-                    '''
-                    alpha = 0.4
-                    self._history_load_perf[num_workers] = alpha * self._history_load_perf[num_workers] + (1-alpha) * mean(self._realtime_load_perf[num_workers])
-                else:
-                    self._history_load_perf[num_workers] = mean(self._realtime_load_perf[num_workers])
-
-            if est_num_workers == np.inf:
-                new_num_workers = num_workers
-            elif est_num_workers > cpu_count:
-                # we assume the load time follows a normal distribution
-                loc, scale = math.ceil(3*cpu_count/4), math.ceil(cpu_count/4)
-                new_num_workers = min(math.ceil(np.random.normal(loc=loc, scale=scale, size=1)[0]), cpu_count)        
-                new_num_workers = max(1, new_num_workers)
-                
-                # if the worker number has been sampled, use worker number with min load time
-                if new_num_workers in self._history_load_perf:
-                    new_num_workers = sorted(self._history_load_perf.items(), key=lambda item: item[1])[0][0]
-                
-            else:
-                new_num_workers = est_num_workers
+            if est_num_workers > cpu_count:
+                # try to set the num_workers = cpu_cores, but avoid overflow memory
+                mem_usage = psutil.virtual_memory().percent
+                self._memory_usage.append(mem_usage)
+                avg_memory_usage_per_worker = mem_usage / num_workers
+                # print('avg_memory_usage_per_worker:', avg_memory_usage_per_worker)
+                if avg_memory_usage_per_worker * est_num_workers > memory_watermark:
+                    est_num_workers = math.floor(memory_watermark / avg_memory_usage_per_worker)
             
-            print('estimated worker num: {}, new worker num: {}'.format(est_num_workers, self._active_workers.value))
+            new_num_workers = min(est_num_workers, cpu_count)
+            
+            # print('current worker num: {}, estimated worker num: {}, new worker num: {}'.format(num_workers, est_num_workers, new_num_workers))
             # commit the tunning action
             delta = new_num_workers - num_workers
             for _ in range(abs(delta)):
                 if delta > 0:
-                    self._spawn_worker(worker_id=self._active_workers.value)
+                    self._spawn_worker(worker_id=num_workers)
                 elif delta < 0:
                     self._pause_worker()
-            
-            # preload data in the new workers
-            if delta > 0:
-                pos = self._worker_queue_idx_cycle.get_ptr()
-                for _ in range(self._prefetch_factor):
-                    self._worker_queue_idx_cycle.set_ptr(pos)
-                    for _ in range(delta):
-                        self._try_put_index()
-                    
-            if self._history_load_perf[num_workers] is not None:
-                self._tune_iters += 1
+
+            self._worker_num_hist.append(new_num_workers)
+            self._tune_iters += 1
 
     def _try_put_index(self):    
         try:
@@ -623,6 +577,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         
         while True:
             try:
+                # print('out-of-order: {}'.format(len(self._reorder_dict)))
                 while self._rcvd_idx < self._send_idx:
                     info = self._reorder_dict[self._rcvd_idx]
                     worker_id = info[0]
@@ -672,12 +627,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 
         # ensure the `num_workers` is consensus while reading the batch
         # we skip the first batch because the reset function needs to prefetch data synchronously
-        if self._rcvd_idx > 1:
-            if active_workers is not None and self._last_iter_time is not None:
-                if len(self._realtime_load_perf[active_workers]) == self._tune_freq:
-                    self._realtime_load_perf[active_workers].clear()
-                self._realtime_load_perf[active_workers].append(time.time() - self._last_iter_time)
-                
+        if self._rcvd_idx > 1:                
             if fetch_time is not None:
                 if len(self._fetch_time) == self._tune_freq:
                     self._fetch_time.clear()
@@ -719,6 +669,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
 
     def _shutdown_workers(self):
         self._socket_pub.send_multipart([b'stopIteration', self._dataset.dataset_type.encode('utf-8'), b''])
+        np.save('worker_num_hist.npy', self._worker_num_hist)
+        np.save('memory_usage.npy', self._memory_usage)
         
         # Called when shutting down this `_MultiProcessingDataLoaderIter`.
         # See NOTE [ Data Loader Multiprocessing Shutdown Logic ] for details on
