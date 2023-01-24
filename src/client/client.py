@@ -10,18 +10,17 @@ import signal
 import json, bson
 import numpy as np
 import multiprocessing as mp
-import concurrent.futures
+from multiprocessing.pool import ThreadPool
 from pymongo import MongoClient
 from datetime import datetime
 from collections import defaultdict
 from queue import Empty
 import grpc
+import threading
 import databus.dbus_pb2 as pb
 import databus.dbus_pb2_grpc as pb_grpc
 from google.protobuf.json_format import ParseDict
-import pyfastcopy
 from utils import *
-
 
 logger = get_logger(__name__, level='Debug')
 cloudSecret = {
@@ -29,6 +28,7 @@ cloudSecret = {
     "aws_secret_access_key": read_secret('aws_secret_access_key'),
     "region_name": read_secret('region_name')   
 }
+cpu_count = mp.cpu_count()
 manager_uri = "dlcpod-manager:50051"
 init_channel = 'ipc:///share/init.ipc'
 ipc_channel = 'ipc:///share/runtime.ipc'
@@ -186,47 +186,47 @@ class Client(object):
             if func == 'update_many':
                 self.dataset_col.update_many(*args)
                 
-    def load_cache(self, send_idx_queue, copy_time, tmpfs_paths):        
-        while True:
-            dataset_type, idx, start_from = send_idx_queue.get()
-            while start_from >= len(tmpfs_paths[dataset_type][idx]):
-                idx += 1
-                start_from -= len(tmpfs_paths[dataset_type][idx])
-            
-            batch_size = len(tmpfs_paths[dataset_type][idx])
-            # logger.info('load cache for batch {}, remaining {}'.format((dataset_type, idx, start_from), send_idx_queue.qsize()))
-            t = time.time()
-            if idx < len(tmpfs_paths[dataset_type]):
-                def docopy(tmpfs_path):
-                    nfs_path = tmpfs_path.replace('/runtime', '')
-                    if os.path.exists(nfs_path):
-                        while True:
-                            try:
-                                shutil.copyfile(nfs_path, tmpfs_path)
-                                return
-                            except Exception as ex:
-                                root_folder = '/'.join(tmpfs_path.split('/')[:-1])
-                                os.makedirs(root_folder, exist_ok=True)
-                        
+    def load_cache(self, send_idx_queue, tmpfs_paths):
+        event = threading.Event()
+        
+        def docopy(items):
+            for tmpfs_path in items:
+                if not event.is_set():
+                    break
+                nfs_path = tmpfs_path.replace('/runtime', '')
+                if os.path.exists(nfs_path):
+                    while True:
+                        try:
+                            shutil.copyfile(nfs_path, tmpfs_path)
+                            break
+                        except Exception as ex:
+                            root_folder = '/'.join(tmpfs_path.split('/')[:-1])
+                            os.makedirs(root_folder, exist_ok=True)
+                else:
                     print('failed to copy {}'.format(nfs_path))
                     etag = nfs_path.split('/')[-1]
                     self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
-
-                # futures = []
-                # with concurrent.futures.ThreadPoolExecutor(max_workers=mp.cpu_count()) as executor:
-                #     for sample_path, target_path in tmpfs_paths[dataset_type][idx][start_from:]:
-                #         futures.append(executor.submit(docopy, sample_path))
-                #         if target_path is not None:
-                #             futures.append(executor.submit(docopy, target_path))
-                # concurrent.futures.wait(futures)
-                
-                for sample_path, target_path in tmpfs_paths[dataset_type][idx][start_from:]:
-                    docopy(sample_path)
+        
+        thrd = None
+        while True:
+            dataset_type, idx = send_idx_queue.get()
+            if event.is_set():
+                event.clear()
+            
+            # logger.info('load cache for batch {}, remaining {}'.format((dataset_type, idx, start_from), send_idx_queue.qsize()))
+            if idx < len(tmpfs_paths[dataset_type]):
+                items = []
+                for sample_path, target_path in tmpfs_paths[dataset_type][idx][::-1]:
+                    items.append(sample_path)
                     if target_path is not None:
-                        docopy(target_path)
-                        
-                dur = time.time() - t
-                copy_time.append(batch_size * dur/(batch_size-start_from))
+                        items.append(target_path)
+                
+                while thrd is not None and thrd.is_alive():
+                    pass
+                else:
+                    event.set()
+                    thrd = threading.Thread(target=docopy, args=(items, ), daemon=True)
+                    thrd.start()
             
             # update chunk status
             chunk_etags = []
@@ -353,10 +353,9 @@ class Client(object):
                     self.mongo_opt_queue.cancel_join_thread()
                     
                     self.mp_manager = mp.Manager()
-                    self.copy_time = self.mp_manager.list()
                     self.cache_usage = self.mp_manager.list()
 
-                    self.load_cache_proc = mp.Process(target=self.load_cache, args=(self.send_idx_queue, self.copy_time, self.tmpfs_paths), daemon=True)
+                    self.load_cache_proc = mp.Process(target=self.load_cache, args=(self.send_idx_queue, self.tmpfs_paths), daemon=True)
                     self.release_cache_proc = mp.Process(target=self.release_cache, args=(self.rcvd_idx_queue, self.cache_usage, self.tmpfs_paths), daemon=True)
                     self.mongo_opt_proc = mp.Process(target=self.async_mongo_opt, args=(self.mongo_opt_queue,), daemon=True)
                     self.load_cache_proc.start()
@@ -371,19 +370,9 @@ class Client(object):
                 # logger.info('recv msg: {} {}'.format(topic, data))
                 if topic == "loadCache":
                     data = pickle.loads(data)
-                    '''
-                    Dataloader spends `req_time` time to fetch 1 batch, 
-                    while client spends `copy_time` to move 1 batch from NFS to tmpfs.
-                    1. If copy_time < req_time, client only need to push 1 batch into memory 
-                        when it recieve the loadCache messgae.
-                    2. Otherwise, cache missing may occur. To mitigate the situation in the remaining batches, 
-                        the client can start loading cache from the position of k samples behind the starting position of each batch.
-                        k = batch_size * (copy_time - req_time) / copy_time
-                    '''
                     window_size = data['active_workers'] * prefetch_factor
                     if data['rcvd_idx'] == len(self.tmpfs_paths[dataset_type]):
                         continue
-                    batch_size = len(self.tmpfs_paths[dataset_type][0])
                     # clean up pending batches, and prepare to load the next epoch
                     if data['send_idx'] == len(self.tmpfs_paths[dataset_type]):
                         if data['send_idx'] - data['rcvd_idx'] == window_size:
@@ -396,18 +385,6 @@ class Client(object):
                         data['send_idx'] = (data['rcvd_idx'] + window_size) % len(self.tmpfs_paths[dataset_type])
 
                     send_idx = data['send_idx']
-                    if np.isnan(data['req_time']) or len(self.copy_time) == 0:
-                        k = 0
-                    else:
-                        cp_time = np.median(self.copy_time)
-                        # print(cp_time, data['req_time'])
-                        if data['req_time'] >= cp_time:
-                            k = 0
-                        else:
-                            k = math.ceil(batch_size * (1 - data['req_time']/cp_time))
-                    
-                    if len(self.copy_time) >= window_size:
-                        self.copy_time.pop(0)
                     
                     '''
                     Due to measurement error, there might be backlog in send_idx_queue.
@@ -418,7 +395,7 @@ class Client(object):
                             self.send_idx_queue.get_nowait()
                         except:
                             break
-                    self.send_idx_queue.put((dataset_type, send_idx, k))
+                    self.send_idx_queue.put((dataset_type, send_idx))
                 elif topic == "releaseCache":
                     idx = int(data)
                     self.rcvd_idx_queue.put((dataset_type, idx))
@@ -438,7 +415,7 @@ class Client(object):
                     terminate(self.mongo_opt_proc)
                     self.mp_manager.shutdown()
                     del self.load_cache_proc, self.release_cache_proc, self.mongo_opt_proc
-                    del self.send_idx_queue, self.rcvd_idx_queue, self.mongo_opt_queue, self.copy_time, self.cache_usage
+                    del self.send_idx_queue, self.rcvd_idx_queue, self.mongo_opt_queue, self.cache_usage
 
                 elif topic == "missETags":
                     for etag in pickle.loads(data):

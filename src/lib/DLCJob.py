@@ -30,6 +30,7 @@ import psutil
 import warnings
 warnings.filterwarnings("ignore")
 
+
 init_channel = 'ipc:///share/init.ipc'
 ipc_channel = 'ipc:///share/runtime.ipc'
 
@@ -107,7 +108,7 @@ class DLCJobDataset(Dataset[T_co]):
         else:
             self._process(dict(self.samples_manifest.items()[partition_idx]), dict(self.targets_manifest.items()[partition_idx]))
         assert len(self._samples) > 0
-    
+        
     def _process(self, samples_manifest: dict, targets_manifest: dict=None):
         r"""Given the manifests, you may use them to 
         generate X, Y that can be iterated in the __getItem__ function.
@@ -407,6 +408,15 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         for _ in range(self._prefetch_factor * self._active_workers.value):
             self._try_put_index()
 
+        if self.lazy:
+            req_time, fetch_time = np.mean(self._req_time), np.mean(self._fetch_time)
+            # print(self._rcvd_idx, self._send_idx)
+            if req_time < fetch_time:
+                msg = {'send_idx': self._prefetch_factor * self._active_workers.value,
+                        'rcvd_idx': self._rcvd_idx, 
+                        'active_workers': self._active_workers.value}
+                self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
+
     def _spawn_worker(self, worker_id):
         if self._worker_queue_idx_cycle is not None and self._worker_queue_idx_cycle.reactive_worker():
             self._active_workers.value += 1
@@ -564,16 +574,17 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 self._req_time.clear()
             self._req_time.append(time.time() - self._last_iter_time)
 
-        '''
-        fetch_time would be np.nan in the first iteration
-        '''
-        if self.lazy:
-            msg = {'send_idx': self._send_idx+1, 
-                'rcvd_idx': self._rcvd_idx, 
-                'active_workers': self._active_workers.value, 
-                'req_time': np.mean(self._req_time)}
-            if np.mean(self._req_time) < np.mean(self._fetch_time):
-                self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
+            '''
+            fetch_time would be np.nan in the first iteration
+            '''
+            if self.lazy:
+                req_time, fetch_time = np.mean(self._req_time), np.mean(self._fetch_time)
+                if req_time < fetch_time:
+                    msg = {'send_idx': self._send_idx + 1,
+                        'rcvd_idx': self._rcvd_idx, 
+                        'active_workers': self._active_workers.value, 
+                        'req_time': req_time}
+                    self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
         
         while True:
             try:
@@ -669,8 +680,9 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
 
     def _shutdown_workers(self):
         self._socket_pub.send_multipart([b'stopIteration', self._dataset.dataset_type.encode('utf-8'), b''])
-        np.save('worker_num_hist.npy', self._worker_num_hist)
-        np.save('memory_usage.npy', self._memory_usage)
+        if self._autoscale_workers:
+            np.save('worker_num_hist.npy', self._worker_num_hist)
+            np.save('memory_usage.npy', self._memory_usage)
         
         # Called when shutting down this `_MultiProcessingDataLoaderIter`.
         # See NOTE [ Data Loader Multiprocessing Shutdown Logic ] for details on
