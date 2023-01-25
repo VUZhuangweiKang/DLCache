@@ -7,5 +7,5 @@ COPY databus ./databus
 COPY lib ./lib
 RUN pip install -r requirements.txt
 RUN chmod +x *
-ENTRYPOINT ["bash", "entrypoint.sh"]
+Run ./entrypoint.sh
 CMD ["bash"]

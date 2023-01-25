@@ -25,28 +25,34 @@ spec:
         volumeMounts:
         - name: configuration
           mountPath: /configs/manager
-        - name: 172-31-92-64
-          mountPath: /172.31.92.64
+        - name: local-nfs
+          mountPath: /nfs_storage
         - name: 172-31-87-22
           mountPath: /172.31.87.22
-        - name: 172-31-90-206
-          mountPath: /172.31.90.206
+        - name: 172-31-92-64
+          mountPath: /172.31.92.64
+#        - name: 172-31-90-206
+#          mountPath: /172.31.90.206
         stdin: true
         tty: true
       volumes:
         - name: configuration
           configMap:
             name: dlcpod-manager-config
-        - name: 172-31-92-64
-          nfs: 
-            server: 172.31.92.64
+        - name: local-nfs
+          hostPath: 
             path: /nfs_storage
+            type: Directory
         - name: 172-31-87-22
           nfs: 
             server: 172.31.87.22
             path: /nfs_storage
-        - name: 172-31-90-206
+        - name: 172-31-92-64
           nfs: 
-            server: 172.31.90.206
+            server: 172.31.92.64
             path: /nfs_storage
+#        - name: 172-31-90-206
+#          nfs: 
+#            server: 172.31.90.206
+#            path: /nfs_storage
       nodeName: ip-172-31-87-22

@@ -16,7 +16,7 @@ do
         data_dir=data/run$i/$t/$b
         mkdir -p $data_dir
         vmtouch -e /$node/
-        python train.py +configs=librispeech
+        python train.py +configs=librispeech -b $b --sim-compute-time $t --epochs 1 --mini-batches 100 -j $w
         mv *.npy $data_dir/
         mv /share/train_cache_usage.npy $data_dir/
     done

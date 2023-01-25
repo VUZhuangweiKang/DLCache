@@ -178,7 +178,7 @@ class Client(object):
             path = '/share/{}_targets_manifests.pkl'.format(dataset_type)
             if not os.path.exists(path) and len(targets_manifest) > 0:
                 with open('/share/{}_targets_manifests.pkl'.format(dataset_type), 'wb') as f:
-                    pickle.dump(targets_manifest)
+                    pickle.dump(targets_manifest, f)
     
     def async_mongo_opt(self, mongo_opt_queue):
         while True:

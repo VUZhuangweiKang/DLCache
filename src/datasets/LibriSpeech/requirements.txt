@@ -9,7 +9,7 @@ pytest
 python-levenshtein
 pytorch-lightning>=1.7.0
 scipy
-sklearn
+scikit-learn
 sox
 torch
 torchaudio
