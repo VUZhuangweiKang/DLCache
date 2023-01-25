@@ -3,7 +3,7 @@
 # According to the benchmark results in https://lambdalabs.com/gpu-benchmarks,
 # the training time of ResNet-50 range from 135 to 1197 images/s.
 
-i=1
+i=2
 w=4
 compute_time=( 0.4 0.8 1.2 1.6 2.0 2.4 )
 batch_size=( 512 1024 2048 )
