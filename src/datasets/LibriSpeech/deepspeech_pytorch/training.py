@@ -9,8 +9,17 @@ from deepspeech_pytorch.configs.train_config import DeepSpeechConfig
 from deepspeech_pytorch.loader.data_module import DeepSpeechDataModule
 from deepspeech_pytorch.model import DeepSpeech
 
+import time
+import numpy as np
 
-def train(cfg: DeepSpeechConfig):
+# def train(cfg: DeepSpeechConfig):
+def train(cfg: DeepSpeechConfig, args):
+    
+    # Add for DLCache Evaluation
+    cfg.data.num_workers = args.workers
+    cfg.data.batch_size = args.batch_size
+    cfg.trainer.max_epochs = args.epochs
+    
     seed_everything(cfg.seed)
 
     with open(to_absolute_path(cfg.data.labels_path)) as label_file:
@@ -31,17 +40,32 @@ def train(cfg: DeepSpeechConfig):
         normalize=True,
     )
 
-    model = DeepSpeech(
-        labels=labels,
-        model_cfg=cfg.model,
-        optim_cfg=cfg.optim,
-        precision=cfg.trainer.precision,
-        spect_cfg=cfg.data.spect
-    )
+    # # No training for DLCache experiments
+    # model = DeepSpeech(
+    #     labels=labels,
+    #     model_cfg=cfg.model,
+    #     optim_cfg=cfg.optim,
+    #     precision=cfg.trainer.precision,
+    #     spect_cfg=cfg.data.spect
+    # )
 
-    trainer = hydra.utils.instantiate(
-        config=cfg.trainer,
-        replace_sampler_ddp=False,
-        callbacks=[checkpoint_callback] if cfg.trainer.enable_checkpointing else None,
-    )
-    trainer.fit(model, data_loader)
+    # trainer = hydra.utils.instantiate(
+    #     config=cfg.trainer,
+    #     replace_sampler_ddp=False,
+    #     callbacks=[checkpoint_callback] if cfg.trainer.enable_checkpointing else None,
+    # )
+    # trainer.fit(model, data_loader)
+    
+    # Add for DLCache Evaluation
+    train_loader = data_loader.train_dataloader()
+    train_loader = iter(train_loader)
+    load_time = []
+    for i in range(args.mini_batches):
+        t = time.time()
+        next(train_loader)
+        load_time.append(time.time() - t)
+        
+        if i % args.print_freq == 0:
+            print('Batch: {}'.format(i))
+        time.sleep(args.sim_compute_time)
+    np.save('load_time.npy', load_time)

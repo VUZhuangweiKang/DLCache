@@ -9,7 +9,7 @@ from deepspeech_pytorch.enums import SpectrogramWindow, RNNType
 defaults = [
     {"optim": "adam"},
     {"model": "bidirectional"},
-    {"checkpoint": "file"}
+    {"checkpoint": "file"},
 ]
 
 
@@ -34,7 +34,7 @@ class AugmentationConfig:
 @dataclass
 class DataConfig:
     batch_size: int = 64  # Batch size for training
-    num_workers: int = 4  # Number of workers used in data-loading
+    num_workers: int = 8  # Number of workers used in data-loading
     labels_path: str = 'labels.json'  # Contains tokens for model output
     spect: SpectConfig = SpectConfig()
     augmentation: AugmentationConfig = AugmentationConfig()
@@ -74,8 +74,8 @@ class AdamConfig(OptimConfig):
 @dataclass
 class DeepSpeechTrainerConf(TrainerConf):
     callbacks: Any = MISSING
-
-
+    
+    
 @dataclass
 class DeepSpeechConfig:
     defaults: List[Any] = field(default_factory=lambda: defaults)
