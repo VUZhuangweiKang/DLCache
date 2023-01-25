@@ -327,4 +327,4 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
         data_queue.cancel_join_thread()
         data_queue.close()
     
-    np.save('cache_hits_{}.npy'.format(worker_id), dataset.cache_hits)
+    np.save('/app/cache_hits_{}.npy'.format(worker_id), dataset.cache_hits)

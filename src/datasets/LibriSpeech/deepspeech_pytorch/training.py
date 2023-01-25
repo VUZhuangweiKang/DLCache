@@ -15,8 +15,8 @@ import numpy as np
 # def train(cfg: DeepSpeechConfig):
 def train(cfg: DeepSpeechConfig):
 
-    # Add for DLCache Evaluation
-    with open('dlcache_exp.txt', "r") as f:
+    # Add for DLCache Evaluationde
+    with open('/app/dlcache_exp.txt', "r") as f:
         line = f.read().strip()
         args = line.split(',')
     cfg.data.num_workers = int(args[0])
@@ -44,31 +44,31 @@ def train(cfg: DeepSpeechConfig):
     )
 
     # # No training for DLCache experiments
-    # model = DeepSpeech(
-    #     labels=labels,
-    #     model_cfg=cfg.model,
-    #     optim_cfg=cfg.optim,
-    #     precision=cfg.trainer.precision,
-    #     spect_cfg=cfg.data.spect
-    # )
+    model = DeepSpeech(
+        labels=labels,
+        model_cfg=cfg.model,
+        optim_cfg=cfg.optim,
+        precision=cfg.trainer.precision,
+        spect_cfg=cfg.data.spect
+    )
 
-    # trainer = hydra.utils.instantiate(
-    #     config=cfg.trainer,
-    #     replace_sampler_ddp=False,
-    #     callbacks=[checkpoint_callback] if cfg.trainer.enable_checkpointing else None,
-    # )
+    trainer = hydra.utils.instantiate(
+        config=cfg.trainer,
+        replace_sampler_ddp=False,
+        callbacks=[checkpoint_callback] if cfg.trainer.enable_checkpointing else None,
+    )
     # trainer.fit(model, data_loader)
     
     # Add for DLCache Evaluation
     train_loader = data_loader.train_dataloader()
     train_loader = iter(train_loader)
+    total_batches = len(train_loader)
     load_time = []
-    for i in range(int(args[3])):
+    for i in range(min(total_batches, int(args[3]))):
         t = time.time()
         next(train_loader)
         load_time.append(time.time() - t)
-        
-        if i % args.print_freq == 0:
-            print('Batch: {}'.format(i))
-        time.sleep(float(args[4]))
-    np.save('load_time.npy', load_time)
+        if i % int(args[4]) == 0:
+            print('Batch: {}/{}'.format(i+1, total_batches))
+        time.sleep(float(args[5]))
+    np.save('/app/load_time.npy', load_time)

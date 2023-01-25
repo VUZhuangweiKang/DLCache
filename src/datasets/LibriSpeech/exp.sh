@@ -16,7 +16,7 @@ do
         data_dir=data/run$i/$t/$b
         mkdir -p $data_dir
         vmtouch -e /$node/
-        echo "$w,$b,1,100,$t" >> dlcache_exp.txt
+        echo "$w,$b,1,100,1,$t" > dlcache_exp.txt
         python train.py +configs=librispeech
         mv *.npy $data_dir/
         mv /share/train_cache_usage.npy $data_dir/

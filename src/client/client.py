@@ -228,21 +228,21 @@ class Client(object):
                     thrd = threading.Thread(target=docopy, args=(items, ), daemon=True)
                     thrd.start()
             
-            # update chunk status
-            chunk_etags = []
-            for sample_path, target_path in tmpfs_paths[dataset_type][idx]:
-                chunk_etags.append(sample_path.split('/')[3])
-                if target_path:
-                    chunk_etags.append(target_path.split('/')[3])
-            chunk_etags = list(set(chunk_etags))
-            now = datetime.utcnow().timestamp()
-            self.mongo_opt_queue.put(('update_many', [{"ChunkETag": {"$in": chunk_etags}}, 
-                {
-                        "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
-                        "$inc": {"Status.active_count": 1},
-                        "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
-                }]))
-            del chunk_etags
+                # update chunk status
+                chunk_etags = []
+                for sample_path, target_path in tmpfs_paths[dataset_type][idx]:
+                    chunk_etags.append(sample_path.split('/')[3])
+                    if target_path:
+                        chunk_etags.append(target_path.split('/')[3])
+                chunk_etags = list(set(chunk_etags))
+                now = datetime.utcnow().timestamp()
+                self.mongo_opt_queue.put(('update_many', [{"ChunkETag": {"$in": chunk_etags}}, 
+                    {
+                            "$set": { "Status.code": CHUNK_STATUS.ACTIVE},
+                            "$inc": {"Status.active_count": 1},
+                            "$push": {"References": bson.timestamp.Timestamp(int(now), inc=1)}
+                    }]))
+                del chunk_etags
 
     def release_cache(self, rcvd_idx_queue, cache_usage, tmpfs_paths):
         while True:
@@ -337,12 +337,12 @@ class Client(object):
                     targets_tmpfs_paths = None
                     if os.path.exists('/share/{}_targets_manifests.pkl'.format(dataset_type)):
                         with open('/share/{}_targets_manifests.pkl'.format(dataset_type), 'rb') as f:
-                            targets_tmpfs_paths = np.array(list(json.load(f).values()))
+                            targets_tmpfs_paths = np.array(list(pickle.load(f).values()))
 
                     batched_tmpfs_paths = []
                     for batch in data['paths']:
                         batched_tmpfs_paths.append(list(zip(samples_tmpfs_paths[batch], \
-                            targets_tmpfs_paths[batch] if targets_tmpfs_paths else [None]*len(batch))))
+                            targets_tmpfs_paths[batch] if targets_tmpfs_paths is not None else [None]*len(batch))))
                     self.tmpfs_paths[dataset_type] = batched_tmpfs_paths
                     
                     self.send_idx_queue = mp.Queue()
