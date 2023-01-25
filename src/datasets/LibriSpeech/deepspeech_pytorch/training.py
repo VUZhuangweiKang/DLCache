@@ -13,12 +13,15 @@ import time
 import numpy as np
 
 # def train(cfg: DeepSpeechConfig):
-def train(cfg: DeepSpeechConfig, args):
-    
+def train(cfg: DeepSpeechConfig):
+
     # Add for DLCache Evaluation
-    cfg.data.num_workers = args.workers
-    cfg.data.batch_size = args.batch_size
-    cfg.trainer.max_epochs = args.epochs
+    with open('dlcache_exp.txt', "r") as f:
+        line = f.read().strip()
+        args = line.split(',')
+    cfg.data.num_workers = int(args[0])
+    cfg.data.batch_size = int(args[1])
+    cfg.trainer.max_epochs = int(args[2])
     
     seed_everything(cfg.seed)
 
@@ -60,12 +63,12 @@ def train(cfg: DeepSpeechConfig, args):
     train_loader = data_loader.train_dataloader()
     train_loader = iter(train_loader)
     load_time = []
-    for i in range(args.mini_batches):
+    for i in range(int(args[3])):
         t = time.time()
         next(train_loader)
         load_time.append(time.time() - t)
         
         if i % args.print_freq == 0:
             print('Batch: {}'.format(i))
-        time.sleep(args.sim_compute_time)
+        time.sleep(float(args[4]))
     np.save('load_time.npy', load_time)
