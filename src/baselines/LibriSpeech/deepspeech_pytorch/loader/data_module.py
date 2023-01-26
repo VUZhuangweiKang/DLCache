@@ -23,7 +23,8 @@ class DeepSpeechDataModule(pl.LightningDataModule):
 
     @property
     def is_distributed(self):
-        return self.trainer.devices > 1
+        # return self.trainer.devices > 1
+        return False
 
     def train_dataloader(self):
         train_dataset = self._create_dataset(self.train_path)
