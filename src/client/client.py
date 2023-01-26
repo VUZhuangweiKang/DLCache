@@ -141,8 +141,9 @@ class Client(object):
     def create_mappings(self, jobId):
         """Create object mapings between cloud objects and NFS files
         """
-        cursor = self.job_col.find_one({"Meta.JobId": jobId})
-        job_info = {"ChunkETags": cursor["ChunkETags"], "Meta": cursor["Meta"]}
+        cursor = self.job_col.find({"Meta.JobId": jobId}).sort([('$natural', -1 )]).limit(1)
+        for doc in cursor:
+            job_info = {"ChunkETags": doc["ChunkETags"], "Meta": doc["Meta"]}
         
         def load(etags):
             data = {}
@@ -171,10 +172,12 @@ class Client(object):
             chunk_etags = job_info['ChunkETags'][dataset_type]
             samples_manifest = load(chunk_etags['samples'])
             targets_manifest = load(chunk_etags['targets'])
+            
             path = '/share/{}_samples_manifests.pkl'.format(dataset_type)
             if not os.path.exists(path):
                 with open(path, 'wb') as f:
                     pickle.dump(samples_manifest, f)
+            
             path = '/share/{}_targets_manifests.pkl'.format(dataset_type)
             if not os.path.exists(path) and len(targets_manifest) > 0:
                 with open('/share/{}_targets_manifests.pkl'.format(dataset_type), 'wb') as f:
@@ -316,7 +319,6 @@ class Client(object):
                             
     def process_events(self):
         prefetch_factor = None
-        batch_size = None
         window_size = None
         # clear runtime cache
         self.clear_runtime()
@@ -334,9 +336,11 @@ class Client(object):
                     window_size = num_workers * prefetch_factor
                     with open('/share/{}_samples_manifests.pkl'.format(dataset_type), 'rb') as f:
                         samples_tmpfs_paths = np.array(list(pickle.load(f).values()))
+                    
                     targets_tmpfs_paths = None
-                    if os.path.exists('/share/{}_targets_manifests.pkl'.format(dataset_type)):
-                        with open('/share/{}_targets_manifests.pkl'.format(dataset_type), 'rb') as f:
+                    p = '/share/{}_targets_manifests.pkl'.format(dataset_type)
+                    if os.path.exists(p):
+                        with open(p, 'rb') as f:
                             targets_tmpfs_paths = np.array(list(pickle.load(f).values()))
 
                     batched_tmpfs_paths = []
