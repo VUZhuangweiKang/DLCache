@@ -86,6 +86,7 @@ class DLCJobDataset(Dataset[T_co]):
         self.num_partitions = 1 if self.lazy else len(self.samples_manifest)
         self._load_partition_data()
         self.cache_hits = 0
+        self.target_is_file = os.path.exists('/share/{}_targets_manifests.pkl'.format(self.dataset_type))
     
     # manifest files for mapping object path from cloud to local
     @property
@@ -117,35 +118,49 @@ class DLCJobDataset(Dataset[T_co]):
             NotImplementedError: _description_
         """
         raise NotImplementedError
-
-    def _load(self, sample_item, target_item = None):
+    
+    def _load_sample(self, sample_item):
         raise NotImplementedError
     
+    def _load_target(self, target_item = None):
+        return None
+
     def __getitem__(self, index: int):
+        sample_item = self._samples[index]
+        target_item = self._targets[index] if self._targets else None
         if self.lazy:
-            sample_item = self._samples[index]
-            target_item = self._targets[index] if self._targets else None
-            try:
-                val = self._load(sample_item, target_item)
-                self.cache_hits += 1
-                return (val, None)
-            except Exception:  # cache miss
+            if sample_item:
                 try:
+                    s = self._load_sample(sample_item)
+                    self.cache_hits += 1
+                except Exception: # cache miss
                     sample_item = sample_item.replace('/runtime', '')
-                    if self.targets_manifest: # target item is a file
-                        if self._targets and not os.path.exists(target_item):
-                            target_item = target_item.replace('/runtime', '')
-                    val = self._load(sample_item, target_item)
-                    return (val, None)
-                except Exception: # nfs miss
-                    miss_etag = sample_item.split('/')[2]
-                    if self.targets_manifest: # target item is a file
-                        miss_etag += ' ' + target_item.split('/')[2]
-                    index = random.randint(index+1, len(self) - 1)
-                    rlt = self.__getitem__(index)
-                    return (rlt[0], miss_etag)
+                    try:
+                        s = self._load_sample(sample_item)
+                    except FileNotFoundError as ex:
+                        miss_etag = ex.filename.split('/')[2]
+                        index = random.randint(index+1, len(self) - 1)
+                        rlt = self.__getitem__(index)
+                        return (rlt[0], miss_etag)
+                        
+            if target_item:
+                try:
+                    t = self._load_target(target_item)
+                    self.cache_hits += 1
+                except Exception:
+                    if self.target_is_file: # target item is a file
+                        target_item = target_item.replace('/runtime', '')
+                        try:
+                            t = self._load_target(target_item)
+                        except FileNotFoundError as ex:
+                            miss_etag = ex.filename.split('/')[2]
+                            index = random.randint(index+1, len(self) - 1)
+                            rlt = self.__getitem__(index)
+                            return (rlt[0], miss_etag)
+                
+            return ((s, t), None)
         else:
-            return (self._load(index), None)
+            return ((self._load_sample(sample_item), self._load_target(target_item)), None)
     
     def __len__(self) -> int:
         return len(self._samples)

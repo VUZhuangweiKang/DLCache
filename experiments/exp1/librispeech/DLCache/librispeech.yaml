@@ -1,7 +1,7 @@
 apiVersion: docgroup.com/v1alpha1
 kind: DLCPod
 metadata:
-  name: deepspeech
+  name: librispeech
   namespace: default
 spec:
   secret:

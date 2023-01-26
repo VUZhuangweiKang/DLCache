@@ -6,8 +6,11 @@
 i=0
 w=4
 compute_time=( 0.4 0.8 1.2 1.6 2.0 2.4 )
-batch_size=( 512 1024 2048 )
+batch_size=( 32 64 128 )
 node="172.31.92.64"
+
+test=1
+total_test=$((${#compute_time[@]} * ${#batch_size[@]}))
 
 for t in ${compute_time[*]}
 do
@@ -16,9 +19,11 @@ do
         data_dir=data/run$i/$t/$b
         mkdir -p $data_dir
         vmtouch -e /$node/
-        echo "$w,$b,1,100,1,$t" > dlcache_exp.txt
+        echo "Exp[$test/$total_test]: worker=$w, batch_size=$b, compute_time=$t"
+        echo "$w,$b,1,100,1,$t" > /app/dlcache_exp.txt
         python train.py +configs=librispeech
         mv *.npy $data_dir/
         mv /share/train_cache_usage.npy $data_dir/
+        ((test=test+1))
     done
 done

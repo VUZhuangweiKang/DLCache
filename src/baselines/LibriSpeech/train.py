@@ -5,6 +5,8 @@ from deepspeech_pytorch.configs.lightning_config import ModelCheckpointConf
 from deepspeech_pytorch.configs.train_config import DeepSpeechConfig, AdamConfig, SGDConfig, BiDirectionalConfig, \
     UniDirectionalConfig
 from deepspeech_pytorch.training import train
+import warnings
+warnings.filterwarnings('ignore')
 
 cs = ConfigStore.instance()
 cs.store(name="config", node=DeepSpeechConfig)

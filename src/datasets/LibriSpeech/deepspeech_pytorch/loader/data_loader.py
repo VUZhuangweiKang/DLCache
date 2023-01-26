@@ -175,10 +175,14 @@ class SpectrogramDataset(DLCJobDataset, SpectrogramParser):
         for i in range(len(sample_keys)):
             self._samples.append(samples_manifest[sample_keys[i]])
             self._targets.append(targets_manifest[target_keys[i]])
+        self._samples.sort(key=lambda item: item.split('/')[-1])
+        self._targets.sort(key=lambda item: item.split('/')[-1])
     
-    def _load(self, sample_item, target_item = None):
-        spect, transcript = self.parse_audio(sample_item), self.parse_transcript(target_item)
-        return spect, transcript
+    def _load_sample(self, sample_item):
+        return self.parse_audio(sample_item)
+    
+    def _load_target(self, target_item=None):
+        return self.parse_transcript(target_item)
 
 
 def _collate_fn(batch):
