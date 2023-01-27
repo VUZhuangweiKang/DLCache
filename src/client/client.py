@@ -193,11 +193,12 @@ class Client(object):
         event = threading.Event()
         
         def docopy(items):
+            t = time.time()
             for tmpfs_path in items:
                 if not event.is_set():
                     break
                 nfs_path = tmpfs_path.replace('/runtime', '')
-                if os.path.exists(nfs_path):
+                try:
                     while True:
                         try:
                             shutil.copyfile(nfs_path, tmpfs_path)
@@ -205,10 +206,11 @@ class Client(object):
                         except Exception as ex:
                             root_folder = '/'.join(tmpfs_path.split('/')[:-1])
                             os.makedirs(root_folder, exist_ok=True)
-                else:
+                except FileNotFoundError as ex:
                     print('failed to copy {}'.format(nfs_path))
                     etag = nfs_path.split('/')[-1]
                     self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
+            print('copied {} files, spent {}s'.format(len(items), time.time()-t))
         
         thrd = None
         while True:

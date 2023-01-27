@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# According to the benchmark results in https://lambdalabs.com/gpu-benchmarks,
-# the training time of ResNet-50 range from 135 to 1197 images/s.
+# According to the benchmark results in http://www.cs.toronto.edu/ecosystem/papers/Echo-Arxiv.pdf,
+# the throughput of DeepSpeech2 range from 4-12samples/s for batch size from 8, 16, 24, 32
 
 i=0
-w=4
+w=8
 test=1
 compute_time=( 1.0 1.4 1.8 2.2 2.6)
-batch_size=( 8, 16, 32 )
+batch_size=( 8 16 32 )
 node="172.31.92.64"
 
 total_test=$((${#compute_time[@]} * ${#batch_size[@]}))

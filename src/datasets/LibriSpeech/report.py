@@ -7,7 +7,7 @@ if __name__=="__main__":
     r, c, b = tuple(sys.argv[1:])
     r, c, b = int(r), float(c), int(b)
     dir = "data/run{}/{}/{}".format(r, c, b)
-    load_time = np.load('{}/load_time.npy'.format(dir))[0]
+    load_time = np.sum(np.load('{}/load_time.npy'.format(dir)))
     if os.path.exists('{}/train_cache_usage.npy'.format(dir)):
         avg_cache_usage = np.load('{}/train_cache_usage.npy'.format(dir))
         avg_cache_usage = np.mean(avg_cache_usage, dtype=int) / b
