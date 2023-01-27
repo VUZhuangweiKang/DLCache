@@ -12,9 +12,10 @@ from deepspeech_pytorch.model import DeepSpeech
 import time
 import numpy as np
 
-# def train(cfg: DeepSpeechConfig):
-def train(cfg: DeepSpeechConfig):
 
+def train(cfg: DeepSpeechConfig):
+    seed_everything(cfg.seed)
+    
     # Add for DLCache Evaluationde
     with open('/app/dlcache_exp.txt', "r") as f:
         line = f.read().strip()
@@ -22,8 +23,6 @@ def train(cfg: DeepSpeechConfig):
     cfg.data.num_workers = int(args[0])
     cfg.data.batch_size = int(args[1])
     cfg.trainer.max_epochs = int(args[2])
-    
-    seed_everything(cfg.seed)
 
     with open(to_absolute_path(cfg.data.labels_path)) as label_file:
         labels = json.load(label_file)
@@ -67,9 +66,10 @@ def train(cfg: DeepSpeechConfig):
     for i in range(min(total_batches, int(args[3]))):
         t = time.time()
         next(train_loader)
-        load_time.append(time.time() - t)
+        latency = time.time() - t
+        load_time.append(latency)
         if i % int(args[4]) == 0:
-            print('[{}/{}]: latency: {}'.format(i+1, total_batches, np.mean(load_time)))
+            print('[{}/{}]: latency: {}'.format(i+1, total_batches, latency))
         time.sleep(float(args[5]))
     print('Total time: {}'.format(np.sum(load_time)))
     np.save('/app/load_time.npy', load_time)

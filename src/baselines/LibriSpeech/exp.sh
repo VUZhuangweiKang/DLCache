@@ -19,7 +19,7 @@ do
         mkdir -p $data_dir
         vmtouch -e /nfs_storage/
         echo "Exp[$test/$total_test]: worker=$w, batch_size=$b, compute_time=$t"
-        echo "$w,$b,1,100,1,$t" > /app/dlcache_exp.txt
+        echo "$w,$b,1,100,10,$t" > /app/dlcache_exp.txt
         python train.py +configs=librispeech
         mv *.npy $data_dir/
         ((test=test+1))

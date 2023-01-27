@@ -33,6 +33,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -585,6 +586,11 @@ func (r *DLCPodReconciler) createPod(ctx context.Context, dlcpod *v1alpha1.DLCPo
 		VolumeMounts: vol_mounts,
 		TTY:          true,
 		Stdin:        true,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				"cpu": *resource.NewMilliQuantity(500, resource.DecimalSI),
+			},
+		},
 	}
 	containers = append(containers, container)
 

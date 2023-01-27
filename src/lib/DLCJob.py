@@ -185,7 +185,7 @@ class DLCJobDataLoader(DataLoader[T_co]):
                  pin_memory: bool = False, drop_last: bool = False,
                  timeout: float = 0, worker_init_fn: Optional[_worker_init_fn_t] = None,
                  multiprocessing_context=None, generator=None, prefetch_factor: int = 2, 
-                 persistent_workers: bool = False, autoscale_workers: bool = True,
+                 persistent_workers: bool = False, autoscale_workers: bool = False,
                  pin_memory_device: str = ""):
         super().__init__(dataset, batch_size, shuffle, sampler, batch_sampler, num_workers, collate_fn, 
                          pin_memory, drop_last, timeout, worker_init_fn, multiprocessing_context, generator,
