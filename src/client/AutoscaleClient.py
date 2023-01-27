@@ -332,7 +332,8 @@ class Client(object):
                     self.socket_rep.send(b'')
                     data = pickle.loads(data)
                     prefetch_factor = data['prefetch_factor']
-                    window_size = data['num_workers'] * prefetch_factor
+                    num_workers = data['active_workers']
+                    window_size = num_workers * prefetch_factor
                     with open('/share/{}_samples_manifests.pkl'.format(dataset_type), 'rb') as f:
                         samples_tmpfs_paths = np.array(list(pickle.load(f).values()))
                     
@@ -373,21 +374,32 @@ class Client(object):
                 # logger.info('recv msg: {} {}'.format(topic, data))
                 if topic == "loadCache":
                     data = pickle.loads(data)
-                    rcvd_idx, send_idx = data['rcvd_idx'], data['send_idx']
-                    if rcvd_idx == len(self.tmpfs_paths[dataset_type]):
+                    window_size = data['active_workers'] * prefetch_factor
+                    if data['rcvd_idx'] == len(self.tmpfs_paths[dataset_type]):
                         continue
                     # clean up pending batches, and prepare to load the next epoch
-                    if send_idx == len(self.tmpfs_paths[dataset_type]):
-                        if send_idx - rcvd_idx == window_size:
+                    if data['send_idx'] == len(self.tmpfs_paths[dataset_type]):
+                        if data['send_idx'] - data['rcvd_idx'] == window_size:
                             while True:
                                 try:
                                     item = self.send_idx_queue.get_nowait()
                                     logger.info('pop item from queue: {}'.format(item))
                                 except:
                                     break
-                        send_idx = (rcvd_idx + window_size) % len(self.tmpfs_paths[dataset_type])
+                        data['send_idx'] = (data['rcvd_idx'] + window_size) % len(self.tmpfs_paths[dataset_type])
 
-                    self.send_idx_queue.put((dataset_type,send_idx))
+                    send_idx = data['send_idx']
+                    
+                    '''
+                    Due to measurement error, there might be backlog in send_idx_queue.
+                    We skip those indexes to avoid cascading backlog.
+                    '''
+                    while True:
+                        try:
+                            self.send_idx_queue.get_nowait()
+                        except:
+                            break
+                    self.send_idx_queue.put((dataset_type, send_idx))
                 elif topic == "releaseCache":
                     idx = int(data)
                     self.rcvd_idx_queue.put((dataset_type, idx))
