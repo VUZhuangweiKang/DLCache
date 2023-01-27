@@ -146,7 +146,8 @@ class DLCJobDataset(Dataset[T_co]):
             if target_item:
                 try:
                     t = self._load_target(target_item)
-                    self.cache_hits += 1
+                    if self.target_is_file:
+                        self.cache_hits += 1
                 except Exception:
                     if self.target_is_file: # target item is a file
                         target_item = target_item.replace('/runtime', '')
@@ -584,28 +585,18 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         return data
 
     def _next_data(self):
-        # if self._last_iter_time is not None:
-        #     if len(self._req_time) == self._tune_freq:
-        #         self._req_time.clear()
-        #     self._req_time.append(time.time() - self._last_iter_time)
-
-        #     '''
-        #     fetch_time would be np.nan in the first iteration
-        #     '''
-        #     if self.lazy:
-        #         req_time, fetch_time = np.mean(self._req_time), np.mean(self._fetch_time)
-        #         if req_time < fetch_time:
-        #             msg = {'send_idx': self._send_idx + 1,
-        #                 'rcvd_idx': self._rcvd_idx, 
-        #                 'active_workers': self._active_workers.value, 
-        #                 'req_time': req_time}
-        #             self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
-        
-        if self.lazy:
-            msg = {'send_idx': self._send_idx + 1,
-                'rcvd_idx': self._rcvd_idx, 
-                'active_workers': self._active_workers.value}
-            self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
+        if self._last_iter_time is not None:
+            if len(self._req_time) == self._active_workers.value * self._prefetch_factor:
+                self._req_time.clear()
+            self._req_time.append(time.time() - self._last_iter_time)
+            
+            if self.lazy:
+                req_time, fetch_time = np.mean(self._req_time), np.mean(self._fetch_time)
+                if req_time < fetch_time:
+                    msg = {'send_idx': self._send_idx + 1,
+                           'rcvd_idx': self._rcvd_idx,
+                           'active_workers': self._active_workers.value}
+                    self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
         
         while True:
             try:
@@ -659,18 +650,18 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 
         # ensure the `num_workers` is consensus while reading the batch
         # we skip the first batch because the reset function needs to prefetch data synchronously
-        # if self._rcvd_idx > 1:                
-        #     if fetch_time is not None:
-        #         if len(self._fetch_time) == self._tune_freq:
-        #             self._fetch_time.clear()
-        #         self._fetch_time.append(fetch_time)
+        if self._rcvd_idx > 1:                
+            if fetch_time is not None:
+                if len(self._fetch_time) == self._active_workers.value * self._prefetch_factor:
+                    self._fetch_time.clear()
+                self._fetch_time.append(fetch_time)
                     
-        #     if self._autoscale_workers:
-        #         self._tune_worker_num()
+            if self._autoscale_workers:
+                self._tune_worker_num()
 
         if self.lazy:
             self._socket_pub.send_multipart([b"releaseCache", self._dataset.dataset_type.encode('utf-8'), str(self._rcvd_idx-1).encode('utf-8')])
-        # self._last_iter_time = time.time()
+        self._last_iter_time = time.time()
         return data
         
     def _mark_worker_as_unavailable(self, worker_id, shutdown=False):
