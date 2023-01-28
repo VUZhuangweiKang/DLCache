@@ -1,6 +1,5 @@
 import os
 import json
-import math
 import random
 import numpy as np
 import threading
@@ -15,8 +14,6 @@ from typing import (
     Sequence,
     TypeVar,
 )
-import shutil
-from collections import defaultdict
 import itertools
 import torch
 import torch.multiprocessing as multiprocessing
@@ -26,8 +23,6 @@ from torch.utils.data.dataloader import _BaseDataLoaderIter
 import time
 import pickle
 import zmq
-import gc
-import psutil
 import warnings
 warnings.filterwarnings("ignore")
 
