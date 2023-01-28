@@ -63,6 +63,7 @@ def train(cfg: DeepSpeechConfig):
     train_loader = iter(train_loader)
     total_batches = len(train_loader)
     load_time = []
+    start = time.time()
     for i in range(min(total_batches, int(args[3]))):
         t = time.time()
         next(train_loader)
@@ -71,5 +72,7 @@ def train(cfg: DeepSpeechConfig):
         if i % int(args[4]) == 0:
             print('[{}/{}]: latency: {}'.format(i+1, total_batches, latency))
         time.sleep(float(args[5]))
-    print('Total time: {}'.format(np.sum(load_time)))
+    print('Total Read time: {}'.format(np.sum(load_time)))
+    print('Total Iteration Time: {}'.format(time.time()-start))
     np.save('/app/load_time.npy', load_time)
+

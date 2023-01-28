@@ -84,19 +84,19 @@ class DLCJobDataset(Dataset[T_co]):
         self._targets: List = []
     
         self.num_partitions = 1 if self.lazy else len(self.samples_manifest)
-        self.target_is_file = os.path.exists('/share/{}_targets_manifests.pkl'.format(self.dataset_type))
+        self.target_is_file = os.path.exists('/share/{}_targets_manifest.pkl'.format(self.dataset_type))
         self._load_partition_data()
         self.cache_hits = 0
     
     # manifest files for mapping object path from cloud to local
     @property
     def samples_manifest(self):
-        with open('/share/{}_samples_manifests.pkl'.format(self.dataset_type), 'rb') as f:
+        with open('/share/{}_samples_manifest.pkl'.format(self.dataset_type), 'rb') as f:
             return pickle.load(f)
 
     @property
     def targets_manifest(self):
-        p = '/share/{}_targets_manifests.pkl'.format(self.dataset_type)
+        p = '/share/{}_targets_manifest.pkl'.format(self.dataset_type)
         if os.path.exists(p):
             with open(p, 'rb') as f:
                 return pickle.load(f)

@@ -27,4 +27,4 @@ spec:
       lazyloading: true
     tty: true
     stdin: true
-  nodeName: ip-172-31-92-64
+  nodeName: isislab31

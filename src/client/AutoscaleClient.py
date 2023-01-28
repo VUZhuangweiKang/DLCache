@@ -173,14 +173,14 @@ class Client(object):
             samples_manifest = load(chunk_etags['samples'])
             targets_manifest = load(chunk_etags['targets'])
             
-            path = '/share/{}_samples_manifests.pkl'.format(dataset_type)
+            path = '/share/{}_samples_manifest.pkl'.format(dataset_type)
             if not os.path.exists(path):
                 with open(path, 'wb') as f:
                     pickle.dump(samples_manifest, f)
             
-            path = '/share/{}_targets_manifests.pkl'.format(dataset_type)
+            path = '/share/{}_targets_manifest.pkl'.format(dataset_type)
             if not os.path.exists(path) and len(targets_manifest) > 0:
-                with open('/share/{}_targets_manifests.pkl'.format(dataset_type), 'wb') as f:
+                with open('/share/{}_targets_manifest.pkl'.format(dataset_type), 'wb') as f:
                     pickle.dump(targets_manifest, f)
     
     def async_mongo_opt(self, mongo_opt_queue):
@@ -334,11 +334,11 @@ class Client(object):
                     prefetch_factor = data['prefetch_factor']
                     num_workers = data['active_workers']
                     window_size = num_workers * prefetch_factor
-                    with open('/share/{}_samples_manifests.pkl'.format(dataset_type), 'rb') as f:
+                    with open('/share/{}_samples_manifest.pkl'.format(dataset_type), 'rb') as f:
                         samples_tmpfs_paths = np.array(list(pickle.load(f).values()))
                     
                     targets_tmpfs_paths = None
-                    p = '/share/{}_targets_manifests.pkl'.format(dataset_type)
+                    p = '/share/{}_targets_manifest.pkl'.format(dataset_type)
                     if os.path.exists(p):
                         with open(p, 'rb') as f:
                             targets_tmpfs_paths = np.array(list(pickle.load(f).values()))

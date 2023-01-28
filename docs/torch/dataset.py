@@ -364,10 +364,10 @@ class DLCJobDataset(Dataset[T_co]):
             
     # manifest files for mapping object path from cloud to local
     def read_samples_manifest(self):
-        with open('/share/{}_samples_manifests.json'.format(self.dataset_type), 'r') as f:
+        with open('/share/{}_samples_manifest.json'.format(self.dataset_type), 'r') as f:
             return json.load(f)
     def read_targets_manifest(self):
-        p = '/share/{}_targets_manifests.json'.format(self.dataset_type)
+        p = '/share/{}_targets_manifest.json'.format(self.dataset_type)
         if os.path.exists(p):
             with open(p, 'r') as f:
                 return json.load(f)

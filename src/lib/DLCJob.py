@@ -85,19 +85,19 @@ class DLCJobDataset(Dataset[T_co]):
         self._targets: List = []
     
         self.num_partitions = 1 if self.lazy else len(self.samples_manifest)
-        self.target_is_file = os.path.exists('/share/{}_targets_manifests.pkl'.format(self.dataset_type))
+        self.target_is_file = os.path.exists('/share/{}_targets_manifest.pkl'.format(self.dataset_type))
         self._load_partition_data()
         self.cache_hits = 0
     
     # manifest files for mapping object path from cloud to local
     @property
     def samples_manifest(self):
-        with open('/share/{}_samples_manifests.pkl'.format(self.dataset_type), 'rb') as f:
+        with open('/share/{}_samples_manifest.pkl'.format(self.dataset_type), 'rb') as f:
             return pickle.load(f)
 
     @property
     def targets_manifest(self):
-        p = '/share/{}_targets_manifests.pkl'.format(self.dataset_type)
+        p = '/share/{}_targets_manifest.pkl'.format(self.dataset_type)
         if os.path.exists(p):
             with open(p, 'rb') as f:
                 return pickle.load(f)
@@ -110,9 +110,9 @@ class DLCJobDataset(Dataset[T_co]):
         else:
             self._process(dict(self.samples_manifest.items()[partition_idx]), dict(self.targets_manifest.items()[partition_idx]))
         assert len(self._samples) > 0
-        self._sample_on_nfs = [sample.replace('/runtime', '') for sample in self._samples]
+        np.save('/share/{}_processed_samples.npy'.format(self.dataset_type), self._samples)
         if self.target_is_file:
-            self._target_on_nfs = [target.replace('/runtime', '') for target in self._targets]
+            np.save('/share/{}_processed_targets.npy'.format(self.dataset_type), self._targets)
         
     def _process(self, samples_manifest: dict, targets_manifest: dict=None):
         r"""Given the manifests, you may use them to 
@@ -139,9 +139,10 @@ class DLCJobDataset(Dataset[T_co]):
                     self.cache_hits += 1
                 except Exception: # cache miss
                     try:
-                        s = self._load_sample(self._sample_on_nfs[index])
-                    except FileNotFoundError as ex:
-                        miss_etag = ex.filename.split('/')[2]
+                        sample_on_nfs = sample_item.replace('/runtime', '')
+                        s = self._load_sample(sample_on_nfs)
+                    except Exception:
+                        miss_etag = sample_item.filename.split('/')[2]
                         index = random.randint(index+1, len(self) - 1)
                         rlt = self.__getitem__(index)
                         return (rlt[0], miss_etag)
@@ -154,9 +155,10 @@ class DLCJobDataset(Dataset[T_co]):
                 except Exception:
                     if self.target_is_file: # target item is a file
                         try:
-                            t = self._load_target(self._target_on_nfs[index])
-                        except FileNotFoundError as ex:
-                            miss_etag = ex.filename.split('/')[2]
+                            target_on_nfs = target_item.replace("/runtime", '')
+                            t = self._load_target(target_on_nfs)
+                        except Exception:
+                            miss_etag = target_item.filename.split('/')[2]
                             index = random.randint(index+1, len(self) - 1)
                             rlt = self.__getitem__(index)
                             return (rlt[0], miss_etag)
