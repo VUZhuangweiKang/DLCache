@@ -10,7 +10,7 @@ i=0
 w=8
 test=1
 compute_time=( 0.4 0.8 1.2 1.6 2.0 2.4 )
-batch_size=( 256 512 1024 )
+batch_size=( 128 256 512 )
 node="172.31.90.206"
 
 total_test=$((${#compute_time[@]} * ${#batch_size[@]}))

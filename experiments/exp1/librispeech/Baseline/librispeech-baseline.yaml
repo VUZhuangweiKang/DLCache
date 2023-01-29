@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: librispeech-baseline
+  name: librispeech-baseline1
 spec:
   containers:
   - name: app
@@ -22,4 +22,4 @@ spec:
       hostPath:
         path: /nfs_storage
         type: Directory
-  nodeName: ip-172-31-92-64
+  nodeName: ip-172-31-90-206

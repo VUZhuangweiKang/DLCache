@@ -106,8 +106,10 @@ class DLCJobDataset(Dataset[T_co]):
             self._process(dict(self.samples_manifest.items()[partition_idx]), dict(self.targets_manifest.items()[partition_idx]))
         assert len(self._samples) > 0
         np.save('/share/{}_processed_samples.npy'.format(self.dataset_type), self._samples)
+        self._sampels_on_nfs = [sample.replace('/runtime', '') for sample in self._samples]
         if self.target_is_file:
             np.save('/share/{}_processed_targets.npy'.format(self.dataset_type), self._targets)
+            self._targets_on_nfs = [target.replace('/runtime', '') for target in self._targets]
         
     def _process(self, samples_manifest: dict, targets_manifest: dict=None):
         r"""Given the manifests, you may use them to 
@@ -134,8 +136,7 @@ class DLCJobDataset(Dataset[T_co]):
                     self.cache_hits += 1
                 except Exception: # cache miss
                     try:
-                        sample_on_nfs = sample_item.replace('/runtime', '')
-                        s = self._load_sample(sample_on_nfs)
+                        s = self._load_sample(self._sampels_on_nfs[index])
                     except Exception:
                         miss_etag = sample_item.filename.split('/')[2]
                         index = random.randint(index+1, len(self) - 1)
@@ -150,8 +151,7 @@ class DLCJobDataset(Dataset[T_co]):
                 except Exception:
                     if self.target_is_file: # target item is a file
                         try:
-                            target_on_nfs = target_item.replace("/runtime", '')
-                            t = self._load_target(target_on_nfs)
+                            t = self._load_target(self._targets_on_nfs[index])
                         except Exception:
                             miss_etag = target_item.filename.split('/')[2]
                             index = random.randint(index+1, len(self) - 1)
