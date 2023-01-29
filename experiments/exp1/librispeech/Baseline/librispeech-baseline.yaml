@@ -22,4 +22,4 @@ spec:
       hostPath:
         path: /nfs_storage
         type: Directory
-  nodeName: isislab31
+  nodeName: ip-172-31-92-64

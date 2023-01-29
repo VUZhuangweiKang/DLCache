@@ -1,14 +1,17 @@
 #!/bin/bash
 
-# According to the benchmark results in http://www.cs.toronto.edu/ecosystem/papers/Echo-Arxiv.pdf,
-# the throughput of DeepSpeech2 range from 4-12samples/s for batch size from 8, 16, 24, 32
+# Paper: https://assets.amazon.science/d5/2b/589dac2b4da58f5af4573d9a3959/knowledge-distillation-via-module-replacing-for-automatic-speech-recognition-with-recurrent-neural-network-transducer.pdf
+# spends 38 hours to train LibriSpeech for 100 epochs with batch size 256 using 8 Nvidia V100 16GB GPUs
+
+# Paper: https://ieeexplore-ieee-org.proxy.library.vanderbilt.edu/stamp/stamp.jsp?tp=&arnumber=9053889
+# spends 122 hours to train LibriSpeech (seems train-clean-100 only) for 400 epochs with batch size 256 using 8 Tesla V100 GPUs
 
 i=0
 w=8
 test=1
 compute_time=( 0.4 0.8 1.2 1.6 2.0 2.4 )
-batch_size=( 16 32 64 128 )
-node="172.31.92.64"
+batch_size=( 256 512 1024 )
+node="172.31.90.206"
 
 total_test=$((${#compute_time[@]} * ${#batch_size[@]}))
 for t in ${compute_time[*]}
