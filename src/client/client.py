@@ -193,7 +193,7 @@ class Client(object):
         event = threading.Event()
         
         def docopy(items):
-            t = time.time()
+            # t = time.time()
             for tmpfs_path in items:
                 if not event.is_set():
                     break
@@ -210,7 +210,7 @@ class Client(object):
                     print('failed to copy {}'.format(nfs_path))
                     etag = nfs_path.split('/')[-1]
                     self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
-            print('copied {} files, spent {}s'.format(len(items), time.time()-t))
+            # print('copied {} files, spent {}s'.format(len(items), time.time()-t))
         
         thrd = None
         while True:
