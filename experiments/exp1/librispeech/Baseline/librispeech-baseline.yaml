@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: librispeech-baseline1
+  name: librispeech-baseline
 spec:
   containers:
   - name: app
