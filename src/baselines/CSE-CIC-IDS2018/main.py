@@ -32,13 +32,13 @@ def main():
     
     if not args.evaluate:
         train_dataset = DDoSDataset(data_path=args.train_data_path)
-        val_dataset = DDoSDataset(dtype=args.val_data_path)
+        val_dataset = DDoSDataset(data_path=args.val_data_path)
         train_state = make_train_state(args)
         
         with tqdm(desc='training routine',  total=args.epochs, position=0) as epoch_bar:
             for epoch_index in range(args.epochs):
                 train_loader = DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
-                                          drop_last=args.drop_last, num_workers=args.num_workers, pin_memory=False)
+                                          drop_last=args.drop_last, num_workers=args.num_workers, pin_memory=args.pin_memory)
                 
                 batch_generator = generate_batches(train_loader, device=args.device)
                 optimizer.zero_grad()
