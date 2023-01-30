@@ -16,12 +16,15 @@ class ImageDataset(DLCJobDataset):
             if label not in cls_idx:
                 cls_idx[label] = len(cls_idx)
             self._targets.append(cls_idx[label])
-
-    def _load(self, sample_item, target_item = None):
+    
+    def _load_sample(self, sample_item):
         with Image.open(sample_item) as img:
             img = img.convert("RGB")
         if self.transform is not None:
             img = self.transform(img)
+        return img
+    
+    def _load_target(self, target_item=None):
         if self.target_transform is not None:
             target_item = self.target_transform(target_item)
-        return img, target_item
+        return target_item

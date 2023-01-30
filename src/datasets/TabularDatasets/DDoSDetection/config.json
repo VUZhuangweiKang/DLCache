@@ -5,15 +5,14 @@
     "batch_size": 128,
     "drop_last": false,
     "shuffle": true,
-    "workers": 4,
+    "num_workers": 4,
     "pin_memory": true,
     "early_stopping_criteria": 5,
-    "epochs": 20,
+    "epochs": 1,
     "input_features": 76, 
     "hiddens": [128, 64, 32],
     "dropout_rate": 0.3,
     "learning_rate": 0.001,
-    "num_epochs": 100,
     "seed": 1337,
     "cuda": true
 }

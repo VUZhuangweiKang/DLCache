@@ -5,9 +5,7 @@ import torch.optim as optim
 from models import *
 from tqdm.notebook import tqdm
 from DDoSDataset import *
-import sys
-sys.path.insert(0, '../')
-from DLCJob import *
+from lib.DLCJob import DLCJobDataLoader
 from utils import *
 
 
@@ -37,10 +35,10 @@ def main():
         val_dataset = DDoSDataset(dtype="validation")
         train_state = make_train_state(args)
         
-        with tqdm(desc='training routine',  total=args.num_epochs, position=0) as epoch_bar:
+        with tqdm(desc='training routine',  total=args.epochs, position=0) as epoch_bar:
             for epoch_index in range(args.epochs):
                 train_loader = DLCJobDataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=args.shuffle,  
-                                                drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
+                                                drop_last=args.drop_last, num_workers=args.num_workers, pin_memory=False)
                 
                 batch_generator = generate_batches(train_loader, device=args.device)
                 optimizer.zero_grad()
@@ -50,19 +48,20 @@ def main():
                 classifier.train()
                 
                 with tqdm(desc='split=train', total=train_dataset.get_num_batches(args.batch_size), position=1, leave=True) as train_bar:
-                    for batch_index, batch_dict in enumerate(batch_generator):
+                    for index, input in enumerate(batch_generator):
                         optimizer.zero_grad()
-                        y_pred = classifier(batch_dict['x_data'])
+                        X_input, y_input = input
+                        y_pred = classifier(X_input)
 
-                        loss = loss_func(y_pred, batch_dict['y_target'])
+                        loss = loss_func(y_pred, y_input)
                         loss_t = loss.item()
-                        running_loss += (loss_t - running_loss) / (batch_index + 1)
+                        running_loss += (loss_t - running_loss) / (index + 1)
 
                         loss.backward()
 
                         optimizer.step()
-                        acc_t = compute_accuracy(y_pred, batch_dict['y_target'])
-                        running_acc += (acc_t - running_acc) / (batch_index + 1)
+                        acc_t = compute_accuracy(y_pred, y_input)
+                        running_acc += (acc_t - running_acc) / (index + 1)
 
                         train_bar.set_postfix(loss=running_loss, acc=running_acc, epoch=epoch_index)
                         train_bar.update()
@@ -78,18 +77,18 @@ def main():
                     running_acc = 0.
                     classifier.eval()
 
-                    for batch_index, batch_dict in enumerate(batch_generator):
+                    for index, input in enumerate(batch_generator):
+                        X_input, y_input = input
+                        y_pred = classifier(X_input)
 
-                        y_pred = classifier(batch_dict['x_data'])
-
-                        loss = loss_func(y_pred, batch_dict['y_target'])
+                        loss = loss_func(y_pred, y_input)
                         loss_t = loss.item()
-                        running_loss += (loss_t - running_loss) / (batch_index + 1)
+                        running_loss += (loss_t - running_loss) / (index + 1)
 
-                        acc_t = compute_accuracy(y_pred, batch_dict['y_target'])
-                        running_acc += (acc_t - running_acc) / (batch_index + 1)
+                        acc_t = compute_accuracy(y_pred, y_input)
+                        running_acc += (acc_t - running_acc) / (index + 1)
                         
-                        val_bar.set_postfix(loss=running_loss, acc=running_acc, epoch=epoch_index)
+                        val_bar.set_postfix(loss=running_loss, acc=running_acc, epoch=index)
                         val_bar.update()
 
                     train_state['val_loss'].append(running_loss)
@@ -122,15 +121,16 @@ def main():
         running_acc = 0.
         classifier.eval()
 
-        for batch_index, batch_dict in enumerate(batch_generator):
-            y_pred = classifier(batch_dict['x_data'])
+        for index, input in enumerate(batch_generator):
+            X_input, y_input = input
+            y_pred = classifier(X_input)
 
-            loss = loss_func(y_pred, batch_dict['y_target'])
+            loss = loss_func(y_pred, y_input)
             loss_t = loss.item()
-            running_loss += (loss_t - running_loss) / (batch_index + 1)
+            running_loss += (loss_t - running_loss) / (index + 1)
 
-            acc_t = compute_accuracy(y_pred, batch_dict['y_target'])
-            running_acc += (acc_t - running_acc) / (batch_index + 1)
+            acc_t = compute_accuracy(y_pred, y_input)
+            running_acc += (acc_t - running_acc) / (index + 1)
 
         train_state['test_loss'] = running_loss
         train_state['test_acc'] = running_acc

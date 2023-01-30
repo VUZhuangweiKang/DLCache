@@ -1,7 +1,4 @@
 import pandas as pd
-import torch
-import sys
-sys.path.insert(0, '../')
 from lib.DLCJob import DLCJobDataset
 
 
@@ -11,14 +8,16 @@ class DDoSDataset(DLCJobDataset):
     
     def get_num_batches(self, batch_size):
         return len(self) // batch_size  
+
+    def _process(self, samples_manifest: dict, targets_manifest:dict = None):
+        for file in samples_manifest:
+            local_path = samples_manifest[file]
+            data = pd.read_csv(local_path).to_numpy()
+        self._samples = data[:, :-1]
+        self._targets = data[:, -1:]
     
-    def _process(self, sample_files, target_files=None):
-        self.data = torch.tensor(pd.read_csv(sample_files[0]).to_numpy(), dtype=torch.float32)
+    def _load_sample(self, sample_item):
+        return sample_item
     
-    def __getItem__(self, index):
-        entry = self.data[index]
-        X, Y = entry[:-1], entry[-1:]
-        return {'x_data': X, 'y_target': Y}
-    
-    def __len__(self):
-        return len(self.data)
+    def _load_target(self, target_item=None):
+        return target_item
