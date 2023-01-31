@@ -1,11 +1,11 @@
 r""""Contains definitions of the methods used by the _BaseDataLoaderIter workers.
+
 These **needs** to be in global scope since Py2 doesn't support serializing
 static methods.
 """
 
 import torch
 import random
-import time
 import os
 import queue
 from dataclasses import dataclass
@@ -83,8 +83,10 @@ class WorkerInfo(object):
 def get_worker_info():
     r"""Returns the information about the current
     :class:`~torch.utils.data.DataLoader` iterator worker process.
+
     When called in a worker, this returns an object guaranteed to have the
     following attributes:
+
     * :attr:`id`: the current worker id.
     * :attr:`num_workers`: the total number of workers.
     * :attr:`seed`: the random seed set for the current worker. This value is
@@ -93,7 +95,9 @@ def get_worker_info():
     * :attr:`dataset`: the copy of the dataset object in **this** process. Note
       that this will be a different object in a different process than the one
       in the main process.
+
     When called in the main process, this returns ``None``.
+
     .. note::
        When used in a :attr:`worker_init_fn` passed over to
        :class:`~torch.utils.data.DataLoader`, this method can be useful to
@@ -219,7 +223,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
         from torch.utils.data.graph_settings import apply_shuffle_seed
 
         global _worker_info
-        _worker_info = WorkerInfo(id=worker_id, num_workers=num_workers.value,
+        _worker_info = WorkerInfo(id=worker_id, num_workers=num_workers,
                                   seed=seed, dataset=dataset)
 
         from torch.utils.data import _DatasetKind
@@ -251,11 +255,9 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
 
         watchdog = ManagerWatchdog()
         
-        last_get_time = None
         while watchdog.is_alive():
             try:
                 r = index_queue.get(timeout=MP_STATUS_CHECK_INTERVAL)
-                get_time = time.time()
             except queue.Empty:
                 continue
             
@@ -281,7 +283,6 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             idx, index = r
             data: Union[_IterableDatasetStopIteration, ExceptionWrapper]
             
-            wn1 = num_workers.value
             if init_exception is not None:
                 data = init_exception
                 init_exception = None
@@ -302,18 +303,9 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                         data = ExceptionWrapper(
                             where="in DataLoader worker process {}".format(worker_id))
                         miss = None
-                    
-            wn2 = num_workers.value
-            
-            _num_workers = None if wn1 != wn2 else wn1
-            if last_get_time is None:
-                freq = None
-            else:
-                freq = get_time - last_get_time
 
-            data_queue.put((idx, data, _num_workers, freq, miss))
-            last_get_time = get_time
-            del data, idx, index, r, _num_workers, freq, miss  # save memory
+            data_queue.put((idx, data, miss))
+            del data, idx, index, r, miss  # save memory
     except KeyboardInterrupt:
         # Main process will raise KeyboardInterrupt anyways.
         pass
@@ -322,4 +314,4 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
         data_queue.cancel_join_thread()
         data_queue.close()
     
-    np.save('cache_hits_{}.npy'.format(worker_id), dataset.cache_hits)
+    np.save('/app/cache_hits_{}.npy'.format(worker_id), dataset.cache_hits)

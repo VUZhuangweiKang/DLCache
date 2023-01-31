@@ -193,11 +193,12 @@ class Client(object):
         event = threading.Event()
         
         def docopy(items):
+            # t = time.time()
             for tmpfs_path in items:
                 if not event.is_set():
                     break
                 nfs_path = tmpfs_path.replace('/runtime', '')
-                if os.path.exists(nfs_path):
+                try:
                     while True:
                         try:
                             shutil.copyfile(nfs_path, tmpfs_path)
@@ -205,10 +206,11 @@ class Client(object):
                         except Exception as ex:
                             root_folder = '/'.join(tmpfs_path.split('/')[:-1])
                             os.makedirs(root_folder, exist_ok=True)
-                else:
+                except FileNotFoundError as ex:
                     print('failed to copy {}'.format(nfs_path))
                     etag = nfs_path.split('/')[-1]
                     self.manager_stub.handle_datamiss(pb.DataMissRequest(cred=self.cred, etag=etag))
+            # print('copied {} files, spent {}s'.format(len(items), time.time()-t))
         
         thrd = None
         while True:
@@ -332,16 +334,13 @@ class Client(object):
                     self.socket_rep.send(b'')
                     data = pickle.loads(data)
                     prefetch_factor = data['prefetch_factor']
-                    num_workers = data['active_workers']
-                    window_size = num_workers * prefetch_factor
-                    with open('/share/{}_samples_manifest.pkl'.format(dataset_type), 'rb') as f:
-                        samples_tmpfs_paths = np.array(list(pickle.load(f).values()))
+                    window_size = data['num_workers'] * prefetch_factor
+                    samples_tmpfs_paths = np.load('/share/{}_processed_samples.npy'.format(dataset_type))
                     
                     targets_tmpfs_paths = None
-                    p = '/share/{}_targets_manifest.pkl'.format(dataset_type)
+                    p = '/share/{}_processed_targets.npy'.format(dataset_type)
                     if os.path.exists(p):
-                        with open(p, 'rb') as f:
-                            targets_tmpfs_paths = np.array(list(pickle.load(f).values()))
+                        targets_tmpfs_paths = np.load(p)
 
                     batched_tmpfs_paths = []
                     for batch in data['paths']:
@@ -374,32 +373,21 @@ class Client(object):
                 # logger.info('recv msg: {} {}'.format(topic, data))
                 if topic == "loadCache":
                     data = pickle.loads(data)
-                    window_size = data['active_workers'] * prefetch_factor
-                    if data['rcvd_idx'] == len(self.tmpfs_paths[dataset_type]):
+                    rcvd_idx, send_idx = data['rcvd_idx'], data['send_idx']
+                    if rcvd_idx == len(self.tmpfs_paths[dataset_type]):
                         continue
                     # clean up pending batches, and prepare to load the next epoch
-                    if data['send_idx'] == len(self.tmpfs_paths[dataset_type]):
-                        if data['send_idx'] - data['rcvd_idx'] == window_size:
+                    if send_idx == len(self.tmpfs_paths[dataset_type]):
+                        if send_idx - rcvd_idx == window_size:
                             while True:
                                 try:
                                     item = self.send_idx_queue.get_nowait()
                                     logger.info('pop item from queue: {}'.format(item))
                                 except:
                                     break
-                        data['send_idx'] = (data['rcvd_idx'] + window_size) % len(self.tmpfs_paths[dataset_type])
+                        send_idx = (rcvd_idx + window_size) % len(self.tmpfs_paths[dataset_type])
 
-                    send_idx = data['send_idx']
-                    
-                    '''
-                    Due to measurement error, there might be backlog in send_idx_queue.
-                    We skip those indexes to avoid cascading backlog.
-                    '''
-                    while True:
-                        try:
-                            self.send_idx_queue.get_nowait()
-                        except:
-                            break
-                    self.send_idx_queue.put((dataset_type, send_idx))
+                    self.send_idx_queue.put((dataset_type,send_idx))
                 elif topic == "releaseCache":
                     idx = int(data)
                     self.rcvd_idx_queue.put((dataset_type, idx))

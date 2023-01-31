@@ -43,6 +43,5 @@ class DDoSDataset(IterableDataset):
                 if i < start: continue
                 if i >= end: return StopIteration()
                 items = line.strip().split(',')
-                print(len(items))
                 items = [float(item) for item in items]
                 yield (torch.FloatTensor(items[:-1]), torch.FloatTensor(items[-1:]))

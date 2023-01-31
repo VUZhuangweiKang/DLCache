@@ -334,13 +334,16 @@ class Client(object):
                     self.socket_rep.send(b'')
                     data = pickle.loads(data)
                     prefetch_factor = data['prefetch_factor']
-                    window_size = data['num_workers'] * prefetch_factor
-                    samples_tmpfs_paths = np.load('/share/{}_processed_samples.npy'.format(dataset_type))
+                    num_workers = data['active_workers']
+                    window_size = num_workers * prefetch_factor
+                    with open('/share/{}_samples_manifest.pkl'.format(dataset_type), 'rb') as f:
+                        samples_tmpfs_paths = np.array(list(pickle.load(f).values()))
                     
                     targets_tmpfs_paths = None
-                    p = '/share/{}_processed_targets.npy'.format(dataset_type)
+                    p = '/share/{}_targets_manifest.pkl'.format(dataset_type)
                     if os.path.exists(p):
-                        targets_tmpfs_paths = np.load(p)
+                        with open(p, 'rb') as f:
+                            targets_tmpfs_paths = np.array(list(pickle.load(f).values()))
 
                     batched_tmpfs_paths = []
                     for batch in data['paths']:
@@ -373,7 +376,8 @@ class Client(object):
                 # logger.info('recv msg: {} {}'.format(topic, data))
                 if topic == "loadCache":
                     data = pickle.loads(data)
-                    rcvd_idx, send_idx = data['rcvd_idx'], data['send_idx']
+                    rcvd_idx, send_idx, active_workers = data['rcvd_idx'], data['send_idx'], data['active_workers']
+                    window_size = active_workers * prefetch_factor
                     if rcvd_idx == len(self.tmpfs_paths[dataset_type]):
                         continue
                     # clean up pending batches, and prepare to load the next epoch
@@ -386,8 +390,8 @@ class Client(object):
                                 except:
                                     break
                         send_idx = (rcvd_idx + window_size) % len(self.tmpfs_paths[dataset_type])
-
-                    self.send_idx_queue.put((dataset_type,send_idx))
+                    
+                    self.send_idx_queue.put((dataset_type, send_idx))
                 elif topic == "releaseCache":
                     idx = int(data)
                     self.rcvd_idx_queue.put((dataset_type, idx))
