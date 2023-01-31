@@ -16,31 +16,35 @@ def main():
     
     if not torch.cuda.is_available():
         args.cuda = False
+        args.pin_memory = False
 
     print("Using CUDA: {}".format(args.cuda))
 
-    args.device = torch.device("cuda" if args.cuda else "cpu")
+    args.device = torch.device("cuda:0" if args.cuda else "cpu")
 
     set_seed_everywhere(args.seed, args.cuda)
     
     classifier = Model(input_features=args.input_features, 
                        hiddens=args.hiddens, 
                        dropout_rate=args.dropout_rate)
+    if args.cuda:
+        torch.backends.cudnn.deterministic = True
+        classifier = classifier.to(args.device)
+    
     loss_func = nn.BCELoss()
     optimizer = optim.Adam(classifier.parameters(), lr=args.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, mode='min', factor=0.5, patience=1)
     
     if not args.evaluate:
-        train_dataset = DDoSDataset(data_path=args.train_data_path)
-        val_dataset = DDoSDataset(data_path=args.val_data_path)
+        train_dataset = DDoSDataset(file_path=args.train_data_path)
+        val_dataset = DDoSDataset(file_path=args.val_data_path)
         train_state = make_train_state(args)
         
         with tqdm(desc='training routine',  total=args.epochs, position=0) as epoch_bar:
             for epoch_index in range(args.epochs):
-                train_loader = DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
-                                          drop_last=args.drop_last, num_workers=args.num_workers, pin_memory=args.pin_memory)
-                
-                batch_generator = generate_batches(train_loader, device=args.device)
+                train_loader = DataLoader(dataset=train_dataset, batch_size=args.batch_size, drop_last=args.drop_last, 
+                                          num_workers=args.num_workers, pin_memory=args.pin_memory)
+
                 optimizer.zero_grad()
                 running_loss = 0.0
                 running_acc = 0.0
@@ -48,9 +52,13 @@ def main():
                 classifier.train()
                 
                 with tqdm(desc='split=train', total=train_dataset.get_num_batches(args.batch_size), position=1, leave=True) as train_bar:
-                    for index, input in enumerate(batch_generator):
+                    for index, input in enumerate(train_loader):
                         optimizer.zero_grad()
                         X_input, y_input = input
+                        if args.cuda:
+                            X_input = X_input.to(args.device)
+                            y_input = y_input.to(args.device)
+                            
                         y_pred = classifier(X_input)
 
                         loss = loss_func(y_pred, y_input)
@@ -70,17 +78,19 @@ def main():
                     train_state['train_acc'].append(running_acc)
 
                 with tqdm(desc='split=val', total=val_dataset.get_num_batches(args.batch_size), position=1, leave=True) as val_bar:
-                    val_loader = DataLoader(dataset=val_dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
-                                            drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
-                    batch_generator = generate_batches(val_loader, device=args.device)
+                    val_loader = DataLoader(dataset=val_dataset, batch_size=args.batch_size, drop_last=args.drop_last, 
+                                            num_workers=args.num_workers, pin_memory=args.pin_memory)
                     running_loss = 0.
                     running_acc = 0.
                     classifier.eval()
 
-                    for index, input in enumerate(batch_generator):
+                    for index, input in enumerate(val_loader):        
                         X_input, y_input = input
+                        if args.cuda:
+                            X_input = X_input.to(args.device)
+                            y_input = y_input.to(args.device)
                         y_pred = classifier(X_input)
-
+                            
                         loss = loss_func(y_pred, y_input)
                         loss_t = loss.item()
                         running_loss += (loss_t - running_loss) / (index + 1)
@@ -111,18 +121,18 @@ def main():
             
     else:
         classifier.load_state_dict(torch.load(train_state['model_filename']))
-        classifier = classifier.to(args.device)
-
-        test_dataset = DDoSDataset(data_path=args.test_data_path) 
-        test_loader = DataLoader(dataset=test_dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
-                                 drop_last=args.drop_last, num_workers=args.workers, pin_memory=True)
-        batch_generator = generate_batches(test_loader, device=args.device)
+        test_dataset = DDoSDataset(file_path=args.test_data_path) 
+        test_loader = DataLoader(dataset=test_dataset, batch_size=args.batch_size, drop_last=args.drop_last, 
+                                 num_workers=args.num_workers, pin_memory=args.pin_memory)
         running_loss = 0.
         running_acc = 0.
         classifier.eval()
 
-        for index, input in enumerate(batch_generator):
+        for index, input in enumerate(test_loader):
             X_input, y_input = input
+            if args.cuda:
+                X_input = X_input.to(args.device)
+                y_input = y_input.to(args.device)
             y_pred = classifier(X_input)
 
             loss = loss_func(y_pred, y_input)

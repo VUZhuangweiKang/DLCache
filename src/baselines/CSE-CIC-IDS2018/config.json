@@ -13,7 +13,7 @@
     "early_stopping_criteria": 5,
     "epochs": 1,
     "input_features": 76, 
-    "hiddens": [128, 64, 32],
+    "hiddens": [64, 32],
     "dropout_rate": 0.3,
     "learning_rate": 0.001,
     "seed": 1337,
