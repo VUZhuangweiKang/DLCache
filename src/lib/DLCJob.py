@@ -186,7 +186,7 @@ class DLCJobDataLoader(DataLoader[T_co]):
                  pin_memory: bool = False, drop_last: bool = False,
                  timeout: float = 0, worker_init_fn: Optional[_worker_init_fn_t] = None,
                  multiprocessing_context=None, generator=None, prefetch_factor: int = 2, 
-                 persistent_workers: bool = False, autoscale_workers: bool = False,
+                 persistent_workers: bool = False, autoscale_workers: bool = True, max_tune_iters: int = 20,
                  pin_memory_device: str = ""):
         super().__init__(dataset, batch_size, shuffle, sampler, batch_sampler, num_workers, collate_fn, 
                          pin_memory, drop_last, timeout, worker_init_fn, multiprocessing_context, generator,
@@ -203,6 +203,7 @@ class DLCJobDataLoader(DataLoader[T_co]):
         self.num_batches = len(self)
         self.autoscale_workers = autoscale_workers
         self.tune_iters = 0
+        self.max_tune_iters = max_tune_iters
 
     def _get_iterator(self) -> '_BaseDataLoaderIter':        
         if  self._iterator is not None:
@@ -213,7 +214,7 @@ class DLCJobDataLoader(DataLoader[T_co]):
         else:
             num_workers = self.num_workers
         
-        return _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.autoscale_workers, self.tune_iters)
+        return _DLCJobDataLoaderIter(self, self.num_batches, num_workers, self.autoscale_workers, self.tune_iters, self.max_tune_iters)
     
     def __setattr__(self, attr, val):
         if self.__initialized and attr in (
@@ -285,14 +286,15 @@ class StatefulCycleIterator:
         
         
 class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
-    def __init__(self, loader, num_batches, opt_num_workers, autoscale_workers: bool = True, tune_iters: int = None):
+    def __init__(self, loader, num_batches, opt_num_workers, autoscale_workers: bool = False, tune_iters: int = None, max_tune_iters: int = None):
         super(_DLCJobDataLoaderIter, self).__init__(loader)
         
         self._num_batches = num_batches
         self._autoscale_workers = autoscale_workers
         self._num_workers = opt_num_workers
         self._prefetch_factor = loader.prefetch_factor
-        self._tune_freq = 2
+        self._tune_freq = 1
+        self._max_tune_iters = max_tune_iters
         self.lazy = self._dataset.lazy
         
         # sockets for communication with client
@@ -321,8 +323,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._worker_result_queue = multiprocessing_context.Queue()  # type: ignore[var-annotated]
         self._worker_pids_set = False
         self._shutdown = False
-        self._workers_done_event = multiprocessing_context.Event()
         
+        self._workers_done_event = []
         self._index_queues = []
         self._workers = []
         self._worker_queue_idx_cycle = None
@@ -334,12 +336,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         if self.lazy:
             sampler_iter = iter(self._index_sampler)
             batches = [batch for batch in sampler_iter]
-            msg = {
-                "paths": batches,
-                "active_workers": self._active_workers.value,
-                "prefetch_factor": self._prefetch_factor
-            }
-            self._socket_req.send_multipart([b"init", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
+            self._socket_req.send_multipart([b"init", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(batches)])
             self._socket_req.recv()
             
         if self._pin_memory:
@@ -439,15 +436,17 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             self._active_workers.value += 1
             return
 
+        worker_done_event = self._multiprocessing_context.Event()
         idx_queue = self._multiprocessing_context.Queue()
         idx_queue.cancel_join_thread()
         w = self._multiprocessing_context.Process(target=_utils.worker._worker_loop,
-                                                  args=(self._dataset_kind, self._dataset, idx_queue, self._worker_result_queue, self._workers_done_event,
+                                                  args=(self._dataset_kind, self._dataset, idx_queue, self._worker_result_queue, worker_done_event,
                                                           self._auto_collation, self._collate_fn, self._drop_last, self._base_seed, self._worker_init_fn,
                                                           worker_id, self._active_workers, self._persistent_workers))
         
         w.daemon = True
         w.start()
+        self._workers_done_event.append(worker_done_event)
         self._index_queues.append(idx_queue)
         self._workers.append(w)
         if self._worker_queue_idx_cycle is not None:
@@ -459,7 +458,19 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             self._active_workers.value -= 1
     
     def _tune_worker_num(self):
-        if self._tune_iters >= cpu_count:
+        if self._tune_iters >= self._max_tune_iters:
+            # terminate paused workers
+            workers_status = self._worker_queue_idx_cycle._workers_status
+            for i, worker_status in enumerate(workers_status):
+                if worker_status == 0 and self._index_queues[i].qsize() == 0:
+                    if not self._workers_done_event[i].is_set():
+                        self._workers_done_event[i].set()
+                    else:
+                        self._mark_worker_as_unavailable(i, shutdown=True)
+                        self._workers[i].join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+                        self._index_queues[i].cancel_join_thread()
+                        self._index_queues[i].close()
+                        self._workers[i].terminate()
             return
         
         if self._rcvd_idx == 1 and (self._rcvd_idx % self._tune_freq != 0):
@@ -590,18 +601,18 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         return data
 
     def _next_data(self):
-        if self._last_iter_time is not None:
+        if self._last_iter_time is not None and self._tune_iters < self._max_tune_iters:
             if len(self._req_time) == self._active_workers.value * self._prefetch_factor:
                 self._req_time.clear()
             self._req_time.append(time.time() - self._last_iter_time)
             
-            if self.lazy:
-                req_time, fetch_time = np.mean(self._req_time), np.mean(self._fetch_time)
-                if req_time < fetch_time:
-                    msg = {'send_idx': self._send_idx + 1,
-                           'rcvd_idx': self._rcvd_idx,
-                           'active_workers': self._active_workers.value}
-                    self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
+        if self.lazy:
+            req_time, fetch_time = np.mean(self._req_time), np.mean(self._fetch_time)
+            if req_time < fetch_time:
+                msg = {'send_idx': self._send_idx + 1,
+                        'rcvd_idx': self._rcvd_idx,
+                        'active_workers': self._active_workers.value}
+                self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
         
         while True:
             try:
@@ -655,17 +666,18 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 
         # ensure the `num_workers` is consensus while reading the batch
         # we skip the first batch because the reset function needs to prefetch data synchronously
-        if self._rcvd_idx > 1:                
+        if self._rcvd_idx > 1 and self._tune_iters < self._max_tune_iters:                
             if fetch_time is not None:
                 if len(self._fetch_time) == self._active_workers.value * self._prefetch_factor:
                     self._fetch_time.clear()
                 self._fetch_time.append(fetch_time)
-                    
-            if self._autoscale_workers:
-                self._tune_worker_num()
+
+        if self._autoscale_workers:
+            self._tune_worker_num()
 
         if self.lazy:
             self._socket_pub.send_multipart([b"releaseCache", self._dataset.dataset_type.encode('utf-8'), str(self._rcvd_idx-1).encode('utf-8')])
+            
         self._last_iter_time = time.time()
         return data
         
@@ -693,10 +705,11 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
 
         self._worker_queue_idx_cycle.set_status(worker_id, -1)
 
-        assert self._workers_done_event.is_set() == shutdown
+        assert self._workers_done_event[worker_id].is_set() == shutdown
 
     def _shutdown_workers(self):
         self._socket_pub.send_multipart([b'stopIteration', self._dataset.dataset_type.encode('utf-8'), b''])
+            
         if self._autoscale_workers:
             np.save('worker_num_hist.npy', self._worker_num_hist)
             np.save('memory_usage.npy', self._memory_usage)
@@ -729,24 +742,35 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                     self._worker_result_queue.close()
 
                 # Exit workers now.
-                self._workers_done_event.set()
                 for worker_id in range(len(self._workers)):
-                    # Get number of workers from `len(self._workers)` instead of
-                    # `self._num_workers` in case we error before starting all
-                    # workers.
-                    # If we are using workers_status with persistent_workers
-                    # we have to shut it down because the worker is paused
-                    if self._persistent_workers or self._worker_queue_idx_cycle.get_status(worker_id) != -1:
-                        self._mark_worker_as_unavailable(worker_id, shutdown=True)
-                for w in self._workers:
-                    # We should be able to join here, but in case anything went
-                    # wrong, we set a timeout and if the workers fail to join,
-                    # they are killed in the `finally` block.
-                    w.join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
-                for q in self._index_queues:
-                    q.cancel_join_thread()
-                    q.close()
+                    if not self._workers_done_event[worker_id].is_set():
+                        self._workers_done_event[worker_id].set()
+                        # Get number of workers from `len(self._workers)` instead of
+                        # `self._num_workers` in case we error before starting all
+                        # workers.
+                        # If we are using workers_status with persistent_workers
+                        # we have to shut it down because the worker is paused
+                        if self._persistent_workers or self._worker_queue_idx_cycle.get_status(worker_id) != -1:
+                            self._mark_worker_as_unavailable(worker_id, shutdown=True)
+
+                        # We should be able to join here, but in case anything went
+                        # wrong, we set a timeout and if the workers fail to join,
+                        # they are killed in the `finally` block.
+                        self._workers[worker_id].join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+                        self._index_queues[worker_id].cancel_join_thread()
+                        self._index_queues[worker_id].close()
             finally:
+                # close data queue
+                while True:
+                    running_workers = len(self._workers)
+                    for done_event in self._workers_done_event:
+                        if done_event.is_set():
+                            running_workers -= 1
+                    if running_workers == 0:
+                        self._data_queue.cancel_join_thread()
+                        self._data_queue.close()
+                        break
+            
                 # Even though all this function does is putting into queues that
                 # we have called `cancel_join_thread` on, weird things can
                 # happen when a worker is killed by a signal, e.g., hanging in

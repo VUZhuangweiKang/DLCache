@@ -26,4 +26,3 @@ spec:
       lazyloading: true
     tty: true
     stdin: true
-

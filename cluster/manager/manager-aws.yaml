@@ -31,8 +31,8 @@ spec:
           mountPath: /172.31.87.22
         - name: 172-31-92-64
           mountPath: /172.31.92.64
-        - name: 172-31-90-206
-          mountPath: /172.31.90.206
+#        - name: 172-31-90-206
+#          mountPath: /172.31.90.206
         stdin: true
         tty: true
       volumes:

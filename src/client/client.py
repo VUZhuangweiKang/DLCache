@@ -320,8 +320,6 @@ class Client(object):
                     pass
                             
     def process_events(self):
-        prefetch_factor = None
-        window_size = None
         # clear runtime cache
         self.clear_runtime()
         
@@ -332,21 +330,16 @@ class Client(object):
                 topic, dataset_type = topic.decode("utf-8"), dataset_type.decode('utf-8')
                 if topic == "init":
                     self.socket_rep.send(b'')
-                    data = pickle.loads(data)
-                    prefetch_factor = data['prefetch_factor']
-                    num_workers = data['active_workers']
-                    window_size = num_workers * prefetch_factor
-                    with open('/share/{}_samples_manifest.pkl'.format(dataset_type), 'rb') as f:
-                        samples_tmpfs_paths = np.array(list(pickle.load(f).values()))
+                    file_paths = pickle.loads(data)
+                    samples_tmpfs_paths = np.load('/share/{}_processed_samples.npy'.format(dataset_type))
                     
                     targets_tmpfs_paths = None
-                    p = '/share/{}_targets_manifest.pkl'.format(dataset_type)
+                    p = '/share/{}_processed_targets.npy'.format(dataset_type)
                     if os.path.exists(p):
-                        with open(p, 'rb') as f:
-                            targets_tmpfs_paths = np.array(list(pickle.load(f).values()))
+                        targets_tmpfs_paths = np.load(p)
 
                     batched_tmpfs_paths = []
-                    for batch in data['paths']:
+                    for batch in file_paths:
                         batched_tmpfs_paths.append(list(zip(samples_tmpfs_paths[batch], \
                             targets_tmpfs_paths[batch] if targets_tmpfs_paths is not None else [None]*len(batch))))
                     self.tmpfs_paths[dataset_type] = batched_tmpfs_paths
@@ -376,22 +369,10 @@ class Client(object):
                 # logger.info('recv msg: {} {}'.format(topic, data))
                 if topic == "loadCache":
                     data = pickle.loads(data)
-                    rcvd_idx, send_idx, active_workers = data['rcvd_idx'], data['send_idx'], data['active_workers']
-                    window_size = active_workers * prefetch_factor
+                    rcvd_idx, send_idx = data['rcvd_idx'], data['send_idx']
                     if rcvd_idx == len(self.tmpfs_paths[dataset_type]):
                         continue
-                    # clean up pending batches, and prepare to load the next epoch
-                    if send_idx == len(self.tmpfs_paths[dataset_type]):
-                        if send_idx - rcvd_idx == window_size:
-                            while True:
-                                try:
-                                    item = self.send_idx_queue.get_nowait()
-                                    logger.info('pop item from queue: {}'.format(item))
-                                except:
-                                    break
-                        send_idx = (rcvd_idx + window_size) % len(self.tmpfs_paths[dataset_type])
-                    
-                    self.send_idx_queue.put((dataset_type, send_idx))
+                    self.send_idx_queue.put((dataset_type,send_idx))
                 elif topic == "releaseCache":
                     idx = int(data)
                     self.rcvd_idx_queue.put((dataset_type, idx))

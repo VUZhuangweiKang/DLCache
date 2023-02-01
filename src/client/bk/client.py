@@ -376,6 +376,7 @@ class Client(object):
                     rcvd_idx, send_idx = data['rcvd_idx'], data['send_idx']
                     if rcvd_idx == len(self.tmpfs_paths[dataset_type]):
                         continue
+                    
                     # clean up pending batches, and prepare to load the next epoch
                     if send_idx == len(self.tmpfs_paths[dataset_type]):
                         if send_idx - rcvd_idx == window_size:
