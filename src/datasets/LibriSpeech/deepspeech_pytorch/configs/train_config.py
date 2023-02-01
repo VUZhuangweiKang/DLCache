@@ -36,6 +36,7 @@ class DataConfig:
     batch_size: int = 64  # Batch size for training
     num_workers: int = 4  # Number of workers used in data-loading
     labels_path: str = 'labels.json'  # Contains tokens for model output
+    autoscale_workers: bool = True
     spect: SpectConfig = SpectConfig()
     augmentation: AugmentationConfig = AugmentationConfig()
     prepare_data_per_node: bool = True

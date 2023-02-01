@@ -22,6 +22,7 @@ def train(cfg: DeepSpeechConfig):
         args = line.split(',')
     cfg.data.num_workers = int(args[0])
     cfg.data.batch_size = int(args[1])
+    cfg.data.autoscale_workers = int(args[-1])
     cfg.trainer.max_epochs = int(args[2])
 
     with open(to_absolute_path(cfg.data.labels_path)) as label_file:

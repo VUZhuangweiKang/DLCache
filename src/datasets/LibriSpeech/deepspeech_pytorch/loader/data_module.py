@@ -39,7 +39,8 @@ class DeepSpeechDataModule(pl.LightningDataModule):
         train_loader = AudioDataLoader(
             dataset=train_dataset,
             num_workers=self.data_cfg.num_workers,
-            batch_sampler=train_sampler
+            batch_sampler=train_sampler,
+            autoscale_workers=self.data_cfg.autoscale_workers
         )
         return train_loader
 
@@ -48,7 +49,8 @@ class DeepSpeechDataModule(pl.LightningDataModule):
         val_loader = AudioDataLoader(
             dataset=val_dataset,
             num_workers=self.data_cfg.num_workers,
-            batch_size=self.data_cfg.batch_size
+            batch_size=self.data_cfg.batch_size,
+            autoscale_workers=self.data_cfg.autoscale_workers
         )
         return val_loader
 

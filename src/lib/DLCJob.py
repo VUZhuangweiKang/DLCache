@@ -497,7 +497,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
             elif delta < 0:
                 self._pause_worker()
 
-        print('change worker num to {}'.format(new_num_workers))
+        # print('change worker num to {}'.format(new_num_workers))
         self._worker_num_hist.append(new_num_workers)
         self._tune_iters += 1
 
