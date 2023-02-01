@@ -20,7 +20,7 @@ do
         echo "Exp[$test/$total_test]: worker=$w, batch_size=$b, compute_time=$t"
         echo "$w,$b,1,100,10,$t" > /app/dlcache_exp.txt
         python train.py +configs=librispeech
-        mv *.npy $data_dir/
+        mv /tmp/*.npy $data_dir/
         python3 report.py $i $t $b
         ((test=test+1))
     done

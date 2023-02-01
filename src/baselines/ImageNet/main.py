@@ -284,7 +284,7 @@ def main_worker(gpu, ngpus_per_node, args):
         #     }, is_best)
     
     summary = np.array(summary)
-    np.save('load_time.npy', summary)
+    np.save('/tmp/load_time.npy', summary)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -354,7 +354,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         end = time.time()
         
     print('Total Time: {}'.format(time.time()-t))
-    np.save('memory_usage.npy', memory_log)
+    np.save('/tmp/memory_usage.npy', memory_log)
     return load_time
 
 

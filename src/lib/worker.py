@@ -219,7 +219,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
         from torch.utils.data.graph_settings import apply_shuffle_seed
 
         global _worker_info
-        _worker_info = WorkerInfo(id=worker_id, num_workers=num_workers.value,
+        _worker_info = WorkerInfo(id=worker_id, num_workers=num_workers,
                                   seed=seed, dataset=dataset)
 
         from torch.utils.data import _DatasetKind
@@ -251,11 +251,9 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
 
         watchdog = ManagerWatchdog()
         
-        last_get_time = None
         while watchdog.is_alive():
             try:
                 r = index_queue.get(timeout=MP_STATUS_CHECK_INTERVAL)
-                get_time = time.time()
             except queue.Empty:
                 continue
             
@@ -281,18 +279,20 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             idx, index = r
             data: Union[_IterableDatasetStopIteration, ExceptionWrapper]
             
-            wn1 = num_workers.value
             if init_exception is not None:
                 data = init_exception
                 init_exception = None
             else:
                 try:
+                    t = time.time()
                     data, miss = fetcher.fetch(index)
+                    fetch_time = time.time() - t
                 except Exception as e:
+                    fetch_time = None
                     if isinstance(e, StopIteration) and dataset_kind == _DatasetKind.Iterable:
                         data = _IterableDatasetStopIteration(worker_id)
                         # Set `iteration_end`
-                        #   (1) to save future `next(...)` calls, and
+                        #   (1) to save future `next(...)` calls, andc
                         #   (2) to avoid sending multiple `_IterableDatasetStopIteration`s.
                         iteration_end = True
                     else:
@@ -303,17 +303,9 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                             where="in DataLoader worker process {}".format(worker_id))
                         miss = None
                     
-            wn2 = num_workers.value
-            
-            _num_workers = None if wn1 != wn2 else wn1
-            if last_get_time is None:
-                freq = None
-            else:
-                freq = get_time - last_get_time
-
-            data_queue.put((idx, data, _num_workers, freq, miss))
-            last_get_time = get_time
-            del data, idx, index, r, _num_workers, freq, miss  # save memory
+            data_queue.put((idx, data, worker_id, fetch_time, miss))
+                        
+            del data, idx, index, r, fetch_time, miss  # save memory
     except KeyboardInterrupt:
         # Main process will raise KeyboardInterrupt anyways.
         pass
@@ -322,4 +314,4 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
     #     data_queue.cancel_join_thread()
     #     data_queue.close()
     
-    np.save('/app/cache_hits_{}.npy'.format(worker_id), dataset.cache_hits)
+    np.save('/tmp/cache_hits_{}.npy'.format(worker_id), dataset.cache_hits)

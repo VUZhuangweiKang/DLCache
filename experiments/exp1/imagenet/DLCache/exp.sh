@@ -17,7 +17,7 @@ do
         mkdir -p $data_dir
         vmtouch -e /$node/
         python3 main.py -b $b --sim-compute-time $t --epochs 1 --mini-batches 100 -j $w
-        mv *.npy $data_dir/
+        mv /tmp/*.npy $data_dir/
         mv /share/train_cache_usage.npy $data_dir/
     done
 done

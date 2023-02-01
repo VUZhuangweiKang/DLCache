@@ -20,6 +20,7 @@ import torch.multiprocessing as multiprocessing
 from torch.utils.data import DataLoader, Dataset, Sampler, _utils
 from torch.utils.data.dataloader import _BaseDataLoaderIter
 
+from collections import defaultdict
 import time
 import pickle
 import zmq
@@ -210,7 +211,7 @@ class DLCJobDataLoader(DataLoader[T_co]):
             self.tune_iters = self._iterator._tune_iters
             num_workers = self._iterator._active_workers.value
         elif self.autoscale_workers:
-            num_workers = cpu_count
+            num_workers = cpu_count // 2
         else:
             num_workers = self.num_workers
         
@@ -317,7 +318,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         # if isinstance(self._dataset, (IterDataPipe, MapDataPipe)):
         #     self._worker_init_fn = functools.partial(_sharding_worker_init_fn, self._worker_init_fn, self._world_size, self._rank)
     
-        self._active_workers = multiprocessing_context.Value('i', 0)
+        self._active_workers = 0
         
         # No certainty which module multiprocessing_context is
         self._worker_result_queue = multiprocessing_context.Queue()  # type: ignore[var-annotated]
@@ -327,9 +328,9 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._workers_done_event = []
         self._index_queues = []
         self._workers = []
-        self._worker_queue_idx_cycle = None
-        for i in range(self._num_workers):
-            self._spawn_worker(i)
+        self._worker_queue_idx_cycle = StatefulCycleIterator()
+        for _ in range(self._num_workers):
+            self._spawn_worker()
 
         # send batch sampler indexes to client
         # instruct client to init Cache
@@ -403,39 +404,38 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         #                  \ (worker_id, data)   if data is already fetched (out-of-order)
         self._reorder_dict = {}
         self._tasks_outstanding = 0  # always equal to count(v for v in _reorder_dict.values() if len(v) == 1)
-
-        # Reset the worker queue cycle so it resumes next epoch at worker 0
-        self._worker_queue_idx_cycle = StatefulCycleIterator(num_workers=self._active_workers.value)
+        self._outstanding_idx_dict = defaultdict(int)
         
         # We resume the prefetching in case it was enabled
         if not first_iter:
-            for idx in range(self._active_workers.value):
+            for idx in range(self._active_workers):
                 self._index_queues[idx].put(_utils.worker._ResumeIteration(self._shared_seed))
-            resume_iteration_cnt = self._active_workers.value
+            resume_iteration_cnt = self._active_workers
             while resume_iteration_cnt > 0:
                 return_idx, return_data = self._get_data()
                 if isinstance(return_idx, _utils.worker._ResumeIteration):
                     assert return_data is None
                     resume_iteration_cnt -= 1
-                    
+
         # prime the prefetch loop
-        for _ in range(self._prefetch_factor * self._active_workers.value):
+        for _ in range(self._prefetch_factor * self._active_workers):
             self._try_put_index()
 
         if self.lazy:
             req_time, fetch_time = np.mean(self._req_time), np.mean(self._fetch_time)
             # print(self._rcvd_idx, self._send_idx)
             if req_time < fetch_time:
-                msg = {'send_idx': self._prefetch_factor * self._active_workers.value,
+                msg = {'send_idx': self._prefetch_factor * self._active_workers,
                         'rcvd_idx': self._rcvd_idx, 
-                        'active_workers': self._active_workers.value}
+                        'active_workers': self._active_workers}
                 self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
 
-    def _spawn_worker(self, worker_id):
+    def _spawn_worker(self):
         if self._worker_queue_idx_cycle is not None and self._worker_queue_idx_cycle.reactive_worker():
-            self._active_workers.value += 1
+            self._active_workers += 1
             return
 
+        worker_id = len(self._worker_queue_idx_cycle)
         worker_done_event = self._multiprocessing_context.Event()
         idx_queue = self._multiprocessing_context.Queue()
         idx_queue.cancel_join_thread()
@@ -451,44 +451,38 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._workers.append(w)
         if self._worker_queue_idx_cycle is not None:
             self._worker_queue_idx_cycle.append(worker_id)
-        self._active_workers.value += 1
+        self._active_workers += 1
     
     def _pause_worker(self):
         if self._worker_queue_idx_cycle.deactive_worker():
-            self._active_workers.value -= 1
+            self._active_workers -= 1
     
     def _tune_worker_num(self):
         if self._tune_iters >= self._max_tune_iters:
-            # terminate paused workers
-            workers_status = self._worker_queue_idx_cycle._workers_status
-            for i, worker_status in enumerate(workers_status):
-                if worker_status == 0 and self._index_queues[i].qsize() == 0:
-                    if not self._workers_done_event[i].is_set():
-                        self._workers_done_event[i].set()
-                    else:
-                        self._mark_worker_as_unavailable(i, shutdown=True)
-                        self._workers[i].join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
-                        self._index_queues[i].cancel_join_thread()
-                        self._index_queues[i].close()
-                        self._workers[i].terminate()
+            for i, worker_status in enumerate(self._worker_queue_idx_cycle._workers_status):
+                if self._outstanding_idx_dict[i] == 0 and worker_status == 0 and self._index_queues[i].qsize() == 0:
+                    self._workers_done_event[i].set()
+                    self._mark_worker_as_unavailable(i, shutdown=True)
+                    self._workers[i].join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+                    self._index_queues[i].cancel_join_thread()
+                    self._index_queues[i].close()
+                    self._workers[i].terminate()
             return
         
-        if self._rcvd_idx == 1 and (self._rcvd_idx % self._tune_freq != 0):
+        if self._rcvd_idx % self._tune_freq != 0:
             return
         
-        num_workers = self._active_workers.value
+        est_num_workers = self._active_workers
         # estimate required workers by comparing req and load time
         if len(self._fetch_time) > 0 and len(self._req_time) > 0:
             est_num_workers = math.ceil(np.mean(self._fetch_time) / np.mean(self._req_time))
-        else:
-            est_num_workers = np.inf
+        
+        mem_usage = psutil.virtual_memory().percent
+        self._memory_usage.append(mem_usage)
         
         if est_num_workers > cpu_count:
             # try to set the num_workers = cpu_cores, but avoid overflow memory
-            mem_usage = psutil.virtual_memory().percent
-            self._memory_usage.append(mem_usage)
-            avg_memory_usage_per_worker = mem_usage / num_workers
-            # print('avg_memory_usage_per_worker:', avg_memory_usage_per_worker)
+            avg_memory_usage_per_worker = mem_usage / self._active_workers
             if avg_memory_usage_per_worker * est_num_workers > memory_watermark:
                 est_num_workers = math.floor(memory_watermark / avg_memory_usage_per_worker)
         
@@ -496,13 +490,14 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         
         # print('current worker num: {}, estimated worker num: {}, new worker num: {}'.format(num_workers, est_num_workers, new_num_workers))
         # commit the tunning action
-        delta = new_num_workers - num_workers
+        delta = new_num_workers - self._active_workers
         for _ in range(abs(delta)):
             if delta > 0:
-                self._spawn_worker(worker_id=num_workers)
+                self._spawn_worker()
             elif delta < 0:
                 self._pause_worker()
 
+        print('change worker num to {}'.format(new_num_workers))
         self._worker_num_hist.append(new_num_workers)
         self._tune_iters += 1
 
@@ -518,6 +513,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         
         self._index_queues[worker_queue_idx].put((self._send_idx, batched_idxs))
         self._reorder_dict[self._send_idx] = (worker_queue_idx,)
+        self._outstanding_idx_dict[worker_queue_idx] += 1
         self._tasks_outstanding += 1
         self._send_idx += 1
     
@@ -602,16 +598,19 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
 
     def _next_data(self):
         if self._last_iter_time is not None and self._tune_iters < self._max_tune_iters:
-            if len(self._req_time) == self._active_workers.value * self._prefetch_factor:
+            window_size = self._active_workers * self._prefetch_factor
+            if len(self._req_time) == window_size:
                 self._req_time.clear()
+            if len(self._fetch_time) == window_size:
+                self._fetch_time.clear()
             self._req_time.append(time.time() - self._last_iter_time)
             
         if self.lazy:
-            req_time, fetch_time = np.mean(self._req_time), np.mean(self._fetch_time)
-            if req_time < fetch_time:
+            req_time_, fetch_time_ = np.mean(self._req_time), np.mean(self._fetch_time)
+            if req_time_ < fetch_time_:
                 msg = {'send_idx': self._send_idx + 1,
                         'rcvd_idx': self._rcvd_idx,
-                        'active_workers': self._active_workers.value}
+                        'active_workers': self._active_workers}
                 self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
         
         while True:
@@ -634,21 +633,26 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 # Now `self._rcvd_idx` is the batch index we want to fetch
                 # Check if the next sample has already been generated
                 if len(self._reorder_dict[self._rcvd_idx]) == 2:
-                    data, active_workers, fetch_time = self._reorder_dict.pop(self._rcvd_idx)[1]
+                    data, worker_id, fetch_time = self._reorder_dict.pop(self._rcvd_idx)[1]
                     data = self._process_data(data)
+                    if self._tune_iters < self._max_tune_iters and fetch_time is not None:    
+                        self._fetch_time.append(fetch_time)
                     break
                 
                 assert not self._shutdown and self._tasks_outstanding > 0
-                idx, data, active_workers, fetch_time, miss  = self._get_data()
-                
+                idx, data, worker_id, fetch_time, miss  = self._get_data()
+                if self._tune_iters < self._max_tune_iters and fetch_time is not None:    
+                    self._fetch_time.append(fetch_time)
+                    
                 if miss:
                     self._socket_pub.send_multipart([b'missETags', self._dataset.dataset_type.encode('utf-8'), pickle.dumps(miss)])
                     
                 self._tasks_outstanding -= 1
-
+                self._outstanding_idx_dict[worker_id] -= 1
+                
                 if idx != self._rcvd_idx:
                     # store out-of-order samples
-                    self._reorder_dict[idx] += ((data, active_workers, fetch_time),)
+                    self._reorder_dict[idx] += ((data, worker_id, fetch_time),)
                 else:
                     del self._reorder_dict[idx]
                     data = self._process_data(data)
@@ -663,14 +667,6 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                     self._partition_idx += 1
                     self._dataset._load_partition_data(self._partition_idx)
                     continue
-                
-        # ensure the `num_workers` is consensus while reading the batch
-        # we skip the first batch because the reset function needs to prefetch data synchronously
-        if self._rcvd_idx > 1 and self._tune_iters < self._max_tune_iters:                
-            if fetch_time is not None:
-                if len(self._fetch_time) == self._active_workers.value * self._prefetch_factor:
-                    self._fetch_time.clear()
-                self._fetch_time.append(fetch_time)
 
         if self._autoscale_workers:
             self._tune_worker_num()
@@ -711,8 +707,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         self._socket_pub.send_multipart([b'stopIteration', self._dataset.dataset_type.encode('utf-8'), b''])
             
         if self._autoscale_workers:
-            np.save('worker_num_hist.npy', self._worker_num_hist)
-            np.save('memory_usage.npy', self._memory_usage)
+            np.save('/tmp/worker_num_hist.npy', self._worker_num_hist)
+            np.save('/tmp/memory_usage.npy', self._memory_usage)
         
         # Called when shutting down this `_MultiProcessingDataLoaderIter`.
         # See NOTE [ Data Loader Multiprocessing Shutdown Logic ] for details on
