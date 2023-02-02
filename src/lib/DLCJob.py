@@ -395,6 +395,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         
         self._send_idx = 0  # idx of the next task to be sent to workers
         self._rcvd_idx = 0  # idx of the next task to be returned in __next__
+
         # information about data not yet yielded, i.e., tasks w/ indices in range [rcvd_idx, send_idx).
         # map: task idx => - (worker_id,)        if data isn't fetched (outstanding)
         #                  \ (worker_id, data)   if data is already fetched (out-of-order)
@@ -429,7 +430,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                         'rcvd_idx': self._rcvd_idx, 
                         'active_workers': self._active_workers}
                 self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
-
+                
     def _spawn_worker(self):
         if self._worker_queue_idx_cycle is not None and self._worker_queue_idx_cycle.reactive_worker():
             self._active_workers += 1
@@ -498,7 +499,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 self._spawn_worker()
             elif delta < 0:
                 self._pause_worker()
-
+ 
         # print('change worker num to {}'.format(new_num_workers))
         self._worker_num_hist.append(new_num_workers)
         self._tune_iters += 1
@@ -593,7 +594,8 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
     
     def _process_data(self, data):    
         self._rcvd_idx += 1
-        self._try_put_index()
+        if self._send_idx < self._rcvd_idx + self._active_workers * self._prefetch_factor:
+            self._try_put_index()
         if isinstance(data, _utils.worker.ExceptionWrapper):
             data.reraise()
         return data
@@ -610,7 +612,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         if self.lazy:
             req_time_, fetch_time_ = np.mean(self._req_time), np.mean(self._fetch_time)
             if req_time_ < fetch_time_:
-                msg = {'send_idx': self._send_idx + 1,
+                msg = {'send_idx': self._send_idx+1,
                         'rcvd_idx': self._rcvd_idx,
                         'active_workers': self._active_workers}
                 self._socket_pub.send_multipart([b"loadCache", self._dataset.dataset_type.encode('utf-8'), pickle.dumps(msg)])
@@ -670,10 +672,11 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                     self._dataset._load_partition_data(self._partition_idx)
                     continue
         
-        mem_usage = psutil.virtual_memory().percent
-        self._memory_usage.append(mem_usage)
         if self._autoscale_workers:
             self._tune_worker_num()
+            
+        mem_usage = psutil.virtual_memory().percent
+        self._memory_usage.append(mem_usage)
 
         if self.lazy:
             self._socket_pub.send_multipart([b"releaseCache", self._dataset.dataset_type.encode('utf-8'), str(self._rcvd_idx-1).encode('utf-8')])
