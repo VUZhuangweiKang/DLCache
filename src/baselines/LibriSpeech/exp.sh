@@ -6,8 +6,8 @@
 i=0
 w=8
 test=1
-compute_time=( 0.4 0.8 1.2 1.6 2.0 2.4 )
-batch_size=( 128 256 512 )
+compute_time=( 0.5 1.0 1.5 2.0 2.5 3.0 )
+batch_size=( 64 128 256 512 )
 total_test=$((${#compute_time[@]} * ${#batch_size[@]}))
 
 for t in ${compute_time[*]}

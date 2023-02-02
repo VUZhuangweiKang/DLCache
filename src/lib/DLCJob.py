@@ -211,7 +211,7 @@ class DLCJobDataLoader(DataLoader[T_co]):
             self.tune_iters = self._iterator._tune_iters
             num_workers = self._iterator._active_workers.value
         elif self.autoscale_workers:
-            num_workers = cpu_count // 2
+            num_workers = cpu_count
         else:
             num_workers = self.num_workers
         
@@ -459,15 +459,19 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
     
     def _tune_worker_num(self):
         if self._tune_iters >= self._max_tune_iters:
-            for i, worker_status in enumerate(self._worker_queue_idx_cycle._workers_status):
-                if self._outstanding_idx_dict[i] == 0 and worker_status == 0 and self._index_queues[i].qsize() == 0:
-                    self._workers_done_event[i].set()
-                    self._mark_worker_as_unavailable(i, shutdown=True)
-                    self._workers[i].join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
-                    self._index_queues[i].cancel_join_thread()
-                    self._index_queues[i].close()
-                    self._workers[i].terminate()
-            return
+            if len(self._outstanding_idx_dict) > self._active_workers:
+                for i, worker_status in enumerate(self._worker_queue_idx_cycle._workers_status):
+                    if self._outstanding_idx_dict[i] == 0 and worker_status == 0 and self._index_queues[i].qsize() == 0:
+                        self._workers_done_event[i].set()
+                        self._mark_worker_as_unavailable(i, shutdown=True)
+                        self._workers[i].join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+                        self._index_queues[i].cancel_join_thread()
+                        self._index_queues[i].close()
+                        self._workers[i].terminate()
+                        del self._outstanding_idx_dict[i]
+                return
+            else:
+                return
         
         if self._rcvd_idx % self._tune_freq != 0:
             return
@@ -476,11 +480,9 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
         # estimate required workers by comparing req and load time
         if len(self._fetch_time) > 0 and len(self._req_time) > 0:
             est_num_workers = math.ceil(np.mean(self._fetch_time) / np.mean(self._req_time))
-        
-        mem_usage = psutil.virtual_memory().percent
-        self._memory_usage.append(mem_usage)
-        
+                
         if est_num_workers > cpu_count:
+            mem_usage = psutil.virtual_memory().percent
             # try to set the num_workers = cpu_cores, but avoid overflow memory
             avg_memory_usage_per_worker = mem_usage / self._active_workers
             if avg_memory_usage_per_worker * est_num_workers > memory_watermark:
@@ -641,7 +643,7 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                 
                 assert not self._shutdown and self._tasks_outstanding > 0
                 idx, data, worker_id, fetch_time, miss  = self._get_data()
-                if self._tune_iters < self._max_tune_iters and fetch_time is not None:    
+                if self._tune_iters < self._max_tune_iters and fetch_time is not None:
                     self._fetch_time.append(fetch_time)
                     
                 if miss:
@@ -667,7 +669,9 @@ class _DLCJobDataLoaderIter(_BaseDataLoaderIter):
                     self._partition_idx += 1
                     self._dataset._load_partition_data(self._partition_idx)
                     continue
-
+        
+        mem_usage = psutil.virtual_memory().percent
+        self._memory_usage.append(mem_usage)
         if self._autoscale_workers:
             self._tune_worker_num()
 
