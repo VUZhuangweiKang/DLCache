@@ -145,7 +145,7 @@ class DLCJobDataset(Dataset[T_co]):
                         rlt = self.__getitem__(index)
                         return (rlt[0], miss_etag)
                         
-            if target_item:
+            if target_item is not None:
                 try:
                     t = self._load_target(target_item)
                     if self.target_is_file:
@@ -159,6 +159,8 @@ class DLCJobDataset(Dataset[T_co]):
                             index = random.randint(index+1, len(self) - 1)
                             rlt = self.__getitem__(index)
                             return (rlt[0], miss_etag)
+            else:
+                t = None
                 
             return ((s, t), None)
         else:

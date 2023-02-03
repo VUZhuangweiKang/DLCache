@@ -347,9 +347,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         if i % args.print_freq == 0:
             progress.display(i + 1)
         
-        if i % 2 == 0:
-            memory_log.append(psutil.virtual_memory().percent)
-            
+        memory_log.append(psutil.virtual_memory().percent)
+
         time.sleep(args.sim_compute_time)
         end = time.time()
         
