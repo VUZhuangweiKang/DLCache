@@ -33,6 +33,8 @@ spec:
           mountPath: /172.31.92.64
         - name: 172-31-90-206
           mountPath: /172.31.90.206
+        - name: 172-31-82-108
+          mountPath: /172.31.82.108
         stdin: true
         tty: true
       volumes:
@@ -54,5 +56,9 @@ spec:
         - name: 172-31-90-206
           nfs: 
             server: 172.31.90.206
+            path: /nfs_storage
+        - name: 172-31-82-108
+          nfs:
+            server: 172.31.82.108
             path: /nfs_storage
       nodeName: ip-172-31-87-22

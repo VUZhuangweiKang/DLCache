@@ -6,7 +6,7 @@ metadata:
 spec:
   secret:
     name: dlcpod-client-credentials
-  nodeName: ip-172-31-90-206
+  nodeName: ip-172-31-82-108
   jobs:
   - name: job
     image: zhuangweikang/imagedatasets-dev:latest
