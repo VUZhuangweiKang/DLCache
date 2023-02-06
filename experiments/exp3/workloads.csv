@@ -1,4 +1,0 @@
-dataset,type_id,training_time,size(GB),samples,dataset_name,type_name,notes
-d1,,,139.7,1282048,ilsvrc-imagenet,,
-d2,,,105.3,281600,librispeech,,
-,,,6.89,,CSE-CIC-IDS2018,,

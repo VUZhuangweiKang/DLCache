@@ -1,0 +1,25 @@
+apiVersion: docgroup.com/v1alpha1
+kind: DLCPod
+metadata:
+  name: ddos
+  namespace: default
+spec:
+  secret:
+    name: dlcpod-client-credentials
+  jobs:
+  - name: job
+    image: zhuangweikang/tabular-dev:latest
+    command: ["bash"]
+    datasource:
+      name: IDS2018
+      bucket: vuzhuangwei
+      keys:
+        train:
+          samples:
+            - IDS2018/train/samples
+    qos:
+      usecache: true
+      lazyloading: false
+    tty: true
+    stdin: true
+  nodeName: ip-172-31-92-64
