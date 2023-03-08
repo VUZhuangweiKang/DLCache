@@ -264,9 +264,11 @@ def main_worker(gpu, ngpus_per_node, args):
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
         train_sampler = None
+
     train_loader = DLCJobDataLoader(
         train_dataset, batch_size=args.batch_size,
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, autoscale_workers=args.autoscale_dataloader)
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler, 
+        autoscale_workers=args.autoscale_dataloader)
     
     summary = []
     for epoch in range(args.start_epoch, args.epochs):

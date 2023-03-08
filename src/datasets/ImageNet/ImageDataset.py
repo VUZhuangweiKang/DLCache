@@ -3,12 +3,14 @@ from lib.DLCJob import DLCJobDataset
 
 
 class ImageDataset(DLCJobDataset):
-    def __init__(self, dataset_type: str = 'train', transform=None, target_transform=None):
+    def __init__(self, dataset_type: str = 'train', transform=None, 
+                 target_transform=None):
         self.transform = transform
         self.target_transform = target_transform
         super().__init__(dataset_type)
         
-    def _process(self, samples_manifest: dict, targets_manifest:dict = None):
+    def _process(self, samples_manifest: dict, 
+                 targets_manifest:dict = None):
         cls_idx = {}
         for image in samples_manifest:
             self._samples.append(samples_manifest[image])
