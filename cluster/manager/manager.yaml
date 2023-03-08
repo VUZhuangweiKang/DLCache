@@ -13,11 +13,7 @@ spec:
     metadata:
       labels:
         app: manager
-      # annotations:
-      #   k8s.v1.cni.cncf.io/networks: macvlan-conf
     spec:
-      # nodeSelector:
-      #   dlcache: CacheCluster
       containers:
       - name: dlcpod-manager
         image: zhuangweikang/dlcache-dev:manager
@@ -29,50 +25,40 @@ spec:
         volumeMounts:
         - name: configuration
           mountPath: /configs/manager
-        # - name: nfs-volume
-        #   mountPath: /nfs-master
-        - name: 129-59-234-236
-          mountPath: /129.59.234.236
-        - name: 129-59-234-237
-          mountPath: /129.59.234.237
-        - name: 129-59-234-238
-          mountPath: /129.59.234.238
-        - name: 129-59-234-239
-          mountPath: /129.59.234.239
-        - name: 129-59-234-240
-          mountPath: /129.59.234.240
-        - name: 129-59-234-241
-          mountPath: /129.59.234.241
+        - name: local-nfs
+          mountPath: /nfs_storage
+        - name: 172-31-87-22
+          mountPath: /172.31.87.22
+        - name: 172-31-92-64
+          mountPath: /172.31.92.64
+        - name: 172-31-90-206
+          mountPath: /172.31.90.206
+        - name: 172-31-82-108
+          mountPath: /172.31.82.108
         stdin: true
         tty: true
       volumes:
         - name: configuration
           configMap:
             name: dlcpod-manager-config
-        # - name: nfs-volume
-        #   persistentVolumeClaim:
-        #     claimName: nfs-pvc
-        - name: 129-59-234-236
-          nfs: 
-            server: 129.59.234.236
+        - name: local-nfs
+          hostPath: 
             path: /nfs_storage
-        - name: 129-59-234-237
+            type: Directory
+        - name: 172-31-87-22
           nfs: 
-            server: 129.59.234.237
+            server: 172.31.87.22
             path: /nfs_storage
-        - name: 129-59-234-238
+        - name: 172-31-92-64
           nfs: 
-            server: 129.59.234.238
+            server: 172.31.92.64
             path: /nfs_storage
-        - name: 129-59-234-239
+        - name: 172-31-90-206
           nfs: 
-            server: 129.59.234.239
+            server: 172.31.90.206
             path: /nfs_storage
-        - name: 129-59-234-240
-          nfs: 
-            server: 129.59.234.240
+        - name: 172-31-82-108
+          nfs:
+            server: 172.31.82.108
             path: /nfs_storage
-        - name: 129-59-234-241
-          nfs: 
-            server: 129.59.234.241
-            path: /nfs_storage
+      nodeName: ip-172-31-87-22

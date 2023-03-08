@@ -22,14 +22,14 @@ sudo systemctl daemon-reload
 sudo systemctl restart docker
 
 # install helm
-curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
-sudo chmod 700 get_helm.sh
-./get_helm.sh
+# curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+# sudo chmod 700 get_helm.sh
+# ./get_helm.sh
 
 
 # if flannel failed try:
 # edit /etc/kubernetes/manifests/kube-controller-manager.yaml
 # at command ,add
---allocate-node-cidrs=true
---cluster-cidr=10.244.0.0/16
+# --allocate-node-cidrs=true
+# --cluster-cidr=10.244.0.0/16
 # then,reload kubelet
