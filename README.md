@@ -1,5 +1,18 @@
-# Dataset Placement and Data Loading Optimizations for Cloud-Native Deep Learning Workloads
-This repository presents DLCache, a dataset management and runtime-aware data-loading solution that supports low-latency and high-throughput I/O requirements of DL training jobs in the setting where users utilize cloud buckets as persistent data storage and a dedicated computation cluster for training. DLCache is a cloud-native system that seamlessly integrates with the Kubernetes (K8s) ecosystem, allowing users and system maintainers to easily deploy, update, scale, and self-heal components. 
+# DLCache
+This repo is created for reproducibility and sharing the codes used for the paper, Dataset Placement and Data Loading Optimizations for Cloud-Native Deep Learning Workloads, accepted by The 26th International Symposium On Real-Time Distributed Computing (IEEE ISORC 2023).
+
+cite the paper
+```latex
+@inproceedings{kang2023dlcache,
+  title={Dataset Placement and Data Loading Optimizations for Cloud-Native Deep Learning Workloads},
+  author={Kang, Zhuangwei and Min, Ziran and Zhou, Shuang and Barve D. Yogesh and Gokhale, Aniruddha},
+  booktitle={2023 IEEE 26th International Symposium On Real-Time Distributed Computing (ISORC)},
+  year={2023},
+  organization={IEEE}
+}
+```
+
+We introduce DLCache, a dataset management and runtime-aware data-loading solution that supports low-latency and high-throughput I/O requirements of DL training jobs in the setting where users utilize cloud buckets as persistent data storage and a dedicated computation cluster for training. DLCache is a cloud-native system that seamlessly integrates with the Kubernetes (K8s) ecosystem, allowing users and system maintainers to easily deploy, update, scale, and self-heal components. 
 
 ![](./docs/images/arch.png)
 
@@ -31,7 +44,4 @@ kubectl apply -f daemonset.yaml
 ```
 
 ## Deploy DLTPod
-To deploy a DLTPod in the DLCache system, you should have an image for your DL application, then write a YAML file to define the DLTPod. A DLTPod example for an image classification application is:
-![](./docs/images/imagenet.png)
-
-
+To deploy a DLTPod in the DLCache system, you should have an image for your DL application, then write a YAML file to define the DLTPod. A DLTPod example for an image classification application can be find [here](./experiments/exp1/imagenet/DLCache/ilsvrc.yaml).
